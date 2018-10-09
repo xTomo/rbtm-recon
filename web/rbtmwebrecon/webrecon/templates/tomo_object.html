@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block content %}
+    <h1>Tomo object</h1>
+    <div>
+        <h2>Object info</h2>
+        <pre>
+{{ tomo_object_str }}
+        </pre>
+    </div>
+
+    <div>
+        <ul>
+    {% if 'tomo_reports' in tomo_object['files']%}
+        
+        {% for tr in tomo_object['files']['tomo_reports'] %}
+        <li><a href="{{ tr }}">Recoonstruction report: {{tr.split('/')[-1]}}</a></li>    
+        {% endfor %}
+        
+    {% endif %}
+
+    {% if 'amira_hx' in tomo_object['files']%}
+        <li><a href="{{ tomo_object['files']['amira_hx'] }}">Amira HX file</a></li>    
+    {% endif %}
+
+    {% if 'amira_raw' in tomo_object['files']%}
+        <li><a href="{{ tomo_object['files']['amira_raw'] }}">Amira RAW file</a></li> 
+    {% endif %}
+
+    {% if 'tomo_rec' in tomo_object['files']%}
+        <li><a href="{{ tomo_object['files']['tomo_rec'] }}">HDF5 file with full reconstruction</a></li>  
+    {% endif %}
+        </ul>
+    </div>
+
+    {% if 'tomo_preview' in tomo_object['files']%}
+    <div>
+        <embed src={{ tomo_object['files']['tomo_preview'] }} width=1000 height=800/>
+    </div>
+    {% endif %}
+    <div>
+        <h2> Reconstruction status</h2>
+        {% if not tomo_object['tomo_status'] in ['waiting', 'reconstructing'] %}
+        <form action='/reconstruct/{{ tomo_object["_id"] }}' method="GET">
+            <button type='submit' name='rec_button'>Reconstruct it</button>
+        </form>
+        {% else %}
+        Reconstruction in process...
+        <form action='/reset/{{ tomo_object["_id"] }}' method="GET">
+            <button type='submit' name='reset_button'>Reset status</button>
+        </form>
+        {% endif %}
+    </div>
+{% endblock %}

@@ -1,0 +1,11 @@
+name: xweb
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - flask
+  - flask-restful
+  - gunicorn
+  - requests
+  - pip:
+    - pymongo

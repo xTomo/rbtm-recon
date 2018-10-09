@@ -1,0 +1,40 @@
+version: '2.3'
+services:
+  reconstructor:
+    build: rbtmrecon/
+    runtime: nvidia
+    volumes:
+      - /diskmnt/fast/robotom:/fast
+      - /diskmnt/a/makov/robotom/:/storage
+    restart: unless-stopped
+    external_links:
+      - rbtmstorage_server_1
+    # network_mode: bridge
+    networks:
+      - default
+      - rbtmstorage_default
+  web:
+    build: rbtmwebrecon/
+    volumes:
+      - /diskmnt/a/makov/robotom/:/webrbtm/webrecon/static/tomo_data
+    restart: unless-stopped
+    external_links:
+      - rbtmstorage_server_1
+    # network_mode: bridge
+    networks:
+      - default
+      - rbtmstorage_default
+    ports:
+      - "5550:5550"
+  database:
+    image: mongo:4.0
+    # ports:
+    #   - "27017:27017"
+    # network_mode: bridge
+    volumes:
+      - ./data/db:/data/db
+    restart: unless-stopped
+
+networks:
+  rbtmstorage_default:
+    external: true
