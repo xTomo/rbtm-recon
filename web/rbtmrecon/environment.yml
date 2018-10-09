@@ -1,0 +1,22 @@
+name: xrecon
+channels:
+  - conda-forge
+  - astra-toolbox/label/dev
+  - defaults
+dependencies:
+  - scipy
+  - py-opencv
+  - numpy
+  - matplotlib
+  - astra-toolbox
+  - tomopy
+  - scikit-image
+  - h5py
+  - ipyvolume
+  - jupyter
+  - ipython
+  - nbformat
+  - python=3.6
+  - pyqt
+  - pip:
+    - pymongo
