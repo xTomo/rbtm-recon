@@ -18,5 +18,6 @@ dependencies:
   - nbformat
   - python=3.6
   - pyqt
+  - tqdm
   - pip:
     - pymongo

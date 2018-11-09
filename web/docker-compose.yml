@@ -13,6 +13,7 @@ services:
     networks:
       - default
       - rbtmstorage_default
+    container_name: web_reconstructor_1
   web:
     build: rbtmwebrecon/
     volumes:
@@ -26,11 +27,13 @@ services:
       - rbtmstorage_default
     ports:
       - "5550:5550"
+    container_name: web_web_1
   database:
     image: mongo:4.0
     # ports:
     #   - "27017:27017"
     # network_mode: bridge
+    container_name: web_database_1
     volumes:
       - ./data/db:/data/db
     restart: unless-stopped

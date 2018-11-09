@@ -16,7 +16,7 @@ RUN DEBIAN_FRONTEND=noninteractive  apt-get update --fix-missing && apt-get inst
 
 WORKDIR /rbtm
 
-RUN wget --quiet https://repo.anaconda.com/archive/Anaconda3-5.3.0-Linux-x86_64.sh -O ~/anaconda.sh && \
+RUN wget --quiet https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/anaconda.sh && \
     /bin/bash ~/anaconda.sh -b -p /opt/conda && \
     rm ~/anaconda.sh && \
     ln -s /opt/conda/etc/profile.d/conda.sh /etc/profile.d/conda.sh && \
@@ -25,10 +25,10 @@ RUN wget --quiet https://repo.anaconda.com/archive/Anaconda3-5.3.0-Linux-x86_64.
 
 COPY environment.yml /rbtm/
 
-RUN /opt/conda/bin/conda env create -f environment.yml
+RUN /opt/conda/bin/conda env create -f environment.yml  && /opt/conda/bin/conda clean -y --all 
 
 COPY . /rbtm
-RUN echo "MONGODB_URI = 'mongodb://database:27017'" > /rbtm/recon/conf.py
+RUN echo "MONGODB_URI = 'mongodb://web_database_1:27017'" > /rbtm/recon/conf.py
 VOLUME /fast
 VOLUME /storage
 

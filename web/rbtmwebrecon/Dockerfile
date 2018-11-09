@@ -16,7 +16,7 @@ RUN DEBIAN_FRONTEND=noninteractive  apt-get update --fix-missing && apt-get inst
 
 WORKDIR /webrbtm
 
-RUN wget --quiet https://repo.anaconda.com/archive/Anaconda3-5.3.0-Linux-x86_64.sh -O ~/anaconda.sh && \
+RUN wget --quiet https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/anaconda.sh && \
     /bin/bash ~/anaconda.sh -b -p /opt/conda && \
     rm ~/anaconda.sh && \
     ln -s /opt/conda/etc/profile.d/conda.sh /etc/profile.d/conda.sh && \
@@ -25,10 +25,10 @@ RUN wget --quiet https://repo.anaconda.com/archive/Anaconda3-5.3.0-Linux-x86_64.
 
 COPY environment.yml /webrbtm/
 
-RUN /opt/conda/bin/conda env create -f environment.yml
+RUN /opt/conda/bin/conda env create -f environment.yml && /opt/conda/bin/conda clean -y --all 
 
 COPY . /webrbtm
-RUN echo "MONGODB_URI = 'mongodb://database:27017'" > /webrbtm/webrecon/conf.py
+RUN echo "MONGODB_URI = 'mongodb://web_database_1:27017'" > /webrbtm/webrecon/conf.py
 
 CMD bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xweb && cd /webrbtm/webrecon/ && gunicorn  -t 600 -w 8 -b 0.0.0.0:5550 web_recon:app"
 

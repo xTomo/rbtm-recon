@@ -1,5 +1,8 @@
 import matplotlib as mpl
-mpl.use("Agg")
+try:
+    mpl.use("Agg")
+except:
+    pass
 
 import logging
 
@@ -13,6 +16,7 @@ import json
 import requests
 import time
 
+from tqdm import tqdm_notebook
 
 # STORAGE_SERVER = "http://10.0.7.153:5006/"
 STORAGE_SERVER = "http://rbtmstorage_server_1:5006/"
@@ -27,56 +31,6 @@ else:
     # might be around one day
     from urllib import urlretrieve
     
-
-def log_progress(sequence, every=None, size=None):
-    from ipywidgets import IntProgress, HTML, VBox
-    from IPython.display import display
-
-    is_iterator = False
-    if size is None:
-        try:
-            size = len(sequence)
-        except TypeError:
-            is_iterator = True
-    if size is not None:
-        if every is None:
-            if size <= 200:
-                every = 1
-            else:
-                every = size / 200     # every 0.5%
-    else:
-        assert every is not None, 'sequence is iterator, set every'
-
-    if is_iterator:
-        progress = IntProgress(min=0, max=1, value=1)
-        progress.bar_style = 'info'
-    else:
-        progress = IntProgress(min=0, max=size, value=0)
-    label = HTML()
-    box = VBox(children=[label, progress])
-    display(box)
-
-    index = 0
-    try:
-        for index, record in enumerate(sequence, 1):
-            if index == 1 or index % every == 0:
-                if is_iterator:
-                    label.value = '{index} / ?'.format(index=index)
-                else:
-                    progress.value = index
-                    label.value = u'{index} / {size}'.format(
-                        index=index,
-                        size=size
-                    )
-            yield record
-    except:
-        progress.bar_style = 'danger'
-        raise
-    else:
-        progress.bar_style = 'success'
-        progress.value = index
-        label.value = str(index or '?')
-
 
 def mkdir_p(path):
     try:
@@ -192,7 +146,7 @@ def get_frame_group(data_file, group_name, mmap_file_dir):
         images = None
         file_number = 0
         angles = None
-        for k, v in log_progress(h5f[group_name].items()):
+        for k, v in tqdm_notebook(h5f[group_name].items()):
             if images is None:
                 mm_shape = (images_count, v.shape[1], v.shape[0])
                 images, is_images_exists = load_create_mm(

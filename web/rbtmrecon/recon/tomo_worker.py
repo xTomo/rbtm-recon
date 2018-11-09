@@ -13,7 +13,7 @@ import os
 
 from shutil import copy
 
-def _notebook_run(notebook = 'reconstructor-v.1.5.ipynb'):
+def _notebook_run(notebook = 'reconstructor-v.1.6.ipynb'):
     """Execute a notebook via nbconvert and collect output.
        :returns (parsed nb object, execution errors)
     """
@@ -62,8 +62,8 @@ def reconstruct(obj):
     for e in errors:
         pprint(e)
 
-    copy('reconstructor-v.1.5.ipynb', os.path.join(storage_dir, experiment_id, ''))
-    copy('reconstructor-v.1.5.html', os.path.join(storage_dir, experiment_id,''))
+    copy('reconstructor-v.1.6.ipynb', os.path.join(storage_dir, experiment_id, ''))
+    copy('reconstructor-v.1.6.html', os.path.join(storage_dir, experiment_id,''))
     copy('tomo.ini', os.path.join(storage_dir, experiment_id, ''))
 
     print('Finish reconstructing: {}'.format(obj_id))
