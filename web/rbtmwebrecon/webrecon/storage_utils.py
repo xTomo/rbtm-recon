@@ -46,7 +46,7 @@ def get_tomoobject_info(experiment_id):
 
 def get_tomoobjects_list():
     exp_info = json.dumps({'finished': True})
-    # print(exp_info)
+ 
     experiment = requests.post(STORAGE_SERVER + 'storage/experiments/get',
                                exp_info, timeout=1000)
     experiment_info = json.loads(experiment.content)
