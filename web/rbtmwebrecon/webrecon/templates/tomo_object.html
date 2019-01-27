@@ -13,7 +13,7 @@
     {% if 'tomo_reports' in tomo_object['files']%}
         
         {% for tr in tomo_object['files']['tomo_reports'] %}
-        <li><a href="{{ tr }}">Recoonstruction report: {{tr.split('/')[-1]}}</a></li>    
+        <li><a href="{{ tr }}">Reconstruction report: {{tr.split('/')[-1]}}</a></li>    
         {% endfor %}
         
     {% endif %}
