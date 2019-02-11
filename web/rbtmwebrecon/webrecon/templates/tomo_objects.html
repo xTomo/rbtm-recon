@@ -1,20 +1,32 @@
 {% extends "base.html" %}
 {% block content %}
-    <h1>Tomo objects list</h1>
-    <div>
-        <table class="table">
+<h1>Tomo objects list</h1>
+<div>
+    <table class="table">
         {% for tomo_object in tomo_objects %}
-        <tr>    
+        <tr>
             <td>
-                    <a href="{{  url_for('view_tomo_object',to_id=tomo_object['_id']) }}">
-                        {{ tomo_object['specimen'] }}
-                    </a>
+                <a href="{{  url_for('view_tomo_object',to_id=tomo_object['_id']) }}">
+                    {{ tomo_object['specimen'] }}
+                </a>
             </td>
             <td>
                 {{tomo_object['tomo_status']}}
             </td>
+            <td>
+                {% if not tomo_object['tomo_status'] in ['waiting', 'reconstructing'] %}
+                <form action='/reconstruct/{{ tomo_object["_id"] }}' method="GET">
+                    <button type='submit' name='rec_button'>Reconstruct it</button>
+                </form>
+                {% else %}
+                Reconstruction in process...
+                <form action='/reset/{{ tomo_object["_id"] }}' method="GET">
+                    <button type='submit' name='reset_button'>Reset status</button>
+                </form>
+                {% endif %}
+            </td>
         </tr>
         {% endfor %}
-        </table>
-    </div>
+    </table>
+</div>
 {% endblock %}
