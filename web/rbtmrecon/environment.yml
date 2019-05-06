@@ -19,5 +19,7 @@ dependencies:
   - python=3.6
   - pyqt
   - tqdm
+  - autopep8
+  - pylint
   - pip:
     - pymongo

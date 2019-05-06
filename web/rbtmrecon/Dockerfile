@@ -16,6 +16,8 @@ RUN DEBIAN_FRONTEND=noninteractive  apt-get update --fix-missing && apt-get inst
 
 WORKDIR /rbtm
 
+USER makov
+
 RUN wget --quiet https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/anaconda.sh && \
     /bin/bash ~/anaconda.sh -b -p /opt/conda && \
     rm ~/anaconda.sh && \
