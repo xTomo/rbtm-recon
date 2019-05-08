@@ -16,8 +16,6 @@ RUN DEBIAN_FRONTEND=noninteractive  apt-get update --fix-missing && apt-get inst
 
 WORKDIR /rbtm
 
-USER makov
-
 RUN wget --quiet https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/anaconda.sh && \
     /bin/bash ~/anaconda.sh -b -p /opt/conda && \
     rm ~/anaconda.sh && \
@@ -34,4 +32,6 @@ RUN echo "MONGODB_URI = 'mongodb://web_database_1:27017'" > /rbtm/recon/conf.py
 VOLUME /fast
 VOLUME /storage
 
+# RUN useradd -ms /bin/bash makov
+# USER makov
 CMD bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && cd /rbtm/recon/ && python tomo_worker.py"

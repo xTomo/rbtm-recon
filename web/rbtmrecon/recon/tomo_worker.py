@@ -1,4 +1,4 @@
-from .tomo_queue import get_rec_queue_next_obj, set_object_status, put_object_rec_queue, get_logs
+from tomo_queue import get_rec_queue_next_obj, set_object_status, put_object_rec_queue, get_logs
 from pprint import pprint
 
 import time

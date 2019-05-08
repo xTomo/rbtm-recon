@@ -21,5 +21,6 @@ dependencies:
   - tqdm
   - autopep8
   - pylint
+  - pip  
   - pip:
     - pymongo
