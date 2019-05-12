@@ -14,6 +14,7 @@ import os
 from shutil import copy
 
 NOTEBOOK_NAME = 'reconstructor-v-2.0d.ipynb'
+
 def _notebook_auto_run(notebook):
     """Execute a notebook via nbconvert and collect output.
        :returns (parsed nb object, execution errors)
@@ -26,7 +27,7 @@ def _notebook_auto_run(notebook):
     subprocess.check_call(args)
 
     args = ["jupyter", "nbconvert", "--to", "html",
-            os.path.join(notebook)]
+            notebook]
     subprocess.check_call(args)
 
     nb = nbformat.read(path, nbformat.current_nbformat)
@@ -55,19 +56,25 @@ def reconstruct(obj):
     to = obj_id
     tomo_info = tomotools.get_tomoobject_info(to)
     experiment_id = tomo_info['_id']
+
+    out_dir = os.path.join(storage_dir, experiment_id, '')
+    tomotools.mkdir_p(out_dir)
+
     print(tomo_info['specimen'])
     config = configparser.ConfigParser()
     config["SAMPLE"] = tomo_info
-    with open('tomo.ini', 'w') as cf:
+    with open(os.path.join(out_dir, 'tomo.ini'), 'w') as cf:
         config.write(cf)
 
-    nb, errors = _notebook_auto_run(NOTEBOOK_NAME)
+    copy(NOTEBOOK_NAME, out_dir)
+    copy('tomotools2.py', out_dir)
+
+    nb, errors = _notebook_auto_run(os.path.join(out_dir, NOTEBOOK_NAME))
     for e in errors:
         pprint(e)
 
-    copy(NOTEBOOK_NAME, os.path.join(storage_dir, experiment_id, ''))
-    copy(NOTEBOOK_NAME[:-5]+'html', os.path.join(storage_dir, experiment_id, ''))
-    copy('tomo.ini', os.path.join(storage_dir, experiment_id, ''))
+    # copy(os.path.join(out_dir, NOTEBOOK_NAME)[:-5]+'html', out_dir)
+    # copy('tomo.ini', out_dir)
 
     print('Finish reconstructing: {}'.format(obj_id))
     set_object_status(obj_id, 'done')
