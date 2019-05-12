@@ -32,6 +32,10 @@ RUN echo "MONGODB_URI = 'mongodb://web_database_1:27017'" > /rbtm/recon/conf.py
 VOLUME /fast
 VOLUME /storage
 
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+RUN groupadd -g ${GROUP_ID} makov &&\
+    useradd -l -u ${USER_ID} -g makov makov
 # RUN useradd -ms /bin/bash makov
-# USER makov
+USER makov
 CMD bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && cd /rbtm/recon/ && python tomo_worker.py"
