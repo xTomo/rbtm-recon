@@ -14,6 +14,23 @@ services:
       - default
       - rbtmstorage_default
     container_name: web_reconstructor_1
+  reconstructor-jupyter:
+    build: rbtmrecon/
+    command: bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && cd /rbtm/recon/ && jupyter notebook"
+    runtime: nvidia
+    volumes:
+      - /diskmnt/fast/robotom:/fast
+      - /diskmnt/a/makov/robotom/:/storage
+    restart: unless-stopped
+    external_links:
+      - rbtmstorage_server_1
+    # network_mode: bridge
+    networks:
+      - default
+      - rbtmstorage_default
+    ports:
+      - "5551:5551"
+    container_name: web_reconstructor_jupyter_1
   web:
     build: rbtmwebrecon/
     volumes:
