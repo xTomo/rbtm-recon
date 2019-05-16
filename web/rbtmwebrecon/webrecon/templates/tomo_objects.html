@@ -25,6 +25,15 @@
                 </form>
                 {% endif %}
             </td>
+            <td>
+                {% if not tomo_object['tomo_status'] in ['waiting', 'reconstructing'] %}
+                <a href="http://10.0.7.153:5551/tree/{{  tomo_object['_id'] }}">
+                    Manual reconstruction
+                </a>
+                {% else %}
+                Maual reconstruction not aviable during automatic reconstruction
+                {% endif %}
+            </td>
         </tr>
         {% endfor %}
     </table>
