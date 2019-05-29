@@ -1,9 +1,4 @@
 import sys
-# import matplotlib as mpl
-# try:
-#     mpl.use("Agg")
-# except:
-#     pass
 
 import logging
 
@@ -47,9 +42,9 @@ def mkdir_p(path):
 def get_experiment_hdf5(experiment_id, output_dir, storage_server=STORAGE_SERVER):
     data_file = os.path.join(output_dir, experiment_id + '.h5')
     logging.info('Output experiment HDF5 file: {}'.format(data_file))
-    
+
     # check if file exist and can be read
-    if os.path.isfile(data_file): 
+    if os.path.isfile(data_file):
         try:
             with h5py.File(data_file, 'r') as h5f:
                 pass
@@ -59,7 +54,7 @@ def get_experiment_hdf5(experiment_id, output_dir, storage_server=STORAGE_SERVER
             logging.info('File exests. Use local copy')
             return data_file
 
-    #download file
+    # download file
     hdf5_url = storage_server + 'storage/experiments/{}.h5'.format(
         experiment_id)
     logging.info('Downloading file: {}'.format(hdf5_url))
