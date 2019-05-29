@@ -47,31 +47,37 @@ def mkdir_p(path):
 def get_experiment_hdf5(experiment_id, output_dir, storage_server=STORAGE_SERVER):
     data_file = os.path.join(output_dir, experiment_id + '.h5')
     logging.info('Output experiment HDF5 file: {}'.format(data_file))
-    if not os.path.isfile(data_file):
-        hdf5_url = storage_server + 'storage/experiments/{}.h5'.format(
-            experiment_id)
-        logging.info('Downloading file: {}'.format(hdf5_url))
+    
+    # check if file exist and can be read
+    if os.path.isfile(data_file): 
+        try:
+            with h5py.File(data_file, 'r') as h5f:
+                pass
+        except:
+            pass
+        else:
+            logging.info('File exests. Use local copy')
+            return data_file
 
-        remaining_download_tries = 5
+    #download file
+    hdf5_url = storage_server + 'storage/experiments/{}.h5'.format(
+        experiment_id)
+    logging.info('Downloading file: {}'.format(hdf5_url))
 
-        while remaining_download_tries > 0:
-            try:
-                urlretrieve(hdf5_url, filename=data_file)
-                logging.info('Successfully downloaded: {}'.format(hdf5_url))
-                time.sleep(0.1)
-            except Exception as e:
-                logging.warn("error downloading {}  on trial no {}: {}".format(
-                    hdf5_url, 6 - remaining_download_tries, e))
-                remaining_download_tries = remaining_download_tries - 1
-                continue
-            else:
-                break
-        # try:
-        #     urlretrieve(hdf5_url, filename=data_file)
-        # except Exception as e:
-        #     logging.warn("error downloading {}: {}".format(hdf5_url, e))
-    else:
-        logging.info('File exests. Use local copy')
+    remaining_download_tries = 5
+
+    while remaining_download_tries > 0:
+        try:
+            urlretrieve(hdf5_url, filename=data_file)
+            logging.info('Successfully downloaded: {}'.format(hdf5_url))
+            time.sleep(0.1)
+        except Exception as e:
+            logging.warn("error downloading {}  on trial no {}: {}".format(
+                hdf5_url, 6 - remaining_download_tries, e))
+            remaining_download_tries = remaining_download_tries - 1
+            continue
+        else:
+            break
 
     return data_file
 
