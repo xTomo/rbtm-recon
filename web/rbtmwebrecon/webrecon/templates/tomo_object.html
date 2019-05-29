@@ -34,7 +34,7 @@
 
     {% if 'tomo_preview' in tomo_object['files']%}
     <div>
-        <embed src={{ tomo_object['files']['tomo_preview'] }} width=1000 height=800/>
+        <embed src="{{ tomo_object['files']['tomo_preview'] }}" width=1000 height=800/>
     </div>
     {% endif %}
     <div>
