@@ -44,6 +44,19 @@ def reconstruct(obj):
     set_object_status(obj_id, 'reconstructing')
     print('Start reconstructing: {}'.format(obj_id))
 
+    out_dir = newmethod318(obj_id, storage_dir)
+
+    nb, errors = _notebook_auto_run(os.path.join(out_dir, NOTEBOOK_NAME))
+    for e in errors:
+        pprint(e)
+
+    # copy(os.path.join(out_dir, NOTEBOOK_NAME)[:-5]+'html', out_dir)
+    # copy('tomo.ini', out_dir)
+
+    print('Finish reconstructing: {}'.format(obj_id))
+    set_object_status(obj_id, 'done')
+
+def newmethod318(obj_id, storage_dir):
     to = obj_id
     tomo_info = tomotools.get_tomoobject_info(to)
     experiment_id = tomo_info['_id']
@@ -59,16 +72,7 @@ def reconstruct(obj):
 
     copy(NOTEBOOK_NAME, out_dir)
     copy('tomotools2.py', out_dir)
-
-    nb, errors = _notebook_auto_run(os.path.join(out_dir, NOTEBOOK_NAME))
-    for e in errors:
-        pprint(e)
-
-    # copy(os.path.join(out_dir, NOTEBOOK_NAME)[:-5]+'html', out_dir)
-    # copy('tomo.ini', out_dir)
-
-    print('Finish reconstructing: {}'.format(obj_id))
-    set_object_status(obj_id, 'done')
+    return out_dir
 
 
 if __name__ == "__main__":
