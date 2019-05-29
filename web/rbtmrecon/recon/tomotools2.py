@@ -91,32 +91,6 @@ def get_tomoobject_info(experiment_id, storage_server=STORAGE_SERVER):
     return experiment_info
 
 
-# def show_statistics(data_file):
-#     """
-#     Load data frames from hdf5 file and show intesity
-#     """
-#     plt.figure(figsize=(7, 5))
-#     for image_type in ['empty', 'dark', 'data']:
-#         frame_count = len(h5py.File(data_file, 'r')[image_type])
-#         logging.info('Frames count: {}'.format(frame_count))
-#         s = []
-#         with h5py.File(data_file, 'r') as h5f:
-#             for k, v in log_progress(h5f[image_type].items()):
-#                 s.append([int(k), np.sum(np.log(v.value + 1))])
-#                 del v
-
-#         y = [d[1] for d in s]
-#         x = [d[0] for d in s]
-
-#         plt.plot(x, y, 'o', label=image_type)
-#         # plt.gca().set_ylim([np.min(y)*0.9,np.max(y)*1.05])
-#         plt.grid(True)
-#     plt.ylabel('Frame number')
-#     plt.ylabel('Total intensity')
-#     plt.legend(loc=0)
-#     plt.show()
-
-
 def get_mm_shape(data_file):
     if os.path.exists(data_file + '.size'):
         res = np.loadtxt(data_file + '.size').astype('uint16')
