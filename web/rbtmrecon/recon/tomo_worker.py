@@ -37,15 +37,6 @@ def _notebook_auto_run(notebook):
     return nb, errors
 
 
-def reconstruct_fake(obj):
-    obj_id = obj['obj_id']
-    set_object_status(obj_id, 'reconstructing')
-    print('Start reconstructing: {}'.format(obj_id))
-    time.sleep(1)
-    print('Finish reconstructing: {}'.format(obj_id))
-    set_object_status(obj_id, 'done')
-
-
 def reconstruct(obj):
     # storage_dir = '/diskmnt/a/makov/robotom/'
     storage_dir = '/storage'
