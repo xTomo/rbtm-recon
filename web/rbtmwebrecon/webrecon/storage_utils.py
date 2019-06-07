@@ -15,16 +15,16 @@ def get_reconstructed_files_list(experiment_id):
         return res
     
     if os.path.exists(os.path.join(app_tomo_data,'tomo.html')):
-        res['tomo_preview'] =  '/static/tomo_data/' + experiment_id +'/tomo.html'
+        res['tomo_preview'] =  'static/tomo_data/' + experiment_id +'/tomo.html'
     
     if os.path.exists(os.path.join(app_tomo_data,'tomo.hx')):
-        res['amira_hx'] =  '/static/tomo_data/' + experiment_id +'/tomo.hx'
+        res['amira_hx'] =  'static/tomo_data/' + experiment_id +'/tomo.hx'
 
     if os.path.exists(os.path.join(app_tomo_data,'amira.raw')):
-        res['amira_raw'] =  '/static/tomo_data/' + experiment_id +'/amira.raw'
+        res['amira_raw'] =  'static/tomo_data/' + experiment_id +'/amira.raw'
     
     if os.path.exists(os.path.join(app_tomo_data,'tomo_rec.h5')):
-        res['tomo_rec'] =  '/static/tomo_data/' + experiment_id +'/tomo_rec.h5'
+        res['tomo_rec'] =  'static/tomo_data/' + experiment_id +'/tomo_rec.h5'
 
     tomo_reports = glob.glob(os.path.join(app_tomo_data,'reconstructor-v*.html'))
 
