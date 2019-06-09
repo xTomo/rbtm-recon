@@ -3,3 +3,4 @@
 *.pyc
 __pycahe__
 .ipynb_checkpoints
+.vscode
