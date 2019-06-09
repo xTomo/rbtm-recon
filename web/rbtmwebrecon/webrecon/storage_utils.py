@@ -29,7 +29,7 @@ def get_reconstructed_files_list(experiment_id):
     tomo_reports = glob.glob(os.path.join(app_tomo_data,'reconstructor-v*.html'))
 
     if len(tomo_reports)>0:
-       res['tomo_reports'] = [tr[len(app_root):] for tr in tomo_reports]
+       res['tomo_reports'] = ['.'+tr[len(app_root):] for tr in tomo_reports]
 
     return res
 
