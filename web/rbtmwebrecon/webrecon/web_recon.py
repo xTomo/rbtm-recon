@@ -8,6 +8,12 @@ import storage_utils
 app = Flask(__name__)
 api = Api(app)
 
+def is_local_ip(ip):
+    if ip.startswith('10.'):
+        return True
+    else:
+        return False
+
 class TomoObjects(Resource):
     def get(self):
         return storage_utils.get_tomoobjects_list()
@@ -16,9 +22,13 @@ api.add_resource(TomoObjects, '/tomo_objects')
 
 class TomoObject(Resource):
     def get(self,to_id):
-        return storage_utils.get_tomoobject_info(to_id)
+        return storage_utils.get_tomoobject_info(to_id, is_local_ip(request.remote_addr))
 
 api.add_resource(TomoObject,'/tomo_object/<to_id>')
+
+# @app.route('/ip')
+# def get_ip():
+#     return 'IP: ' + request.remote_addr + 'is local: ' + str(is_local_ip(request.remote_addr))
 
 @app.route('/')
 @app.route('/view/tomo_objects')
