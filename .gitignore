@@ -4,3 +4,4 @@
 __pycahe__
 .ipynb_checkpoints
 .vscode
+web/data/*
