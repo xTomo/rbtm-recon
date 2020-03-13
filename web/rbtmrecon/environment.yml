@@ -16,12 +16,12 @@ dependencies:
   - jupyter
   - ipython
   - nbformat
-  - python=3.6
+  - python=3
   - pyqt
   - tqdm
   - autopep8
   - pylint
-  - juptext
+  - jupytext
   - pip  
   - pip:
     - pymongo
