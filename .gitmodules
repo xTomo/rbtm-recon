@@ -1,0 +1,3 @@
+[submodule "web/rbtmrecon/recon/tomo"]
+	path = web/rbtmrecon/recon/tomo
+	url = https://github.com/buzmakov/tomo.git
