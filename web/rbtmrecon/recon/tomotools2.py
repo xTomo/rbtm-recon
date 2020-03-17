@@ -1,32 +1,18 @@
-import sys
-
-import logging
-
 import errno
+import json
+import logging
 import os
+import shutil
+import time
+from urllib.request import urlretrieve
+
 import h5py
 import numpy as np
-import pylab as plt
-import cv2
-import json
 import requests
-import time
-
-import dask.array as da
-
 from tqdm import tqdm_notebook
 
 # STORAGE_SERVER = "http://10.0.7.153:5006/"
 STORAGE_SERVER = "http://rbtmstorage_server_1:5006/"
-
-
-if sys.version_info[0] >= 3:
-    from urllib.request import urlretrieve
-else:
-    # Not Python 3 - today, it is most likely to be Python 2
-    # But note that this might need an update when Python 4
-    # might be around one day
-    from urllib import urlretrieve
 
 
 def mkdir_p(path):
@@ -39,7 +25,7 @@ def mkdir_p(path):
             raise
 
 
-def get_experiment_hdf5(experiment_id, output_dir, storage_server=STORAGE_SERVER):
+def get_experiment_hdf5(experiment_id, output_dir, experiment_files_dir=None, storage_server=STORAGE_SERVER):
     data_file = os.path.join(output_dir, experiment_id + '.h5')
     logging.info('Output experiment HDF5 file: {}'.format(data_file))
 
@@ -48,37 +34,42 @@ def get_experiment_hdf5(experiment_id, output_dir, storage_server=STORAGE_SERVER
         try:
             with h5py.File(data_file, 'r') as h5f:
                 pass
-        except:
-            pass
+        except Exception as e:
+            raise e
         else:
-            logging.info('File exests. Use local copy')
+            logging.info('File exists. Use local copy')
             return data_file
 
-    # download file
-    hdf5_url = storage_server + 'storage/experiments/{}.h5'.format(
-        experiment_id)
-    logging.info('Downloading file: {}'.format(hdf5_url))
+    if experiment_files_dir is None:
+        # download file
+        hdf5_url = storage_server + 'storage/experiments/{}.h5'.format(
+            experiment_id)
+        logging.info('Downloading file: {}'.format(hdf5_url))
 
-    remaining_download_tries = 5
+        remaining_download_tries = 5
 
-    while remaining_download_tries > 0:
-        try:
-            urlretrieve(hdf5_url, filename=data_file)
-            logging.info('Successfully downloaded: {}'.format(hdf5_url))
-            time.sleep(0.1)
-        except Exception as e:
-            logging.warn("error downloading {}  on trial no {}: {}".format(
-                hdf5_url, 6 - remaining_download_tries, e))
-            remaining_download_tries = remaining_download_tries - 1
-            continue
-        else:
-            break
+        while remaining_download_tries > 0:
+            try:
+                urlretrieve(hdf5_url, filename=data_file)
+                logging.info('Successfully downloaded: {}'.format(hdf5_url))
+                time.sleep(0.1)
+            except Exception as e:
+                logging.warning("error downloading {}  on trial no {}: {}".format(
+                    hdf5_url, 6 - remaining_download_tries, e))
+                remaining_download_tries = remaining_download_tries - 1
+                continue
+            else:
+                break
+    else:
+        # copy local file
+        src_file = os.path.join(experiment_files_dir, experiment_id + '.h5')
+        logging.info('Copyng local  file: {}'.format(src_file))
+        shutil.copy(src_file, data_file)
 
     return data_file
 
 
 def get_tomoobject_info(experiment_id, storage_server=STORAGE_SERVER):
-
     exp_info = json.dumps(({"_id": experiment_id}))
     experiment = requests.post(storage_server + 'storage/experiments/get',
                                exp_info, timeout=1000)
@@ -92,7 +83,7 @@ def get_mm_shape(data_file):
         if res.ndim > 0:
             return tuple(res)
         else:
-            return (res,)
+            return res,
     else:
         return None
 
@@ -105,18 +96,18 @@ def load_create_mm(data_file, shape, dtype, force_create=False):
         if (shape is None) and (mm_shape is not None):
             res = np.memmap(data_file, dtype=dtype, mode='r+', shape=mm_shape)
             logging.info('Loading existing file: {}'.format(data_file))
-            return (res, True)
+            return res, True
         elif (np.array(shape) == mm_shape).all():
             res = np.memmap(data_file, dtype=dtype, mode='r+', shape=shape)
             logging.info('Loading existing file: {}'.format(data_file))
-            return (res, True)
+            return res, True
         else:
             logging.info('Shape missmatch.')
 
     logging.info('Creating new file: {}'.format(data_file))
     res = np.memmap(data_file, dtype=dtype, mode='w+', shape=shape)
     np.savetxt(data_file + '.size', res.shape, fmt='%5u')
-    return(res, False)
+    return res, False
 
 
 def get_frame_group(data_file, group_name, mmap_file_dir):

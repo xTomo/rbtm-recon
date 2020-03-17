@@ -7,5 +7,6 @@ dependencies:
   - flask-restful
   - gunicorn
   - requests
+  - pip
   - pip:
     - pymongo

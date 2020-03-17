@@ -2,10 +2,11 @@ version: '2.3'
 services:
   reconstructor:
     build: rbtmrecon/
-    runtime: nvidia
+#    runtime: nvidia
     volumes:
       - /diskmnt/fast/robotom:/fast
       - /diskmnt/a/makov/robotom/:/storage
+      - /home/robotom/rbtm_data/rbtm_storage/data/experiments:/exp_src:ro
     restart: unless-stopped
     external_links:
       - rbtmstorage_server_1
@@ -17,10 +18,11 @@ services:
   reconstructor-jupyter:
     build: rbtmrecon/
     command: bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && cd /rbtm/recon/ && jupyter notebook"
-    runtime: nvidia
+#    runtime: nvidia
     volumes:
       - /diskmnt/fast/robotom:/fast
       - /diskmnt/a/makov/robotom/:/storage
+      - /home/robotom/rbtm_data/rbtm_storage/data/experiments:/exp_src:ro
     restart: unless-stopped
     external_links:
       - rbtmstorage_server_1

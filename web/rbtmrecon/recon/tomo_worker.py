@@ -1,19 +1,17 @@
-from tomo_queue import get_rec_queue_next_obj, set_object_status, put_object_rec_queue, get_logs
-from pprint import pprint
-
-import time
-
-import json
-import requests
-import tomotools2 as tomotools
 import configparser
-import subprocess
-import nbformat
 import os
-
+import subprocess
+import time
+from pprint import pprint
 from shutil import copy
 
-NOTEBOOK_NAME = 'reconstructor-v-2.0d.ipynb'
+import nbformat
+
+import tomotools2 as tomotools
+from tomo_queue import get_rec_queue_next_obj, set_object_status
+
+NOTEBOOK_NAME = 'reconstructor-v-2.1a.ipynb'
+
 
 def _notebook_auto_run(notebook):
     """Execute a notebook via nbconvert and collect output.
@@ -51,6 +49,7 @@ def reconstruct(obj):
 
     print('Finish reconstructing: {}'.format(obj_id))
     set_object_status(obj_id, 'done')
+
 
 def copy_python_files(obj_id, storage_dir):
     to = obj_id
