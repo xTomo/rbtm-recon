@@ -31,12 +31,16 @@
     {% endif %}
         </ul>
     </div>
-
-    {% if 'tomo_preview' in tomo_object['files']%}
     <div>
-        <embed src="{{ tomo_object['files']['tomo_preview'] }}" width=1000 height=800/>
+        <a href="http://10.0.7.153:5551/tree/{{  tomo_object['_id'] }}">
+            Manual reconstruction
+        </a>
     </div>
-    {% endif %}
+{#    {% if 'tomo_preview' in tomo_object['files']%}#}
+{#    <div>#}
+{#        <embed src="{{ tomo_object['files']['tomo_preview'] }}" width=1000 height=800/>#}
+{#    </div>#}
+{#    {% endif %}#}
     <div>
         <h2> Reconstruction status</h2>
         {% if not tomo_object['tomo_status'] in ['waiting', 'reconstructing'] %}
