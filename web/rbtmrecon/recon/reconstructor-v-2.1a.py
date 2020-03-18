@@ -449,7 +449,7 @@ def group_data(data_images, data_angles, mmap_file_dir):
         shape=(len(uniq_angles), data_images.shape[1], data_images.shape[2]),
         dtype='float32', force_create=True)
 
-    for ua_id, ua in tqdm_notebook(list(enumerate(uniq_angles))):
+    for ua_id, ua in tqdm(list(enumerate(uniq_angles))):
         indexes = np.argwhere(data_angles == uniq_angles[ua_id])
         if len(indexes) > 1:
             tmp_images = data_images[indexes]
@@ -543,7 +543,7 @@ plt.colorbar(orientation='horizontal')
 # TODO: remove rings
 
 # %%
-for s in tqdm_notebook(range(sinogram.shape[1])):
+for s in tqdm(range(sinogram.shape[1])):
     sinogram[:, s, :] = my_rc(sinogram[:, s, :], rc_level)
 
 # %%
@@ -823,7 +823,7 @@ cbar = plt.colorbar()
 cbar.set_label('Поглощение, усл.ед.', rotation=90)
 
 # %%
-t = np.percentile(sinogram, 90, axis=1)
+# t = np.percentile(sinogram, 90, axis=1)
 # t1 = t[np.argsort(uniq_angles)]
 
 # %%
@@ -1035,7 +1035,7 @@ test_rec(s1, uniq_angles)
 test_rec(s2, uniq_angles)
 
 # %%
-del data_0_orig, data_180_orig, data_images_good, data_images_masked
+del data_0_orig, data_180_orig, data_images_good, data_images, data_images_crop
 del sinogram, sinogram_fixed, uniq_angles, uniq_angles_orig, uniq_data_images
 
 # %%
@@ -1089,7 +1089,7 @@ plt.show()
 # plt.show()
 
 # plt.figure(figsize=(7,5))
-# plt.plot(uniq_angles[t_angles]*np.pi/180, 
+# plt.plot(uniq_angles[t_angles]*np.pi/180,
 #          np.power(s4[t_angles],bh_corr).sum(axis=1)/np.sum(np.power(s4[t_angles],bh_corr))*np.sum(s4[t_angles]),
 #         '*')
 # plt.grid()
@@ -1114,7 +1114,7 @@ plt.show()
 t = time.time()
 print(s1.shape)
 angles = np.array(uniq_angles) * np.pi / 180
-for i in tqdm_notebook(range(0, s1.shape[-1])):
+for i in tqdm(range(0, s1.shape[-1])):
     sino = s1[:, :, i].copy()
     sino[sino < 0] = 0
     sino = np.power(sino, bh_corr)  # BH!
