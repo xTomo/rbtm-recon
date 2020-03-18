@@ -1,13 +1,17 @@
-version: '2.3'
+version: '2.4'
 services:
+  test:
+    runtime: nvidia
+    image: "nvidia/cuda:10.1-runtime"
+    command: "nvidia-smi"
   reconstructor:
+    runtime: nvidia
     build: rbtmrecon/
-#    runtime: nvidia
     volumes:
       - /diskmnt/fast/robotom:/fast
       - /diskmnt/a/makov/robotom/:/storage
       - /home/robotom/rbtm_data/rbtm_storage/data/experiments:/exp_src:ro
-    restart: unless-stopped
+#    restart: unless-stopped
     external_links:
       - rbtmstorage_server_1
     # network_mode: bridge
@@ -16,6 +20,7 @@ services:
       - rbtmstorage_default
     container_name: web_reconstructor_1
   reconstructor-jupyter:
+    runtime: nvidia
     build: rbtmrecon/
     command: bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && cd /rbtm/recon/ && jupyter notebook"
 #    runtime: nvidia
@@ -23,7 +28,7 @@ services:
       - /diskmnt/fast/robotom:/fast
       - /diskmnt/a/makov/robotom/:/storage
       - /home/robotom/rbtm_data/rbtm_storage/data/experiments:/exp_src:ro
-    restart: unless-stopped
+#    restart: unless-stopped
     external_links:
       - rbtmstorage_server_1
     # network_mode: bridge
@@ -37,7 +42,7 @@ services:
     build: rbtmwebrecon/
     volumes:
       - /diskmnt/a/makov/robotom/:/webrbtm/webrecon/static/tomo_data
-    restart: unless-stopped
+#    restart: unless-stopped
     external_links:
       - rbtmstorage_server_1
     # network_mode: bridge
@@ -55,7 +60,7 @@ services:
     container_name: web_database_1
     volumes:
       - ./data/db:/data/db
-    restart: unless-stopped
+#    restart: unless-stopped
 
 networks:
   rbtmstorage_default:

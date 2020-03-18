@@ -7,8 +7,9 @@ client = MongoClient(MONGODB_URI)
 db = client['autotom']
 to = db['tomoobjects']
 
-def put_object_rec_queue(obj_id):
+def put_object_rec_queue(obj_id, action='reconsruct'):
     to.insert_one({'obj_id': obj_id,
+                   'action': action,
                    'status': 'waiting',
                    'date': datetime.now()}
                    )

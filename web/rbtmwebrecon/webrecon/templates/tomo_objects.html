@@ -27,6 +27,18 @@
             </td>
             <td>
                 {% if not tomo_object['tomo_status'] in ['waiting', 'reconstructing'] %}
+                <form action='/copyfiles/{{ tomo_object["_id"] }}' method="GET">
+                    <button type='submit' name='copy_button'>Copy files</button>
+                </form>
+                {% else %}
+                Reconstruction in process...
+                <form action='/reset/{{ tomo_object["_id"] }}' method="GET">
+                    <button type='submit' name='reset_button'>Reset status</button>
+                </form>
+                {% endif %}
+            </td>
+            <td>
+                {% if not tomo_object['tomo_status'] in ['waiting', 'reconstructing'] %}
                 <a href="http://10.0.7.153:5551/tree/{{  tomo_object['_id'] }}">
                     Manual reconstruction
                 </a>

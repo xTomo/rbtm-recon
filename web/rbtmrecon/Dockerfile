@@ -1,4 +1,4 @@
-FROM nvidia/cuda:10.2-runtime
+FROM nvidia/cuda:10.1-runtime
 
 MAINTAINER Alexey Buzmakov <buzmakov@gmail.com>
 

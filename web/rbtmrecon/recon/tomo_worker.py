@@ -50,6 +50,16 @@ def reconstruct(obj):
     print('Finish reconstructing: {}'.format(obj_id))
     set_object_status(obj_id, 'done')
 
+def copyfiles(obj):
+    storage_dir = '/storage'
+    obj_id = obj['obj_id']
+    set_object_status(obj_id, 'reconstructing')
+    print('Coping files: {}'.format(obj_id))
+
+    out_dir = copy_python_files(obj_id, storage_dir)
+
+    print('Finish coping: {}'.format(obj_id))
+    set_object_status(obj_id, 'done')
 
 def copy_python_files(obj_id, storage_dir):
     to = obj_id
@@ -75,6 +85,11 @@ if __name__ == "__main__":
         # print('waiting objects')
         rec_obj = get_rec_queue_next_obj()
         if rec_obj is not None:
-            reconstruct(rec_obj)
+            if rec_obj['action'] == 'reconsruct':
+                reconstruct(rec_obj)
+            elif rec_obj['action'] == 'copyfiles':
+                copyfiles(rec_obj)
+            else:
+                raise ValueError('Unknown action {}'.format(rec_obj['action']))
         else:
             time.sleep(10)

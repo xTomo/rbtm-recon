@@ -1,6 +1,5 @@
-from datetime import datetime
-
 from pymongo import MongoClient, DESCENDING
+from datetime import datetime
 
 from conf import MONGODB_URI
 
@@ -10,8 +9,9 @@ db = client['autotom']
 to = db['tomoobjects']
 
 
-def put_object_rec_queue(obj_id):
+def put_object_rec_queue(obj_id, action='reconsruct'):
     to.insert_one({'obj_id': obj_id,
+                   'action': action,
                    'status': 'waiting',
                    'date': datetime.now()}
                   )
@@ -21,7 +21,7 @@ def get_object(obj_id):
     try:
         obj = to.find({'obj_id': obj_id}).sort('date', DESCENDING)[0]
         return obj
-    except Exception:  # TODO: return error
+    except:
         return None
 
 
@@ -35,7 +35,7 @@ def set_object_status(obj_id, status):
 def get_object_status(obj_id):
     obj = get_object(obj_id)
     if obj is None:
-        return 'object not found'
+        return 'hm... reconstruction not found...'
     else:
         return obj['status']
 

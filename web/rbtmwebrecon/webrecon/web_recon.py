@@ -51,7 +51,12 @@ def view_tomo_object(to_id):
 
 @app.route('/reconstruct/<to_id>')
 def reconstruct(to_id):
-    tomo_queue.put_object_rec_queue(to_id)
+    tomo_queue.put_object_rec_queue(to_id, 'reconstruct')
+    return redirect('/view/tomo_object/'+to_id)
+
+@app.route('/copyfiles/<to_id>')
+def copyfiles(to_id):
+    tomo_queue.put_object_rec_queue(to_id, 'copyfiles')
     return redirect('/view/tomo_object/'+to_id)
 
 @app.route('/reset/<to_id>')

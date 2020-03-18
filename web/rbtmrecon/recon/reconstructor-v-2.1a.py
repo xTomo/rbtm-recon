@@ -17,7 +17,7 @@
 # %% [markdown]
 # # Changelog:
 #
-# * 2.1а (2020.09.20)
+# * 2.1а (2020.03.18)
 #  - Add local files loading
 #  - Improving poriosity support
 #  - ENH: 180 deg search
