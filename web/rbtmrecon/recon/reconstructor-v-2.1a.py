@@ -14,51 +14,8 @@
 #     name: python3
 # ---
 
-# %% [markdown]
-# # Changelog:
-#
-# * 2.1а (2020.03.18)
-#  - Add local files loading
-#  - Improving poriosity support
-#  - ENH: 180 deg search
-# * 2.0d (2019.04.17-2019.05.06)
-#  - Adding dask support
-#  - Many code refactorings for semiautomatic runs
-#  - Allow manual borders selections
-# * 2.0.b1 (2019.04.03)
-#  - bug fixing
-#  - try remove bad frames
-# * 1.6.2 (2019.02.11)
-#  - fixing object detection
-# * 1.6.1 (2018.11.19)
-#  - exdend borbers range (mean to percentile) 
-# * 1.6 (2018.11.08)
-#  - change algorithm of object detection with gaussian fitting
-#  - add y-clipping to remove sample holder
-#  - change algorithm of axis searching
-#  - change hdf5 compression to lzf
-#  - changing 3d visualisation
-#  - replace log_process to tqdm
-# * 1.5 (2018.09.11)
-#  - saving full tomography volume
-#  - deleting temporary files as soon as possible
-#  - change thresshold in object detection (1/6 -> 1/5) 
-# * 1.4 (2018.08.23)
-#  - Fix: correct resized volume serialization (smooth instead cherry picking)
-#  - New: 3D visualisation
-#  - Fix: sinogram shifting aftee rotation axis fix
-#  - Update: Searching rotation axis
-# * 1.3 (2018.07.03)
-#  - Update graphics
-#  - Update axis search algorithms
-# * 1.2 (2018.06.04)
-#  - Change threshold
-# * 1.1 (2018.03.14) 
-#  - Add NLM filtering
-# * 1.0 (2017.02.01) 
-#  - First automation version.
-
 # %%
+# #jupytext --to notebook reconstructor-v-2.1a.py
 # manual mode
 # #%matplotlib notebook
 
@@ -286,155 +243,6 @@ for i in tqdm(range(len(good_frames))):
 
 data_angles = data_angles[good_frames]
 
-# %% [markdown]
-# # Searching object borders
-
-# %%
-# data_mean = np.mean(data_images_good, axis=0)
-# data_mean = cv2.medianBlur(data_mean, 3)
-# data_mean[data_mean <= 1] = 1
-
-# %%
-# def gauss(x, *p):
-#     A, mu, sigma, C = p
-#     return C + A * np.exp(-(x - mu) ** 2 / (2. * sigma ** 2))
-
-
-# def get_gauss_fit(thr):
-#     k = np.percentile(empty_beam / data_mean, thr, axis=-1)
-#     p0 = [1., len(k) / 2., len(k) / 4., 0.]
-
-#     coeff, var_matrix = scipy.optimize.curve_fit(gauss, range(len(k)), k, p0=p0)
-
-#     A, mu, sigma, C = coeff
-#     sigma = np.abs(sigma)
-#     return A, mu, sigma, C, k
-
-
-# def get_x_limits():
-#     A, mu, sigma, C, k = get_gauss_fit(80)
-
-#     # res = [get_gauss_fit(k) for k in range(0,100,10)]
-#     x_min = np.max([200, mu - 2 * sigma - 400]).astype('int32')
-#     x_max = np.min([len(k) - 200, mu + 2 * sigma + 400]).astype('int32')
-
-#     plt.figure(figsize=(5, 5))
-#     plt.plot(k)
-#     plt.plot(gauss(np.arange(len(k)), A, mu, sigma, C))
-#     plt.vlines([x_min, x_max], k.min(), k.max())
-#     plt.grid()
-#     return x_min, x_max
-
-
-# x_min, x_max = get_x_limits()
-
-# %%
-# def get_y_limits():
-#     k = np.percentile((empty_beam / data_mean)[x_min:x_max, :], 90, axis=0)
-
-#     k = scipy.signal.medfilt(k, 5)
-
-#     thr_max = np.percentile(k, 5)
-#     thr_min = np.percentile(k, 5)
-#     y_max = np.max(np.argwhere(k > thr_max)) + 100
-#     y_min = np.min(np.argwhere(k > thr_min)) - 100
-#     y_min = np.max([0, y_min])
-#     y_max = np.min([len(k), y_max])
-
-#     plt.figure(figsize=(5, 5))
-#     plt.plot(k)
-#     plt.hlines([thr_min, thr_max], 0, len(k))
-#     plt.vlines([y_min, y_max], min(k), max(k))
-#     plt.grid()
-
-#     return y_min, y_max
-
-
-# y_min, y_max = get_y_limits()
-
-# %%
-# print(x_min, x_max, y_min, y_max)
-# print(x_max - x_min, y_max - y_min)
-
-# %% [markdown]
-# # ЗДЕСЬ РУКАМИ ВЫСТАВЛЯТЬ ГРАНИЦЫ
-
-# %%
-# plt.gray()
-# plt.figure(figsize=(8, 8))
-# ax = plt.imshow(data_mean.T, vmin=0, interpolation='bilinear')
-# plt.axis('tight')
-# plt.hlines([y_min, y_max], x_min, x_max, 'r')
-# plt.vlines([x_min, x_max], y_min, y_max, 'g')
-# plt.xlabel('X')
-# plt.ylabel('Y')
-# plt.show()
-
-# %%
-# xmin, xmax = np.sort(ax.axes.get_xlim())
-# ymin, ymax = np.sort(ax.axes.get_ylim())
-
-# xmin = np.max([0, int(np.floor(xmin))])
-# xmax = int(np.ceil(xmax))
-# ymin = np.max([0, int(np.floor(ymin))])
-# ymax = int(np.ceil(ymax))
-
-# xmin = x_min if xmin == 0 else xmin
-# xmax = x_max if xmax == data_mean.shape[0] else xmax
-# ymin = y_min if ymin == 0 else ymin
-# ymax = y_max if ymax == data_mean.shape[1] else ymax
-
-# # ISERT BORDERS MANUALY HERE
-
-# # xmin =
-# # xmax =
-# # ymin =
-# # ymax =
-
-
-# print(xmin, xmax, ymin, ymax)
-# print(xmax - xmin, ymax - ymin)
-
-
-# # TODO: add save cut parameters to config file
-
-# %%
-# def cut_data_images(data_images, empty_beam, data_angles, xmin, xmax, ymin, ymax):
-#     data_images_masked, _ = tomotools.load_create_mm(os.path.join(tmp_dir, 'data_images_masked.tmp'),
-#                                                      shape=(data_angles.shape[0],
-#                                                             xmax - xmin,
-#                                                             ymax - ymin), dtype='float32',
-#                                                      force_create=True)
-
-#     empty_masked, _ = tomotools.load_create_mm(os.path.join(tmp_dir, 'empty_images_masked.tmp'),
-#                                                shape=(xmax - xmin,
-#                                                       ymax - ymin), dtype='float32',
-#                                                force_create=True)
-
-#     empty_masked[:] = empty_beam[xmin:xmax, ymin:ymax]
-
-#     plt.figure(figsize=(7, 7))
-#     plt.imshow(data_images_good[0, xmin:xmax, ymin:ymax].T,
-#                vmin=0, interpolation='bilinear',
-#                cmap=plt.cm.gray)
-#     cbar = plt.colorbar()
-#     cbar.set_label('Пропускание, усл.ед.', rotation=90)
-#     plt.title('Отнормированное изображение')
-#     plt.show()
-
-#     for di in tqdm_notebook(range(data_images_masked.shape[0])):
-#         data_images_masked[di] = data_images_good[di, xmin:xmax, ymin:ymax]
-
-#     return data_images_masked, empty_masked
-
-
-# data_images_masked, empty_masked = cut_data_images(
-#     data_images, empty_beam, data_angles, xmin, xmax, ymin, ymax)
-
-# %%
-# plt.figure(figsize=(8, 8))
-# plt.imshow(safe_median(empty_masked))
-# plt.colorbar()
 
 # %%
 def group_data(data_images, data_angles, mmap_file_dir):
@@ -1035,7 +843,7 @@ test_rec(s1, uniq_angles)
 test_rec(s2, uniq_angles)
 
 # %%
-del data_0_orig, data_180_orig, data_images_good, data_images, data_images_crop
+del data_0_orig, data_180_orig, data_images_good, data_images_crop
 del sinogram, sinogram_fixed, uniq_angles, uniq_angles_orig, uniq_data_images
 
 # %%
@@ -1083,31 +891,6 @@ plt.axis('equal')
 plt.colorbar()
 plt.show()
 
-# plt.figure(figsize=(7,5))
-# plt.plot(rec_slice[rec_slice.shape[0]//2])
-# plt.grid()
-# plt.show()
-
-# plt.figure(figsize=(7,5))
-# plt.plot(uniq_angles[t_angles]*np.pi/180,
-#          np.power(s4[t_angles],bh_corr).sum(axis=1)/np.sum(np.power(s4[t_angles],bh_corr))*np.sum(s4[t_angles]),
-#         '*')
-# plt.grid()
-# plt.show()
-
-
-# plt.figure(figsize=(7,5))
-# plt.hist(rec_slice.ravel(), bins=100)
-# plt.grid()
-# plt.show()
-
-
-# plt.figure(figsize=(8,8))
-# plt.imshow(rec_slice/np.sum(np.power(s4[t_angles],bh_corr))*np.sum(s4[t_angles]),
-#            vmin=0, vmax= np.percentile(rec_slice,95)*1.2, cmap=plt.cm.viridis)
-# plt.axis('tight')
-# plt.colorbar()
-# plt.show()
 
 # %%
 # multi 2d case
@@ -1313,4 +1096,46 @@ tomotools.mkdir_p(os.path.join(storage_dir, experiment_id))
 # %%
 # !ls -lha {storage_dir+'/'+experiment_id}
 
-# %%
+# %% [markdown]
+# # Changelog:
+#
+# * 2.1а (2020.03.18)
+#  - Add local files loading
+#  - Improving poriosity support
+#  - ENH: 180 deg search
+# * 2.0d (2019.04.17-2019.05.06)
+#  - Adding dask support
+#  - Many code refactorings for semiautomatic runs
+#  - Allow manual borders selections
+# * 2.0.b1 (2019.04.03)
+#  - bug fixing
+#  - try remove bad frames
+# * 1.6.2 (2019.02.11)
+#  - fixing object detection
+# * 1.6.1 (2018.11.19)
+#  - exdend borbers range (mean to percentile)
+# * 1.6 (2018.11.08)
+#  - change algorithm of object detection with gaussian fitting
+#  - add y-clipping to remove sample holder
+#  - change algorithm of axis searching
+#  - change hdf5 compression to lzf
+#  - changing 3d visualisation
+#  - replace log_process to tqdm
+# * 1.5 (2018.09.11)
+#  - saving full tomography volume
+#  - deleting temporary files as soon as possible
+#  - change thresshold in object detection (1/6 -> 1/5)
+# * 1.4 (2018.08.23)
+#  - Fix: correct resized volume serialization (smooth instead cherry picking)
+#  - New: 3D visualisation
+#  - Fix: sinogram shifting aftee rotation axis fix
+#  - Update: Searching rotation axis
+# * 1.3 (2018.07.03)
+#  - Update graphics
+#  - Update axis search algorithms
+# * 1.2 (2018.06.04)
+#  - Change threshold
+# * 1.1 (2018.03.14)
+#  - Add NLM filtering
+# * 1.0 (2017.02.01)
+#  - First automation version.
