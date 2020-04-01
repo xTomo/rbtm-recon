@@ -9,7 +9,7 @@ db = client['autotom']
 to = db['tomoobjects']
 
 
-def put_object_rec_queue(obj_id, action='reconsruct'):
+def put_object_rec_queue(obj_id, action='reconstruct'):
     to.insert_one({'obj_id': obj_id,
                    'action': action,
                    'status': 'waiting',
@@ -41,8 +41,8 @@ def get_object_status(obj_id):
 
 
 def get_rec_queue_next_obj():
-    for obj in to.find({}):
-        if get_object_status(obj['obj_id']) == 'waiting':
+    for obj in to.find():
+        if 'action' in obj and get_object_status(obj['obj_id']) == 'waiting':
             return obj
     return None
 
@@ -50,7 +50,7 @@ def get_rec_queue_next_obj():
 def get_logs(obj_id):
     objs = to.find({'obj_id': obj_id}).sort('date', DESCENDING)
     if objs is None:
-        raise ValueError('Object not found :{}'.format(obj_id))
+        raise ValueError('Object not found: {}'.format(obj_id))
 
     res = ["{}: {}".format(str(obj['date']), obj['status']) for obj in objs]
     return res

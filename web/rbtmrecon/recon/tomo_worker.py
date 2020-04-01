@@ -2,13 +2,14 @@ import configparser
 import os
 import subprocess
 import time
-from pprint import pprint
 from shutil import copy
-
+import logging
 import nbformat
 
 import tomotools2 as tomotools
 from tomo_queue import get_rec_queue_next_obj, set_object_status
+
+logging.basicConfig(level=logging.INFO)
 
 NOTEBOOK_NAME = 'reconstructor-v-2.1a.ipynb'
 
@@ -39,27 +40,29 @@ def reconstruct(obj):
     storage_dir = '/storage'
     obj_id = obj['obj_id']
     set_object_status(obj_id, 'reconstructing')
-    print('Start reconstructing: {}'.format(obj_id))
+    logging.info('Start reconstructing: {}'.format(obj_id))
 
     out_dir = copy_python_files(obj_id, storage_dir)
 
     nb, errors = _notebook_auto_run(os.path.join(out_dir, NOTEBOOK_NAME))
     for e in errors:
-        pprint(e)
+        logging.info(e)
 
-    print('Finish reconstructing: {}'.format(obj_id))
+    logging.info('Finish reconstructing: {}'.format(obj_id))
     set_object_status(obj_id, 'done')
+
 
 def copyfiles(obj):
     storage_dir = '/storage'
     obj_id = obj['obj_id']
-    set_object_status(obj_id, 'reconstructing')
-    print('Coping files: {}'.format(obj_id))
+    set_object_status(obj_id, 'coping')
+    logging.info('Start coping files: {}'.format(obj_id))
 
     out_dir = copy_python_files(obj_id, storage_dir)
 
-    print('Finish coping: {}'.format(obj_id))
+    logging.info('Finish coping: {}'.format(obj_id))
     set_object_status(obj_id, 'done')
+
 
 def copy_python_files(obj_id, storage_dir):
     to = obj_id
@@ -69,7 +72,7 @@ def copy_python_files(obj_id, storage_dir):
     out_dir = os.path.join(storage_dir, experiment_id, '')
     tomotools.mkdir_p(out_dir)
 
-    print(tomo_info['specimen'])
+    logging.info(tomo_info['specimen'])
     config = configparser.ConfigParser()
     config["SAMPLE"] = tomo_info
     with open(os.path.join(out_dir, 'tomo.ini'), 'w') as cf:
@@ -82,14 +85,15 @@ def copy_python_files(obj_id, storage_dir):
 
 if __name__ == "__main__":
     while True:
-        # print('waiting objects')
         rec_obj = get_rec_queue_next_obj()
         if rec_obj is not None:
-            if rec_obj['action'] == 'reconsruct':
+            if 'action' not in rec_obj:
+                raise ValueError('No "action" field in reconstruction object')
+            if rec_obj['action'] == 'reconstruct':
                 reconstruct(rec_obj)
             elif rec_obj['action'] == 'copyfiles':
                 copyfiles(rec_obj)
             else:
                 raise ValueError('Unknown action {}'.format(rec_obj['action']))
         else:
-            time.sleep(10)
+            time.sleep(1)

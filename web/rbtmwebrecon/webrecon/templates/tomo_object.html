@@ -43,7 +43,7 @@
 {#    {% endif %}#}
     <div>
         <h2> Reconstruction status</h2>
-        {% if not tomo_object['tomo_status'] in ['waiting', 'reconstructing'] %}
+        {% if not tomo_object['tomo_status'] in ['reconstructing'] %}
         <form action='/reconstruct/{{ tomo_object["_id"] }}' method="GET">
             <button type='submit' name='rec_button'>Reconstruct it</button>
         </form>

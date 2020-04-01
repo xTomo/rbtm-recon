@@ -369,7 +369,6 @@ plt.colorbar(orientation='horizontal')
 from skimage.metrics import normalized_root_mse
 from scipy.ndimage.filters import gaussian_filter
 from scipy.optimize import minimize
-import cv2
 
 
 def cv_rotate(x, angle):
@@ -631,7 +630,7 @@ cbar = plt.colorbar()
 cbar.set_label('Поглощение, усл.ед.', rotation=90)
 
 # %%
-# t = np.percentile(sinogram, 90, axis=1)
+t = np.percentile(sinogram, 90, axis=1)
 # t1 = t[np.argsort(uniq_angles)]
 
 # %%
