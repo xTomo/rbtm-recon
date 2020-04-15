@@ -79,6 +79,7 @@ def copy_python_files(obj_id, storage_dir):
         config.write(cf)
 
     copy(NOTEBOOK_NAME, out_dir)
+    copy(NOTEBOOK_NAME[:-5]+'py', out_dir)
     copy('tomotools2.py', out_dir)
     return out_dir
 
@@ -96,4 +97,4 @@ if __name__ == "__main__":
             else:
                 raise ValueError('Unknown action {}'.format(rec_obj['action']))
         else:
-            time.sleep(1)
+            time.sleep(5)
