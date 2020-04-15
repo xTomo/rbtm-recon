@@ -142,7 +142,7 @@ def show_exp_data(empty_beam, data_images):
 show_exp_data(empty_beam, data_images)
 
 # %%
-x_min, x_max, y_min, y_max = 800, 2000, 1000, 1500
+x_min, x_max, y_min, y_max = 600, 2320, 100, 2550
 
 
 # %%
@@ -174,10 +174,13 @@ ff = interact_manual(show_frames_with_border,
 
 
 # %%
-x_min = ff.widget.kwargs['x_min']
-x_max = ff.widget.kwargs['x_max']
-y_min = ff.widget.kwargs['y_min']
-y_max = ff.widget.kwargs['y_max']
+try:
+    x_min = ff.widget.kwargs['x_min']
+    x_max = ff.widget.kwargs['x_max']
+    y_min = ff.widget.kwargs['y_min']
+    y_max = ff.widget.kwargs['y_max']
+except KeyError:
+    pass
 
 # %%
 data_images_crop, _ = tomotools.load_create_mm(os.path.join(tmp_dir, 'data_images_crop.tmp'),
@@ -369,6 +372,7 @@ plt.colorbar(orientation='horizontal')
 from skimage.metrics import normalized_root_mse
 from scipy.ndimage.filters import gaussian_filter
 from scipy.optimize import minimize
+import cv2
 
 
 def cv_rotate(x, angle):
@@ -630,22 +634,22 @@ cbar = plt.colorbar()
 cbar.set_label('Поглощение, усл.ед.', rotation=90)
 
 # %%
-t = np.percentile(sinogram, 90, axis=1)
+# t = np.percentile(sinogram, 90, axis=1)
 # t1 = t[np.argsort(uniq_angles)]
 
 # %%
-plt.figure(figsize=(5, 5))
-plt.imshow(t[np.argsort(uniq_angles), :])
-plt.colorbar()
-plt.show()
-# TODO: Improve y_shift searching
-y_shift_array = np.sum(t > 0.05, axis=1)
-y_shift_array -= y_shift_array[0]
-
-plt.figure(figsize=(6, 6))
-plt.plot(y_shift_array[np.argsort(uniq_angles)], 'o')
-plt.grid()
-plt.show()
+# plt.figure(figsize=(5, 5))
+# plt.imshow(t[np.argsort(uniq_angles), :])
+# plt.colorbar()
+# plt.show()
+# # TODO: Improve y_shift searching
+# y_shift_array = np.sum(t > 0.05, axis=1)
+# y_shift_array -= y_shift_array[0]
+#
+# plt.figure(figsize=(6, 6))
+# plt.plot(y_shift_array[np.argsort(uniq_angles)], 'o')
+# plt.grid()
+# plt.show()
 
 # %%
 # flow = cv2.calcOpticalFlowPyrLK(data_0, data_180)
@@ -671,7 +675,7 @@ for i in tqdm(range(sinogram.shape[0])):
 
     t = cv_rotate(t, alfa)
     # TODO: Fixit
-    shift_y = y_shift_array[i]
+    # shift_y = y_shift_array[i]
 
     #     t = np.roll(t, shift_y, axis=1)
     #     if shift_y > 0:
@@ -862,14 +866,14 @@ for fr in files_to_remove:
 
 # %%
 uniq_angles, _ = tomotools.load_create_mm(os.path.join(tmp_dir, 'uniq_angles.tmp'),
-                                          shape=None,
+                                          shape=None, force_create=False, 
                                           dtype='float32')
 s1, _ = tomotools.load_create_mm(os.path.join(tmp_dir, 'sinogram_fixed.tmp'),
-                                 shape=None,
+                                 shape=None, force_create=False, 
                                  dtype='float32')
 
 rec_vol, _ = tomotools.load_create_mm(os.path.join(tmp_dir, 'rec.tmp'),
-                                      dtype=np.float32,
+                                      dtype=np.float32, force_create=False, 
                                       shape=(s1.shape[-1], s1.shape[1], s1.shape[1]))
 
 # %%

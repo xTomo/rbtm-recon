@@ -82,7 +82,7 @@ def get_mm_shape(data_file):
         return None
 
 
-def load_create_mm(data_file, shape, dtype, force_create=False):
+def load_create_mm(data_file, shape, dtype, force_create=True):
     if force_create:
         logging.info('Force create')
     elif os.path.exists(data_file):
