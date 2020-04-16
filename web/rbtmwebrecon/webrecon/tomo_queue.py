@@ -1,5 +1,6 @@
-from pymongo import MongoClient, DESCENDING
 from datetime import datetime
+
+from pymongo import MongoClient, DESCENDING
 
 from conf import MONGODB_URI
 
@@ -41,7 +42,7 @@ def get_object_status(obj_id):
 
 
 def get_rec_queue_next_obj():
-    for obj in to.find():
+    for obj in to.find({'obj_id': 'waiting'}):
         if 'action' in obj and get_object_status(obj['obj_id']) == 'waiting':
             return obj
     return None

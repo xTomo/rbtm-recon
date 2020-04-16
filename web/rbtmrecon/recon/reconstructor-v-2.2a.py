@@ -41,8 +41,7 @@ import cv2
 
 import numexpr as ne
 
-import astra
-
+import tomo.recon.astra_utils as astra_utils
 import scipy.optimize
 import scipy.signal
 import scipy.ndimage
@@ -86,6 +85,12 @@ def safe_median(data):
     res = data.copy()
     res[mask] = m_data[mask]
     return res
+
+
+def recon_2d_parallel(sino, angles):
+    rec = astra_utils.astra_recon_2d_parallel(sino, angles, ['FBP_CUDA', ['CGLS_CUDA', 10]])
+    pixel_size = 9e-3
+    return rec / pixel_size
 
 
 # %%
@@ -146,6 +151,7 @@ def show_exp_data(empty_beam, data_images):
 show_exp_data(empty_beam, data_images)
 
 # %%
+# TODO: store this in ini file
 x_min, x_max, y_min, y_max = 600, 2320, 100, 2550
 
 
@@ -203,7 +209,7 @@ del data_images
 
 
 # %%
-# TODO: Profile this function
+#TODO: Profile this function
 def find_good_frames(data_images, data_angles):
     intensity = data_images.mean(axis=-1).mean(axis=-1)
 
@@ -353,7 +359,7 @@ plt.imshow(my_rc(tmp_sinogram, rc_level), cmap=plt.cm.viridis, interpolation='ne
 plt.axis('tight')
 plt.colorbar(orientation='horizontal')
 
-# TODO: remove rings
+#TODO: remove rings
 
 # %%
 for s in tqdm(range(sinogram.shape[1])):
@@ -483,7 +489,7 @@ posiotion_180_sorted = np.argwhere(np.isclose(position_180, np.argsort(uniq_angl
 print(posiotion_180_sorted)
 posiotions_to_check = np.argsort(uniq_angles)[
                       posiotion_180_sorted - 3:np.min(
-                          [posiotion_180_sorted + 5, len(uniq_angles) - 1])]  # TODO: check ranges
+                          [posiotion_180_sorted + 5, len(uniq_angles) - 1])]  #TODO: check ranges
 print(uniq_angles[posiotions_to_check])
 
 # %%
@@ -564,7 +570,7 @@ res = find_axis_posiotion(data_0, data_180)
 # opt_func_values.append(res['fun'])
 print(res)
 
-# TODO: FIX shift_y
+#TODO: FIX shift_y
 alfa, shift_x, shift_y = res.x[0], int(np.floor(res.x[1])), 0
 
 if shift_x >= 0:
@@ -639,7 +645,7 @@ cbar.set_label('Поглощение, усл.ед.', rotation=90)
 # plt.imshow(t[np.argsort(uniq_angles), :])
 # plt.colorbar()
 # plt.show()
-# # TODO: Improve y_shift searching
+# #TODO: Improve y_shift searching
 # y_shift_array = np.sum(t > 0.05, axis=1)
 # y_shift_array -= y_shift_array[0]
 #
@@ -689,102 +695,6 @@ for i in tqdm(range(sinogram.shape[0])):
         sinogram_fixed[i, -shift_x:] = t
 
 # %%
-pixel_size = 9e-3
-
-
-def astra_tomo2d_parallel(sinogram, angles):
-    #     astra.astra.set_gpu_index([0,1])
-    angles = angles.astype('float64')
-    detector_size = sinogram.shape[1]
-
-    rec_size = detector_size
-    vol_geom = astra.create_vol_geom(rec_size, rec_size)
-    proj_geom = astra.create_proj_geom('parallel', 1.0, detector_size, angles)
-
-    sinogram_id = astra.data2d.create('-sino', proj_geom, data=sinogram)
-    # Create a data object for the reconstruction
-    rec_id = astra.data2d.create('-vol', vol_geom)
-    #     proj_id = astra.create_projector('strip', proj_geom, vol_geom) # for CPU reconstruction only
-    # Set up the parameters for a reconstruction algorithm using the GPU
-    cfg = astra.astra_dict('FBP_CUDA')
-    cfg['ReconstructionDataId'] = rec_id
-    cfg['ProjectionDataId'] = sinogram_id
-    #     cfg['ProjectorId'] = proj_id # for CPU reconstruction only
-    cfg['option'] = {}
-
-    alg_id = astra.algorithm.create(cfg)
-    astra.algorithm.run(alg_id, 1)
-
-    cfg = astra.astra_dict('CGLS_CUDA')
-    cfg['ReconstructionDataId'] = rec_id
-    cfg['ProjectionDataId'] = sinogram_id
-    #     cfg['ProjectorId'] = proj_id # for CPU reconstruction only
-    cfg['option'] = {}
-    #     cfg['option']['MinConstraint'] = -0.01
-
-    alg_id = astra.algorithm.create(cfg)
-
-    # Run 150 iterations of the algorithm
-    astra.algorithm.run(alg_id, 5)  # 30
-
-    # Get the result
-    rec = astra.data2d.get(rec_id) / pixel_size  # fixit
-
-    # Clean up. Note that GPU memory is tied up in the algorithm object,
-    # and main RAM in the data objects.
-    astra.algorithm.delete(alg_id)
-    astra.data2d.delete(rec_id)
-    astra.data2d.delete(sinogram_id)
-    astra.clear()
-    return rec
-
-
-def astra_tomo3d_parallel(sinogram, angles, rec_vol, slice_start, slice_stop):
-    #     astra.astra.set_gpu_index([0,1])
-    angles = angles.astype('float64')
-    detector_size = sinogram.shape[1]
-    #         slices_number = sinogram.shape[0]
-    slices_number = slice_stop - slice_start
-
-    rec_size = detector_size
-    vol_geom = astra.create_vol_geom(rec_size, rec_size, slices_number)
-    proj_geom = astra.create_proj_geom('parallel3d', 1.0, 1.0, slices_number, detector_size, angles)
-
-    sinogram_id = astra.data3d.create('-sino', proj_geom, np.rollaxis(sinogram, -1)[slice_start:slice_stop])
-    # Create a data object for the reconstruction
-    #     rec_id = astra.data3d.link('-vol', vol_geom, rec_vol[slice_start:slice_stop])
-    rec_id = astra.data3d.create('-vol', vol_geom)
-    # Set up the parameters for a reconstruction algorithm using the GPU
-    cfg = astra.astra_dict('CGLS3D_CUDA')
-    cfg['ReconstructionDataId'] = rec_id
-    cfg['ProjectionDataId'] = sinogram_id
-    #     cfg['ProjectorId'] = proj_id # for CPU reconstruction only
-    cfg['option'] = {}
-    #     cfg['option']['GPUindex'] = 1
-    cfg['option']['MinConstraint'] = -0.01
-
-    # Available algorithms:
-    # SIRT_CUDA, SART_CUDA, EM_CUDA, FBP_CUDA (see the FBP sample)
-
-    # Create the algorithm object from the configuration structure
-    alg_id = astra.algorithm.create(cfg)
-    #     astra.data3d.info()
-    # Run 150 iterations of the algorithm
-    astra.algorithm.run(alg_id, 1)
-
-    # Get the result
-    rec = astra.data3d.get(rec_id) / pixel_size  # fixit
-
-    # Clean up. Note that GPU memory is tied up in the algorithm object,
-    # and main RAM in the data objects.
-    astra.algorithm.delete(alg_id)
-    astra.data3d.delete(rec_id)
-    astra.data3d.delete(sinogram_id)
-    astra.clear()
-    return rec
-
-
-# %%
 s1_angles = uniq_angles
 s1 = np.require(sinogram_fixed[:, :, int(sinogram_fixed.shape[-1] // 3)],
                 dtype=np.float32, requirements=['C'])
@@ -800,7 +710,7 @@ def test_rec(s1, uniq_angle):
 
     bh_corr = 1.0
     t_angles = (uniq_angles - uniq_angles.min()) <= 180  # remove angles >180
-    rec_slice = astra_tomo2d_parallel(s1[t_angles], uniq_angles[t_angles] * np.pi / 180)
+    rec_slice = recon_2d_parallel(s1[t_angles], uniq_angles[t_angles] * np.pi / 180)
 
     plt.figure(figsize=(10, 8))
     plt.imshow(safe_median(rec_slice),
@@ -825,12 +735,12 @@ plt.xlabel('Номер канала детектора')
 plt.ylabel('Номер угла поворота')
 
 # %%
-# TODO: check mu physical value
+#TODO: check mu physical value
 sinogram_fixed_median = np.median(sinogram_fixed.sum(axis=-1).sum(axis=-1))
 corr_factor = sinogram_fixed.sum(axis=-1).sum(axis=-1) / sinogram_fixed_median
 
 # %%
-# # TODO: fix bad data
+# #TODO: fix bad data
 # for i in range(len(sinogram_fixed)):
 #     sinogram_fixed[i] = sinogram_fixed[i] / corr_factor[i]
 
@@ -903,7 +813,7 @@ plt.plot(xr, [opt_func(x) for x in xr])
 plt.plot([optimal_gamma.x, ], opt_func(optimal_gamma.x), 'ro')
 plt.grid()
 plt.subplot(122)
-plt.plot(calc_raddon_inv(sino))
+plt.plot(calc_raddon_inv(sino))  # TODO: sort for angles order
 plt.grid()
 plt.show()
 
@@ -918,7 +828,7 @@ s4 = sss.copy()
 s4[s4 < 0] = 0
 s4 = np.power(s4, bh_corr)
 
-rec_slice = astra_tomo2d_parallel(s4[t_angles], uniq_angles[t_angles] * np.pi / 180)
+rec_slice = recon_2d_parallel(s4[t_angles], uniq_angles[t_angles] * np.pi / 180)
 
 print('rec_slice.shape=', rec_slice.shape)
 
@@ -944,7 +854,7 @@ for i in tqdm(range(0, s1.shape[-1])):
     sino[sino < 0] = 0
     sino = np.power(sino, bh_corr)  # BH!
     t_angles = (uniq_angles - uniq_angles.min()) <= 180  # remove angles >180
-    rec_vol[i] = astra_tomo2d_parallel(sino[t_angles], angles[t_angles])
+    rec_vol[i] = recon_2d_parallel(sino[t_angles], angles[t_angles])
 print(time.time() - t)
 
 # %%

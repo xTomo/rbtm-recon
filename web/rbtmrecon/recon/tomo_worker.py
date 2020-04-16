@@ -1,9 +1,10 @@
 import configparser
+import logging
 import os
 import subprocess
 import time
-from shutil import copy
-import logging
+from shutil import copy, copytree
+
 import nbformat
 
 import tomotools2 as tomotools
@@ -81,6 +82,7 @@ def copy_python_files(obj_id, storage_dir):
     copy(NOTEBOOK_NAME, out_dir)
     copy(NOTEBOOK_NAME[:-5]+'py', out_dir)
     copy('tomotools2.py', out_dir)
+    copytree('tomo', out_dir)
     return out_dir
 
 
