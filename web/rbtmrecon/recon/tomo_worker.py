@@ -11,7 +11,7 @@ from tomo_queue import get_rec_queue_next_obj, set_object_status
 
 logging.basicConfig(level=logging.INFO)
 
-NOTEBOOK_NAME = 'reconstructor-v-2.1a.ipynb'
+NOTEBOOK_NAME = 'reconstructor-v-2.2a.ipynb'
 
 
 def _notebook_auto_run(notebook):

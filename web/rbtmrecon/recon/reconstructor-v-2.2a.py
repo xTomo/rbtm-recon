@@ -15,7 +15,7 @@
 # ---
 
 # %%
-# #jupytext --to notebook reconstructor-v-2.1a.py
+# #jupytext --to notebook reconstructor-v-2.2a.py
 # manual mode
 # #%matplotlib notebook
 
