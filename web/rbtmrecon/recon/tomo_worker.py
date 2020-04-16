@@ -7,7 +7,7 @@ from shutil import copy, copytree
 
 import nbformat
 
-import tomotools2 as tomotools
+import tomotools as tomotools
 from tomo_queue import get_rec_queue_next_obj, set_object_status
 
 logging.basicConfig(level=logging.INFO)
@@ -80,8 +80,8 @@ def copy_python_files(obj_id, storage_dir):
         config.write(cf)
 
     copy(NOTEBOOK_NAME, out_dir)
-    copy(NOTEBOOK_NAME[:-5]+'py', out_dir)
-    copy('tomotools2.py', out_dir)
+    copy(NOTEBOOK_NAME[:-5] + 'py', out_dir)
+    copy('tomotools.py', out_dir)
     copytree('tomo', out_dir)
     return out_dir
 

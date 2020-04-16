@@ -15,7 +15,7 @@
 # ---
 
 # %%
-# #jupytext --to notebook reconstructor-v-2.2a.py
+# #jupytext --to notebook reconstructor.py
 # manual mode
 # #%matplotlib notebook
 
@@ -34,26 +34,24 @@ from glob import glob
 
 import pylab as plt
 import numpy as np
-import dask.array as da
+
 import h5py
 
 import cv2
 
 import numexpr as ne
 
-import tomo.recon.astra_utils as astra_utils
 import scipy.optimize
-import scipy.signal
 import scipy.ndimage
 
 from skimage.restoration import denoise_nl_means, estimate_sigma
 from skimage.transform import resize
-from skimage.metrics import normalized_root_mse
 
-import tomotools2 as tomotools
+from tomotools import STORAGE_SERVER, safe_median, recon_2d_parallel, get_tomoobject_info, get_experiment_hdf5, \
+    mkdir_p, show_exp_data, load_create_mm, load_tomo_data, find_good_frames, group_data, correct_rings, tqdm, \
+    get_angles_at_180_deg, smooth, cv_rotate, find_axis_posiotion, test_rec, save_amira
 
 import ipywidgets
-from tqdm.notebook import tqdm
 
 # %%
 # # settings for docker
@@ -64,90 +62,23 @@ experiment_id = config['SAMPLE']['_id']
 data_dir = '/fast/'
 storage_dir = '/storage/'
 exp_src_dir = '/exp_src'
-STORAGE_SERVER = "http://rbtmstorage_server_1:5006/"
 
 # %%
-# STORAGE_SERVER = 'http://10.0.7.153:5006/'
-# storage_dir = '/diskmnt/a/makov/robotom/'
-# data_dir = '/diskmnt/fast/makov/robotom/'
-# exp_src_dir = '/home/robotom/rbtm_data/rbtm_storage/data/experiments'
-# experiment_id = '650c1997-370e-4937-b674-bd7429d29423'
-
-# %%
-tomo_info = tomotools.get_tomoobject_info(experiment_id, STORAGE_SERVER)
+tomo_info = get_tomoobject_info(experiment_id, STORAGE_SERVER)
 tomo_info
-
-
-# %%
-def safe_median(data):
-    m_data = cv2.medianBlur(data, 3)
-    mask = np.abs(m_data - data) > 0.1 * np.abs(data)
-    res = data.copy()
-    res[mask] = m_data[mask]
-    return res
-
-
-def recon_2d_parallel(sino, angles):
-    rec = astra_utils.astra_recon_2d_parallel(sino, angles, ['FBP_CUDA', ['CGLS_CUDA', 10]])
-    pixel_size = 9e-3
-    return rec / pixel_size
-
-
-# %%
-def load_tomo_data(data_file, tmp_dir):
-    empty_images, _ = tomotools.get_frame_group(data_file, 'empty', tmp_dir)
-    dark_images, _ = tomotools.get_frame_group(data_file, 'dark', tmp_dir)
-
-    empty_image = np.median(empty_images, axis=0)
-    dark_image = np.median(dark_images, axis=0)
-
-    empty_beam = empty_image - dark_image
-
-    # Загружаем кадры с даннымии
-    # TODO: добавить поддержку, когда много кадров на одном угле
-    data_images, data_angles = tomotools.get_frame_group(data_file, 'data', tmp_dir)
-
-    data_images_clear = da.from_array(data_images, chunks=(1, 1024, 1024)) - dark_image
-    return empty_beam, data_images_clear, data_angles
-
 
 # %% [markdown]
 # # Loading experimental data
 
 # %%
-data_file = tomotools.get_experiment_hdf5(experiment_id, data_dir,
-                                          os.path.join(exp_src_dir, experiment_id, 'before_processing'),
-                                          STORAGE_SERVER)
+data_file = get_experiment_hdf5(experiment_id, data_dir,
+                                os.path.join(exp_src_dir, experiment_id, 'before_processing'),
+                                STORAGE_SERVER)
 
 tmp_dir = os.path.join(data_dir, experiment_id)
-tomotools.mkdir_p(tmp_dir)
+mkdir_p(tmp_dir)
 
 empty_beam, data_images, data_angles = load_tomo_data(data_file, tmp_dir)
-
-
-# %%
-def show_exp_data(empty_beam, data_images):
-    max_intensity = np.percentile(empty_beam[:], 90)
-    plt.figure(figsize=(8, 12))
-    plt.subplot(211)
-    plt.imshow(empty_beam.T, vmin=0, vmax=max_intensity, cmap=plt.cm.gray, interpolation='bilinear')
-    cbar = plt.colorbar()
-    cbar.set_label('Интенсивность, усл.ед.', rotation=90)
-    plt.title('Прямой пучок')
-    plt.xlabel('Номер канала детектора')
-    plt.ylabel('Номер канала детектора')
-
-    plt.subplot(212)
-    plt.imshow(data_images[0].T, vmin=0, vmax=max_intensity, cmap=plt.cm.gray, interpolation='bilinear')
-    cbar = plt.colorbar()
-    cbar.set_label('Интенсивность, усл.ед.', rotation=90)
-    plt.title('Изображение объекта')
-    plt.xlabel('Номер канала детектора')
-    plt.ylabel('Номер канала детектора')
-    plt.show()
-
-
-# %%
 show_exp_data(empty_beam, data_images)
 
 # %%
@@ -180,8 +111,6 @@ ff = ipywidgets.interact_manual(show_frames_with_border,
                                 y_min=ipywidgets.IntSlider(min=0, max=data_images.shape[2], step=1, value=y_min),
                                 y_max=ipywidgets.IntSlider(min=0, max=data_images.shape[2], step=1, value=y_max)
                                 )
-# show_frames_with_border(data_images, 0, 700, 2000, 1100, 1500)
-
 
 # %%
 try:
@@ -193,95 +122,32 @@ except KeyError:
     pass
 
 # %%
-data_images_crop, _ = tomotools.load_create_mm(os.path.join(tmp_dir, 'data_images_crop.tmp'),
-                                               shape=(len(data_angles),
-                                                      x_max - x_min,
-                                                      y_max - y_min),
-                                               dtype='float32')
+data_images_crop, _ = load_create_mm(os.path.join(tmp_dir, 'data_images_crop.tmp'),
+                                     shape=(len(data_angles), x_max - x_min, y_max - y_min),
+                                     dtype='float32')
 for i in range(len(data_angles)):
     data_images_crop[i] = data_images[i, x_min:x_max, y_min:y_max]
 
-# %%
 empty_beam = empty_beam[x_min:x_max, y_min:y_max]
 
 # %%
-del data_images
-
-
-# %%
-#TODO: Profile this function
-def find_good_frames(data_images, data_angles):
-    intensity = data_images.mean(axis=-1).mean(axis=-1)
-
-    intensity_mask = (intensity < 1.2 * intensity.mean()) * (intensity > 0.8 * intensity.mean())  # dorp bad points
-    good_frames = np.arange(len(intensity))[intensity_mask]
-
-    intensity_t = intensity[good_frames]
-    data_angles_t = data_angles[good_frames]
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(data_angles[np.argsort(data_angles)],
-             intensity[np.argsort(data_angles)],
-             label='Before filtering')
-
-    plt.hlines(np.median(intensity, axis=0), 0, np.max(data_angles), 'r', label='Reference value')
-
-    plt.plot(data_angles_t[np.argsort(data_angles_t)],
-             intensity_t[np.argsort(data_angles_t)],
-             'g', label='After filtering')
-
-    plt.xlabel('Angle')
-    plt.ylabel('Frame mean intensity')
-    plt.grid()
-    plt.legend(loc=0)
-    plt.show()
-    return good_frames
-
-
 good_frames = find_good_frames(data_images_crop, data_angles)
 
 # %% [markdown]
 # # Remove bad frames
 
 # %%
-data_images_good, _ = tomotools.load_create_mm(os.path.join(tmp_dir, 'data_images_good.tmp'),
-                                               shape=(len(good_frames),
-                                                      data_images_crop.shape[1],
-                                                      data_images_crop.shape[2]),
-                                               dtype='float32')
+data_images_good, _ = load_create_mm(os.path.join(tmp_dir, 'data_images_good.tmp'),
+                                     shape=(len(good_frames), data_images_crop.shape[1], data_images_crop.shape[2]),
+                                     dtype='float32')
+
 # TODO: Profile this code. In case if no bad frames, just skip it
-# data_images_good[range(len(good_frames))] = data_images[good_frames]
 for i in tqdm(range(len(good_frames))):
     data_images_good[i] = data_images_crop[good_frames[i]]
 
 data_angles = data_angles[good_frames]
 
-
 # %%
-def group_data(data_images, data_angles, mmap_file_dir):
-    uniq_angles, _ = tomotools.load_create_mm(
-        os.path.join(mmap_file_dir, 'uniq_angles.tmp'),
-        shape=(len(list(set(data_angles))),),
-        dtype='float32', force_create=True)
-    uniq_angles[:] = list(set(data_angles))
-
-    uniq_data_images, _ = tomotools.load_create_mm(
-        os.path.join(mmap_file_dir, 'uniq_data_images.tmp'),
-        shape=(len(uniq_angles), data_images.shape[1], data_images.shape[2]),
-        dtype='float32', force_create=True)
-
-    for ua_id, ua in tqdm(list(enumerate(uniq_angles))):
-        indexes = np.argwhere(data_angles == uniq_angles[ua_id])
-        if len(indexes) > 1:
-            tmp_images = data_images[indexes]
-            tmp_images = np.squeeze(tmp_images)
-            mean_image = np.mean(tmp_images, axis=0)
-            uniq_data_images[ua_id] = mean_image
-        else:
-            uniq_data_images[ua_id] = data_images[indexes]
-    return uniq_data_images, uniq_angles
-
-
 uniq_data_images, uniq_angles = group_data(data_images_good, data_angles, tmp_dir)
 
 # %%
@@ -297,8 +163,8 @@ for di in tqdm(range(uniq_data_images.shape[0])):
 # del empty_masked
 
 # %%
-sinogram, _ = tomotools.load_create_mm(os.path.join(tmp_dir, 'sinogram.tmp'), shape=uniq_data_images.shape,
-                                       dtype='float32')
+sinogram, _ = load_create_mm(os.path.join(tmp_dir, 'sinogram.tmp'), shape=uniq_data_images.shape,
+                             dtype='float32')
 ne.evaluate('-log(uniq_data_images)', out=sinogram);
 
 # %%
@@ -311,62 +177,20 @@ cbar = plt.colorbar()
 cbar.set_label('Пропускание, усл.ед.', rotation=90)
 plt.title('Синограмма без коррекции')
 
-
-# %%
-# # build frames for video
-# images_dir = os.path.join(tmp_dir,'images')
-# tomotools.mkdir_p(images_dir)
-# im_max=np.max(sinogram)
-# im_min=np.min(sinogram)
-# print(im_min, im_max)
-# for ia, a in tomotools.log_progress(list(enumerate(np.argsort(uniq_angles)))):
-# #     print('{:34}'.format(ia))
-#     plt.imsave(os.path.join(images_dir,'prj_{:03}.png'.format(ia)),
-#                np.rot90(sinogram[a],3), vmin=im_min, vmax=im_max,
-#                cmap=plt.cm.gray_r)
-
-# # !cd {images_dir} && avconv -r 10 -i "prj_%03d.png" -b:v 1000k prj.avi
-# # !cd {images_dir} && rm prj.mp4
-
-# %%
-def my_rc(sino0, level):
-    def get_my_b(level):
-        t = np.mean(sino0, axis=0)
-        gt = scipy.ndimage.filters.gaussian_filter1d(t, level / 2.)
-        return gt - t
-
-    def get_my_a(level):
-        my_b = get_my_b(level)
-        return np.mean(my_b) / my_b.shape[0]
-
-    my_a = get_my_a(level)
-    my_b = get_my_b(level)
-
-    res = sino0.copy()
-    if not level == 0:
-        res += sino0 * my_a + my_b
-
-    return res
-
-
 # %%
 rc_level = 10
 
 # %%
 tmp_sinogram = sinogram[np.argsort(uniq_angles), :, int(sinogram.shape[-1] // 2)]
+ring_corr = correct_rings(tmp_sinogram, rc_level)
 plt.figure(figsize=(8, 8))
-plt.imshow(my_rc(tmp_sinogram, rc_level), cmap=plt.cm.viridis, interpolation='nearest')
+plt.imshow(ring_corr, cmap=plt.cm.viridis, interpolation='nearest')
 plt.axis('tight')
 plt.colorbar(orientation='horizontal')
 
-#TODO: remove rings
-
 # %%
 for s in tqdm(range(sinogram.shape[1])):
-    sinogram[:, s, :] = my_rc(sinogram[:, s, :], rc_level)
-
-# %%
-np.isnan(sinogram).sum()
+    sinogram[:, s, :] = correct_rings(sinogram[:, s, :], rc_level)
 
 # %%
 tmp_sinogram = sinogram[np.argsort(uniq_angles), :, int(sinogram.shape[-1] // 2)]
@@ -376,111 +200,8 @@ plt.imshow(tmp_sinogram, cmap=plt.cm.viridis, interpolation='nearest')
 plt.axis('tight')
 plt.colorbar(orientation='horizontal')
 
-
 # %%
-def cv_rotate(x, angle):
-    """
-    Rotate square array using OpenCV2 around center of the array
-    :param x: 2d numpy array
-    :param angle: angle in degrees
-    :return: rotated array
-    """
-    x_center = tuple(
-        np.array((x.shape[1], x.shape[0]), dtype='float32') / 2.0 - 0.5)
-    rot_mat = cv2.getRotationMatrix2D(x_center, angle, 1.0)
-    xro = cv2.warpAffine(
-        x, rot_mat, (x.shape[1], x.shape[0]), flags=cv2.INTER_LINEAR)
-    return xro
 
-
-def smooth(x):
-    return x - scipy.ndimage.filters.gaussian_filter(x, 50) + scipy.ndimage.filters.gaussian_filter(x, 10)
-
-
-def find_axis_posiotion(image_0, image_180):
-    def corr(x):
-        alfa = x[0]
-        shift_x = int(x[1])
-        if shift_x >= 0:
-            t_180 = image_180[:, shift_x:]
-            t_0 = image_0[:, shift_x:]
-        else:
-            t_180 = image_180[:, :shift_x]
-            t_0 = image_0[:, :shift_x]
-
-        tt_180 = np.fliplr(cv_rotate(t_180, alfa))
-        tt_180 = cv2.medianBlur(tt_180, 3)  # *t_mask
-        tt_0 = cv_rotate(t_0, alfa)
-        tt_0 = cv2.medianBlur(tt_0, 3)  # *t_mask
-
-        res = normalized_root_mse(tt_0, tt_180)
-
-        return res
-
-    s180 = image_180.sum(axis=0)
-    r180 = np.flipud(np.arange(len(s180)))
-    p180 = (s180 * r180).sum() / s180.sum()
-
-    s0 = image_0.sum(axis=0)
-    r0 = np.arange(len(s0))
-    p0 = (s0 * r0).sum() / s0.sum()
-
-    x0 = [1., 0.5 * (p0 - p180)]
-
-    left = x0[1] - 200
-    right = x0[1] + 200
-    qq = [corr([0, q]) for q in np.arange(left, right)]
-    min_pos = left + np.argmin(qq)
-    if min_pos == left or min_pos == right:
-        position_found = False
-    else:
-        position_found = True
-
-    plt.figure()
-    plt.plot(np.arange(left, right), qq)
-    plt.grid()
-    plt.show()
-
-    while not position_found:
-        if min_pos == left:
-            right = left
-            left = right - 200
-        elif min_pos == right:
-            left = right
-            right = left + 200
-
-        qq = [corr([0, q]) for q in np.arange(left, right)]
-        min_pos = left + np.argmin(qq)
-        if min_pos == left or min_pos == right:
-            position_found = False
-        else:
-            position_found = True
-
-        plt.figure()
-        plt.plot(np.arange(left, right), qq)
-        plt.grid()
-        plt.show()
-
-    shift_0 = min_pos
-    x0 = [1., shift_0],
-    res = scipy.optimize.minimize(corr, x0, method='Powell')
-    return res
-
-
-# %%
-# seraching opposite frames (0 and 180 deg)
-def get_angles_at_180_deg(uniq_angles):
-    array_0 = np.asarray(uniq_angles) % 360
-    cross_array = np.zeros((len(array_0), len(array_0)))
-    for i in range(1, len(array_0)):
-        cross_array[i] = np.roll(array_0, i)
-
-    pos = np.argmin(np.abs(cross_array + 180 - array_0) % 360)
-    print(pos)
-    position_180 = pos % len(array_0)
-    position_0 = (pos - position_180) // len(array_0)
-    print(position_0, position_180)
-    return position_0, position_180
 
 
 position_0, position_180 = get_angles_at_180_deg(uniq_angles)
@@ -489,7 +210,7 @@ posiotion_180_sorted = np.argwhere(np.isclose(position_180, np.argsort(uniq_angl
 print(posiotion_180_sorted)
 posiotions_to_check = np.argsort(uniq_angles)[
                       posiotion_180_sorted - 3:np.min(
-                          [posiotion_180_sorted + 5, len(uniq_angles) - 1])]  #TODO: check ranges
+                          [posiotion_180_sorted + 5, len(uniq_angles) - 1])]  # TODO: check ranges
 print(uniq_angles[posiotions_to_check])
 
 # %%
@@ -570,7 +291,7 @@ res = find_axis_posiotion(data_0, data_180)
 # opt_func_values.append(res['fun'])
 print(res)
 
-#TODO: FIX shift_y
+# TODO: FIX shift_y
 alfa, shift_x, shift_y = res.x[0], int(np.floor(res.x[1])), 0
 
 if shift_x >= 0:
@@ -637,57 +358,18 @@ cbar = plt.colorbar()
 cbar.set_label('Поглощение, усл.ед.', rotation=90)
 
 # %%
-# t = np.percentile(sinogram, 90, axis=1)
-# t1 = t[np.argsort(uniq_angles)]
-
-# %%
-# plt.figure(figsize=(5, 5))
-# plt.imshow(t[np.argsort(uniq_angles), :])
-# plt.colorbar()
-# plt.show()
-# #TODO: Improve y_shift searching
-# y_shift_array = np.sum(t > 0.05, axis=1)
-# y_shift_array -= y_shift_array[0]
-#
-# plt.figure(figsize=(6, 6))
-# plt.plot(y_shift_array[np.argsort(uniq_angles)], 'o')
-# plt.grid()
-# plt.show()
-
-# %%
-# flow = cv2.calcOpticalFlowPyrLK(data_0, data_180)
-
-# %%
-sinogram_fixed, _ = tomotools.load_create_mm(os.path.join(tmp_dir, 'sinogram_fixed.tmp'),
-                                             shape=(
-                                                 sinogram.shape[0], sinogram.shape[1] + abs(shift_x),
-                                                 sinogram.shape[2]),
-                                             dtype='float32', force_create=True)
+sinogram_fixed, _ = load_create_mm(os.path.join(tmp_dir, 'sinogram_fixed.tmp'),
+                                   shape=(
+                                       sinogram.shape[0], sinogram.shape[1] + abs(shift_x),
+                                       sinogram.shape[2]),
+                                   dtype='float32', force_create=True)
 
 # fix axis tlit
 for i in tqdm(range(sinogram.shape[0])):
     t = sinogram[i].copy()
 
     t_angle = uniq_angles[i]
-
-    #     if not shift_y ==0 :
-    #         delta_angle = t_angle - uniq_angles[position_0]+90
-    #         tmp_shift_y = int(np.sin(delta_angle/180.*np.pi)*shift_y)
-    #         t = np.roll(t, -tmp_shift_y, -1)
-    #         t[:,0:np.abs(shift_y)]=0
-    #         t[:,-np.abs(shift_y):]=0
-
     t = cv_rotate(t, alfa)
-    # TODO: Fixit
-    # shift_y = y_shift_array[i]
-
-    #     t = np.roll(t, shift_y, axis=1)
-    #     if shift_y > 0:
-    #         t[:-shift_y] = t[shift_y:]
-    #         t[-shift_y:] = 0
-    #     elif shift_y < 0:
-    #         t[-shift_y:] = t[:shift_y]
-    #         t[:-shift_y] = 0
 
     if shift_x > 0:
         sinogram_fixed[i, :-shift_x] = t
@@ -702,22 +384,6 @@ s1 = np.require(sinogram_fixed[:, :, int(sinogram_fixed.shape[-1] // 3)],
 
 # %%
 # preview
-def test_rec(s1, uniq_angle):
-    plt.figure(figsize=(7, 7))
-    plt.imshow(s1[np.argsort(uniq_angle)], interpolation='bilinear', cmap=plt.cm.gray_r)
-    plt.colorbar()
-    plt.show()
-
-    bh_corr = 1.0
-    t_angles = (uniq_angles - uniq_angles.min()) <= 180  # remove angles >180
-    rec_slice = recon_2d_parallel(s1[t_angles], uniq_angles[t_angles] * np.pi / 180)
-
-    plt.figure(figsize=(10, 8))
-    plt.imshow(safe_median(rec_slice),
-               vmin=0, vmax=np.percentile(rec_slice, 95) * 1.2, cmap=plt.cm.viridis)
-    plt.axis('equal')
-    plt.colorbar()
-    plt.show()
 
 
 # %%
@@ -735,7 +401,7 @@ plt.xlabel('Номер канала детектора')
 plt.ylabel('Номер угла поворота')
 
 # %%
-#TODO: check mu physical value
+# TODO: check mu physical value
 sinogram_fixed_median = np.median(sinogram_fixed.sum(axis=-1).sum(axis=-1))
 corr_factor = sinogram_fixed.sum(axis=-1).sum(axis=-1) / sinogram_fixed_median
 
@@ -754,7 +420,7 @@ test_rec(s1, uniq_angles)
 test_rec(s2, uniq_angles)
 
 # %%
-del data_0_orig, data_180_orig, data_images_good, data_images_crop
+del data_0_orig, data_180_orig, data_images_good, data_images_crop, data_images
 del sinogram, sinogram_fixed, uniq_angles, uniq_angles_orig, uniq_data_images
 
 # %%
@@ -773,16 +439,16 @@ for fr in files_to_remove:
         pass
 
 # %%
-uniq_angles, _ = tomotools.load_create_mm(os.path.join(tmp_dir, 'uniq_angles.tmp'),
-                                          shape=None, force_create=False,
-                                          dtype='float32')
-s1, _ = tomotools.load_create_mm(os.path.join(tmp_dir, 'sinogram_fixed.tmp'),
-                                 shape=None, force_create=False,
-                                 dtype='float32')
+uniq_angles, _ = load_create_mm(os.path.join(tmp_dir, 'uniq_angles.tmp'),
+                                shape=None, force_create=False,
+                                dtype='float32')
+s1, _ = load_create_mm(os.path.join(tmp_dir, 'sinogram_fixed.tmp'),
+                       shape=None, force_create=False,
+                       dtype='float32')
 
-rec_vol, _ = tomotools.load_create_mm(os.path.join(tmp_dir, 'rec.tmp'),
-                                      dtype=np.float32, force_create=False,
-                                      shape=(s1.shape[-1], s1.shape[1], s1.shape[1]))
+rec_vol, _ = load_create_mm(os.path.join(tmp_dir, 'rec.tmp'),
+                            dtype=np.float32, force_create=False,
+                            shape=(s1.shape[-1], s1.shape[1], s1.shape[1]))
 
 
 # %%
@@ -962,58 +628,12 @@ plt.show()
 
 
 # %%
-def reshape_volume(volume, reshape):
-    res = np.zeros([s // reshape for s in volume.shape], dtype='float32')
-    xs, ys, zs = [s * reshape for s in res.shape]
-    for x, y, z in np.ndindex(reshape, reshape, reshape):
-        res += volume[x:xs:reshape, y:ys:reshape, z:zs:reshape]
-    return res / reshape ** 3
-
-
-# %%
-def save_amira(in_array, out_path, reshape=3):
-    data_path = out_path
-    with open(os.path.join(data_path, 'amira.raw'), 'wb') as amira_file:
-        reshaped_vol = reshape_volume(in_array, reshape)
-        reshaped_vol.tofile(amira_file)
-        file_shape = reshaped_vol.shape
-        with open(os.path.join(data_path, 'tomo.hx'), 'w') as af:
-            af.write('# Amira Script\n')
-            af.write('remove -all\n')
-            af.write(r'[ load -raw ${SCRIPTDIR}/amira.raw little xfastest float 1 ' +
-                     str(file_shape[1]) + ' ' + str(file_shape[2]) + ' ' + str(file_shape[0]) +
-                     ' 0 ' + str(file_shape[1] - 1) + ' 0 ' + str(file_shape[2] - 1) + ' 0 ' + str(file_shape[0] - 1) +
-                     ' ] setLabel tomo.raw\n')
-
-
-# %%
-save_amira(rec_vol_filtered, tmp_dir, 3)
+save_amira(rec_vol_filtered, tmp_dir, tomo_info['specimen'], 3)
 
 # %%
 with h5py.File(os.path.join(tmp_dir, 'tomo_rec.h5'), 'w') as h5f:
     h5f.create_dataset('Reconstruction', data=rec_vol_filtered, chunks=True,
                        compression='lzf')
-
-# %%
-# import ipyvolume as ipv
-
-# %%
-# ipv.figure()
-# ipv.volshow(reshape_volume(rec_vol_filtered,10),
-#             max_shape=1024,
-#             extent=[[0, rec_vol_filtered.shape[2]*9e-3],
-#                    [0, rec_vol_filtered.shape[1]*9e-3],
-#                    [0, rec_vol_filtered.shape[0]*9e-3]]
-#            )
-# ipv.xlim(0, rec_vol_filtered.shape[2]*9e-3)
-# ipv.xlabel('mm')
-# ipv.ylim(0, rec_vol_filtered.shape[1]*9e-3)
-# ipv.ylabel('mm')
-# ipv.zlim(0, rec_vol_filtered.shape[0]*9e-3)
-# ipv.zlabel('mm')
-# ipv.squarelim()
-# # ipv.show()
-# ipv.save(os.path.join(tmp_dir,'tomo.html'))
 
 # %%
 files_to_remove = glob(os.path.join(tmp_dir, '*.tmp'))
@@ -1031,7 +651,7 @@ for fr in files_to_remove:
         pass
 
 # %%
-tomotools.mkdir_p(os.path.join(storage_dir, experiment_id))
+mkdir_p(os.path.join(storage_dir, experiment_id))
 
 # %%
 # # !cp 'tomo.ini'  {os.path.join(storage_dir, experiment_id)}
@@ -1053,6 +673,7 @@ tomotools.mkdir_p(os.path.join(storage_dir, experiment_id))
 # * 2.2а (2020.03.18)
 #  - Add auto bh option
 #  - Remove sinogram normalization
+#  - move a lot of fuctions in tomotools
 # * 2.1а (2020.03.18)
 #  - Add local files loading
 #  - Improving poriosity support
