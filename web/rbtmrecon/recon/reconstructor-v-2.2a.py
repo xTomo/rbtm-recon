@@ -27,30 +27,34 @@ import logging
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+import time
 import os
-import h5py
+import configparser
+from glob import glob
 
 import pylab as plt
 import numpy as np
 import dask.array as da
+import h5py
+
+import cv2
 
 import numexpr as ne
-import cv2
-import time
+
 import astra
 
-import configparser
-from skimage.restoration import denoise_nl_means, estimate_sigma
-from skimage.transform import resize
 import scipy.optimize
 import scipy.signal
-from ipywidgets import interact, interactive, fixed, interact_manual
-import ipywidgets as widgets
+import scipy.ndimage
 
-from tqdm.notebook import tqdm
+from skimage.restoration import denoise_nl_means, estimate_sigma
+from skimage.transform import resize
+from skimage.metrics import normalized_root_mse
 
-from glob import glob
 import tomotools2 as tomotools
+
+import ipywidgets
+from tqdm.notebook import tqdm
 
 # %%
 # # settings for docker
@@ -149,7 +153,7 @@ x_min, x_max, y_min, y_max = 600, 2320, 100, 2550
 def show_frames_with_border(image_id, x_min, x_max, y_min, y_max):
     angles_sorted_ind = np.argsort(data_angles)
     t_image = data_images[angles_sorted_ind[image_id]].T
-    plt.figure(figsize=(15,10))
+    plt.figure(figsize=(15, 10))
     plt.subplot(121)
     plt.imshow(t_image, cmap=plt.cm.gray)
     plt.axis('equal')
@@ -163,13 +167,13 @@ def show_frames_with_border(image_id, x_min, x_max, y_min, y_max):
     print("x_min, x_max, y_min, y_max = {}, {}, {}, {}".format(x_min, x_max, y_min, y_max))
 
 
-ff = interact_manual(show_frames_with_border,
-                     image_id = widgets.IntSlider(min=0, max=len(data_angles), step=1, value=0),
-                     x_min = widgets.IntSlider(min=0, max=data_images.shape[1], step=1, value=x_min),
-                     x_max = widgets.IntSlider(min=0, max=data_images.shape[1], step=1, value=x_max),
-                     y_min = widgets.IntSlider(min=0, max=data_images.shape[2], step=1, value=y_min),
-                     y_max = widgets.IntSlider(min=0, max=data_images.shape[2], step=1, value=y_max)
-                              )
+ff = ipywidgets.interact_manual(show_frames_with_border,
+                                image_id=ipywidgets.IntSlider(min=0, max=len(data_angles), step=1, value=0),
+                                x_min=ipywidgets.IntSlider(min=0, max=data_images.shape[1], step=1, value=x_min),
+                                x_max=ipywidgets.IntSlider(min=0, max=data_images.shape[1], step=1, value=x_max),
+                                y_min=ipywidgets.IntSlider(min=0, max=data_images.shape[2], step=1, value=y_min),
+                                y_max=ipywidgets.IntSlider(min=0, max=data_images.shape[2], step=1, value=y_max)
+                                )
 # show_frames_with_border(data_images, 0, 700, 2000, 1100, 1500)
 
 
@@ -185,8 +189,8 @@ except KeyError:
 # %%
 data_images_crop, _ = tomotools.load_create_mm(os.path.join(tmp_dir, 'data_images_crop.tmp'),
                                                shape=(len(data_angles),
-                                                      x_max-x_min,
-                                                      y_max-y_min),
+                                                      x_max - x_min,
+                                                      y_max - y_min),
                                                dtype='float32')
 for i in range(len(data_angles)):
     data_images_crop[i] = data_images[i, x_min:x_max, y_min:y_max]
@@ -301,6 +305,7 @@ cbar = plt.colorbar()
 cbar.set_label('Пропускание, усл.ед.', rotation=90)
 plt.title('Синограмма без коррекции')
 
+
 # %%
 # # build frames for video
 # images_dir = os.path.join(tmp_dir,'images')
@@ -318,9 +323,6 @@ plt.title('Синограмма без коррекции')
 # # !cd {images_dir} && rm prj.mp4
 
 # %%
-import scipy.ndimage
-
-
 def my_rc(sino0, level):
     def get_my_b(level):
         t = np.mean(sino0, axis=0)
@@ -368,13 +370,8 @@ plt.imshow(tmp_sinogram, cmap=plt.cm.viridis, interpolation='nearest')
 plt.axis('tight')
 plt.colorbar(orientation='horizontal')
 
+
 # %%
-from skimage.metrics import normalized_root_mse
-from scipy.ndimage.filters import gaussian_filter
-from scipy.optimize import minimize
-import cv2
-
-
 def cv_rotate(x, angle):
     """
     Rotate square array using OpenCV2 around center of the array
@@ -391,7 +388,7 @@ def cv_rotate(x, angle):
 
 
 def smooth(x):
-    return x - gaussian_filter(x, 50) + gaussian_filter(x, 10)
+    return x - scipy.ndimage.filters.gaussian_filter(x, 50) + scipy.ndimage.filters.gaussian_filter(x, 10)
 
 
 def find_axis_posiotion(image_0, image_180):
@@ -460,7 +457,7 @@ def find_axis_posiotion(image_0, image_180):
 
     shift_0 = min_pos
     x0 = [1., shift_0],
-    res = minimize(corr, x0, method='Powell')
+    res = scipy.optimize.minimize(corr, x0, method='Powell')
     return res
 
 
@@ -657,7 +654,8 @@ cbar.set_label('Поглощение, усл.ед.', rotation=90)
 # %%
 sinogram_fixed, _ = tomotools.load_create_mm(os.path.join(tmp_dir, 'sinogram_fixed.tmp'),
                                              shape=(
-                                             sinogram.shape[0], sinogram.shape[1] + abs(shift_x), sinogram.shape[2]),
+                                                 sinogram.shape[0], sinogram.shape[1] + abs(shift_x),
+                                                 sinogram.shape[2]),
                                              dtype='float32', force_create=True)
 
 # fix axis tlit
@@ -832,9 +830,9 @@ sinogram_fixed_median = np.median(sinogram_fixed.sum(axis=-1).sum(axis=-1))
 corr_factor = sinogram_fixed.sum(axis=-1).sum(axis=-1) / sinogram_fixed_median
 
 # %%
-# TODO: fix bad data
-for i in range(len(sinogram_fixed)):
-    sinogram_fixed[i] = sinogram_fixed[i] / corr_factor[i]
+# # TODO: fix bad data
+# for i in range(len(sinogram_fixed)):
+#     sinogram_fixed[i] = sinogram_fixed[i] / corr_factor[i]
 
 # %%
 s2 = np.require(sinogram_fixed[:, :, int(sinogram_fixed.shape[-1] // 2)],
@@ -866,26 +864,63 @@ for fr in files_to_remove:
 
 # %%
 uniq_angles, _ = tomotools.load_create_mm(os.path.join(tmp_dir, 'uniq_angles.tmp'),
-                                          shape=None, force_create=False, 
+                                          shape=None, force_create=False,
                                           dtype='float32')
 s1, _ = tomotools.load_create_mm(os.path.join(tmp_dir, 'sinogram_fixed.tmp'),
-                                 shape=None, force_create=False, 
+                                 shape=None, force_create=False,
                                  dtype='float32')
 
 rec_vol, _ = tomotools.load_create_mm(os.path.join(tmp_dir, 'rec.tmp'),
-                                      dtype=np.float32, force_create=False, 
+                                      dtype=np.float32, force_create=False,
                                       shape=(s1.shape[-1], s1.shape[1], s1.shape[1]))
+
+
+# %%
+def calc_raddon_inv(sinogram):
+    return sinogram.sum(axis=-1)
+
+
+def radon_metrics(sinogram):
+    radon_inv = calc_raddon_inv(sinogram)
+    radon_inv = radon_inv / radon_inv.mean()
+    std = np.std(radon_inv)
+    res = std
+    return res
+
+
+sino = s1[..., int(s1.shape[-1] // 2)].copy()
+sino[sino < 0] = 0
+opt_func = lambda x: radon_metrics(np.power(sino, x))
+
+optimal_gamma = scipy.optimize.minimize(opt_func, [1.0, ], method='Nelder-Mead')
+print(optimal_gamma)
+
+# radon_inv = calc_raddon_inv(np.power(sino, optimal_gamma['x']))
+xr = np.arange(1, 3, 0.1)
+plt.figure(figsize=(12, 6))
+plt.subplot(121)
+plt.plot(xr, [opt_func(x) for x in xr])
+plt.plot([optimal_gamma.x, ], opt_func(optimal_gamma.x), 'ro')
+plt.grid()
+plt.subplot(122)
+plt.plot(calc_raddon_inv(sino))
+plt.grid()
+plt.show()
 
 # %%
 # # %%timeit
 # preview
-bh_corr = 1.0
+bh_corr = optimal_gamma.x
 sss = s1[..., int(s1.shape[-1] // 2)]
 t_angles = (uniq_angles - uniq_angles.min()) <= 180  # remove angles >180
 s4 = sss.copy()
-# s4[s4<0] = 0
+
+s4[s4 < 0] = 0
+s4 = np.power(s4, bh_corr)
 
 rec_slice = astra_tomo2d_parallel(s4[t_angles], uniq_angles[t_angles] * np.pi / 180)
+
+print('rec_slice.shape=', rec_slice.shape)
 
 plt.figure(figsize=(10, 8))
 plt.imshow(safe_median(rec_slice),
@@ -894,6 +929,10 @@ plt.axis('equal')
 plt.colorbar()
 plt.show()
 
+plt.figure(figsize=(10, 5))
+plt.plot(safe_median(rec_slice)[870, :], '-o', ms=3, lw=2.0)
+plt.grid()
+plt.show()
 
 # %%
 # multi 2d case
@@ -1101,7 +1140,9 @@ tomotools.mkdir_p(os.path.join(storage_dir, experiment_id))
 
 # %% [markdown]
 # # Changelog:
-#
+# * 2.2а (2020.03.18)
+#  - Add auto bh option
+#  - Remove sinogram normalization
 # * 2.1а (2020.03.18)
 #  - Add local files loading
 #  - Improving poriosity support
