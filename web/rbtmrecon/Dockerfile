@@ -9,7 +9,7 @@ ENV PATH /opt/conda/bin:$PATH
 
 RUN DEBIAN_FRONTEND=noninteractive  apt-get update --fix-missing && apt-get install -y wget bzip2 ca-certificates \
     libglib2.0-0 libxext6 libsm6 libxrender1 htop libgl1-mesa-glx\
-    git mercurial subversion && \
+    git mercurial subversion mc vim && \
     apt-get clean && \
     apt-get autoremove -y && apt-get autoclean -y &&\
     rm -rf /var/lib/apt/lists/*
@@ -44,6 +44,9 @@ RUN echo "c.NotebookApp.ip = '0.0.0.0'" >> ~/.jupyter/jupyter_notebook_config.py
 RUN echo "c.NotebookApp.port = 5551" >> ~/.jupyter/jupyter_notebook_config.py 
 RUN echo "c.NotebookApp.open_browser = False" >> ~/.jupyter/jupyter_notebook_config.py 
 RUN echo "c.NotebookApp.password = u'sha1:b53c6ff4cf18:365ffefa7ddea6908cf8ce15e63826df112990c2'" >> ~/.jupyter/jupyter_notebook_config.py
-RUN echo "c.NotebookApp.notebook_dir = '/storage'" >> ~/.jupyter/jupyter_notebook_config.py 
-
-CMD bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && cd /rbtm/recon/ && python tomo_worker.py"
+RUN echo "c.NotebookApp.notebook_dir = '/storage'" >> ~/.jupyter/jupyter_notebook_config.py
+CMD bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && \
+            chmod -R a+rwx /rbtm/recon/ && \
+            cd /rbtm/recon/ && \
+            jupytext --to notebook reconstructor.py && \
+            python tomo_worker.py"

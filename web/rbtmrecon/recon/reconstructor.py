@@ -494,7 +494,7 @@ s4 = sss.copy()
 s4[s4 < 0] = 0
 s4 = np.power(s4, bh_corr)
 
-rec_slice = recon_2d_parallel(s4[t_angles], uniq_angles[t_angles] * np.pi / 180)
+rec_slice = recon_2d_parallel(s4[t_angles], uniq_angles[t_angles])
 
 print('rec_slice.shape=', rec_slice.shape)
 
@@ -514,7 +514,7 @@ plt.show()
 # multi 2d case
 t = time.time()
 print(s1.shape)
-angles = np.array(uniq_angles) * np.pi / 180
+angles = np.array(uniq_angles)
 for i in tqdm(range(0, s1.shape[-1])):
     sino = s1[:, :, i].copy()
     sino[sino < 0] = 0

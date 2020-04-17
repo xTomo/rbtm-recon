@@ -3,16 +3,16 @@ import logging
 import os
 import subprocess
 import time
-from shutil import copy, copytree
+from shutil import copy
 
 import nbformat
 
-import tomotools as tomotools
+import tomotools
 from tomo_queue import get_rec_queue_next_obj, set_object_status
 
 logging.basicConfig(level=logging.INFO)
 
-NOTEBOOK_NAME = 'reconstructor-v-2.2a.ipynb'
+NOTEBOOK_NAME = 'reconstructor.ipynb'
 
 
 def _notebook_auto_run(notebook):
@@ -82,7 +82,8 @@ def copy_python_files(obj_id, storage_dir):
     copy(NOTEBOOK_NAME, out_dir)
     copy(NOTEBOOK_NAME[:-5] + 'py', out_dir)
     copy('tomotools.py', out_dir)
-    copytree('tomo', out_dir)
+    tomotools.mkdir_p(os.path.join(out_dir, 'tomo', 'recon'))  # TODO : reaplace in copytree in python 3.8
+    copy(os.path.join('tomo', 'recon', 'astra_utils.py'), os.path.join(out_dir, 'tomo', 'recon'))
     return out_dir
 
 
