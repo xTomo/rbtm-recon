@@ -30,5 +30,6 @@ RUN /opt/conda/bin/conda env create -f environment.yml && /opt/conda/bin/conda c
 COPY . /webrbtm
 RUN echo "MONGODB_URI = 'mongodb://web_database_1:27017'" > /webrbtm/webrecon/conf.py
 
-CMD bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xweb && cd /webrbtm/webrecon/ && gunicorn  -t 600 -w 8 -b 0.0.0.0:5550 web_recon:app"
+CMD bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xweb && \
+           cd /webrbtm/webrecon/ && gunicorn  -t 600 -w 8 -b 0.0.0.0:5550 web_recon:app"
 

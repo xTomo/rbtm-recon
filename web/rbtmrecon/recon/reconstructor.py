@@ -85,7 +85,6 @@ show_exp_data(empty_beam, data_images)
 # TODO: store this in ini file
 x_min, x_max, y_min, y_max = 600, 2320, 100, 2550
 
-
 # %%
 def show_frames_with_border(image_id, x_min, x_max, y_min, y_max):
     angles_sorted_ind = np.argsort(data_angles)
@@ -201,9 +200,6 @@ plt.axis('tight')
 plt.colorbar(orientation='horizontal')
 
 # %%
-
-
-
 position_0, position_180 = get_angles_at_180_deg(uniq_angles)
 
 posiotion_180_sorted = np.argwhere(np.isclose(position_180, np.argsort(uniq_angles)))[0][0]
@@ -380,11 +376,6 @@ for i in tqdm(range(sinogram.shape[0])):
 s1_angles = uniq_angles
 s1 = np.require(sinogram_fixed[:, :, int(sinogram_fixed.shape[-1] // 3)],
                 dtype=np.float32, requirements=['C'])
-
-
-# %%
-# preview
-
 
 # %%
 test_rec(s1, s1_angles)
@@ -625,7 +616,6 @@ plt.hist(denoise_fast.ravel(), bins=100);
 plt.grid()
 
 plt.show()
-
 
 # %%
 save_amira(rec_vol_filtered, tmp_dir, tomo_info['specimen'], 3)

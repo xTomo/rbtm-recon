@@ -20,7 +20,7 @@ def put_object_rec_queue(obj_id, action='reconstruct'):
 
 def get_object(obj_id):
     try:
-        obj = to.find({'obj_id': obj_id}).sort('date', DESCENDING)[0]
+        obj = to.find({'obj_id': obj_id}).sort('date', DESCENDING).limit(1)[0]
         return obj
     except:
         return None
@@ -55,3 +55,8 @@ def get_logs(obj_id):
 
     res = ["{}: {}".format(str(obj['date']), obj['status']) for obj in objs]
     return res
+
+
+def get_last_n(n):
+    objs = to.find().sort('date', DESCENDING).limit(n)
+    return list(objs)

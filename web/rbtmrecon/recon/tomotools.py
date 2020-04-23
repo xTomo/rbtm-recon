@@ -13,7 +13,7 @@ import pylab as plt
 import requests
 import scipy.ndimage
 import scipy.optimize
-from skimage.metrics import normalized_root_mse
+from skimage.metrics import normalized_root_mse  # noqa
 from tqdm import tqdm_notebook as tqdm
 
 import tomo.recon.astra_utils as astra_utils

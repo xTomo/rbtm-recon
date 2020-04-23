@@ -28,7 +28,7 @@ COPY environment.yml /rbtm/
 RUN /opt/conda/bin/conda env create -f environment.yml  && /opt/conda/bin/conda clean -y --all 
 
 COPY . /rbtm
-RUN echo "MONGODB_URI = 'mongodb://web_database_1:27017'" > /rbtm/recon/conf.py
+
 VOLUME /fast
 VOLUME /storage
 EXPOSE 5551
@@ -37,16 +37,22 @@ ARG GROUP_ID=1000
 RUN groupadd -g ${GROUP_ID} makov &&\
     useradd -l -m -u ${USER_ID} -g makov makov
 # RUN useradd -ms /bin/bash makov
+RUN chown -R makov /rbtm
 
 USER makov
+
+RUN echo "MONGODB_URI = 'mongodb://web_database_1:27017'" > /rbtm/recon/conf.py
+
 RUN bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && jupyter notebook --generate-config"
-RUN echo "c.NotebookApp.ip = '0.0.0.0'" >> ~/.jupyter/jupyter_notebook_config.py
-RUN echo "c.NotebookApp.port = 5551" >> ~/.jupyter/jupyter_notebook_config.py 
-RUN echo "c.NotebookApp.open_browser = False" >> ~/.jupyter/jupyter_notebook_config.py 
-RUN echo "c.NotebookApp.password = u'sha1:b53c6ff4cf18:365ffefa7ddea6908cf8ce15e63826df112990c2'" >> ~/.jupyter/jupyter_notebook_config.py
-RUN echo "c.NotebookApp.notebook_dir = '/storage'" >> ~/.jupyter/jupyter_notebook_config.py
+RUN echo "\
+c.NotebookApp.ip = '0.0.0.0'\n\
+c.NotebookApp.port = 5551\n\
+c.NotebookApp.open_browser = False\n\
+c.NotebookApp.password = u'sha1:b53c6ff4cf18:365ffefa7ddea6908cf8ce15e63826df112990c2'\n\
+c.NotebookApp.notebook_dir = '/storage'" >> ~/.jupyter/jupyter_notebook_config.py
 CMD bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && \
-            chmod -R a+rwx /rbtm/recon/ && \
+            umask 0002 && \
+#            chmod  ug+w /rbtm/recon/ && \
             cd /rbtm/recon/ && \
             jupytext --to notebook reconstructor.py && \
             python tomo_worker.py"
