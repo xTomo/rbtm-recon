@@ -44,12 +44,9 @@ import numexpr as ne
 import scipy.optimize
 import scipy.ndimage
 
-from skimage.restoration import denoise_nl_means, estimate_sigma
-from skimage.transform import resize
-
 from tomotools import STORAGE_SERVER, safe_median, recon_2d_parallel, get_tomoobject_info, get_experiment_hdf5, \
     mkdir_p, show_exp_data, load_create_mm, load_tomo_data, find_good_frames, group_data, correct_rings, tqdm, \
-    get_angles_at_180_deg, smooth, cv_rotate, find_axis_posiotion, test_rec, save_amira
+    get_angles_at_180_deg, smooth, cv_rotate, find_axis_posiotion, test_rec, save_amira, show_frames_with_border
 
 import ipywidgets
 
@@ -86,24 +83,8 @@ show_exp_data(empty_beam, data_images)
 x_min, x_max, y_min, y_max = 600, 2320, 100, 2550
 
 # %%
-def show_frames_with_border(image_id, x_min, x_max, y_min, y_max):
-    angles_sorted_ind = np.argsort(data_angles)
-    t_image = data_images[angles_sorted_ind[image_id]].T
-    plt.figure(figsize=(15, 10))
-    plt.subplot(121)
-    plt.imshow(t_image, cmap=plt.cm.gray)
-    plt.axis('equal')
-    plt.hlines([y_min, y_max], x_min, x_max, 'r')
-    plt.vlines([x_min, x_max], y_min, y_max, 'g')
-    plt.xlabel('X')
-    plt.ylabel('Y')
-    plt.subplot(122)
-    plt.imshow(t_image[y_min:y_max, x_min:x_max], cmap=plt.cm.gray)
-    plt.show()
-    print("x_min, x_max, y_min, y_max = {}, {}, {}, {}".format(x_min, x_max, y_min, y_max))
-
-
-ff = ipywidgets.interact_manual(show_frames_with_border,
+ff = ipywidgets.interact_manual(show_frames_with_border, data_images=ipywidgets.fixed(data_images),
+                                data_angles=ipywidgets.fixed(data_angles),
                                 image_id=ipywidgets.IntSlider(min=0, max=len(data_angles), step=1, value=0),
                                 x_min=ipywidgets.IntSlider(min=0, max=data_images.shape[1], step=1, value=x_min),
                                 x_max=ipywidgets.IntSlider(min=0, max=data_images.shape[1], step=1, value=x_max),
@@ -182,6 +163,7 @@ rc_level = 10
 # %%
 tmp_sinogram = sinogram[np.argsort(uniq_angles), :, int(sinogram.shape[-1] // 2)]
 ring_corr = correct_rings(tmp_sinogram, rc_level)
+
 plt.figure(figsize=(8, 8))
 plt.imshow(ring_corr, cmap=plt.cm.viridis, interpolation='nearest')
 plt.axis('tight')
@@ -443,45 +425,54 @@ rec_vol, _ = load_create_mm(os.path.join(tmp_dir, 'rec.tmp'),
 
 
 # %%
-def calc_raddon_inv(sinogram):
-    return sinogram.sum(axis=-1)
+def find_optimal_bh(sino, angles, show_polt=True):
+    def calc_radon_inv(sinogram):
+        return sinogram.sum(axis=-1)
 
+    def radon_metrics(sinogram):
+        radon_inv = calc_radon_inv(sinogram)
+        radon_inv = radon_inv / radon_inv.mean()
+        std = np.std(radon_inv)
+        res = std
+        return res
 
-def radon_metrics(sinogram):
-    radon_inv = calc_raddon_inv(sinogram)
-    radon_inv = radon_inv / radon_inv.mean()
-    std = np.std(radon_inv)
-    res = std
-    return res
+    sino[sino < 0] = 0
+    opt_func = lambda x: radon_metrics(np.power(sino, x))
+
+    optimal_gamma = scipy.optimize.minimize(opt_func, [1.0, ], method='Nelder-Mead')
+
+    if show_polt:
+        xr = np.arange(1, np.max([3, optimal_gamma * 1.1]), 0.1)
+        plt.figure(figsize=(12, 6))
+        plt.subplot(121)
+        plt.plot(xr, [opt_func(x) for x in xr])
+        plt.plot([optimal_gamma.x, ], opt_func(optimal_gamma.x), 'ro')
+        plt.grid()
+        plt.subplot(122)
+        plt.title('Radon invatiant')
+        plt.plot(angles, calc_radon_inv(sino))  # TODO: sort for angles order
+        plt.grid()
+        plt.show()
+
+    return optimal_gamma
 
 
 sino = s1[..., int(s1.shape[-1] // 2)].copy()
-sino[sino < 0] = 0
-opt_func = lambda x: radon_metrics(np.power(sino, x))
-
-optimal_gamma = scipy.optimize.minimize(opt_func, [1.0, ], method='Nelder-Mead')
+optimal_gamma = find_optimal_bh(sino, uniq_angles)
 print(optimal_gamma)
 
-# radon_inv = calc_raddon_inv(np.power(sino, optimal_gamma['x']))
-xr = np.arange(1, 3, 0.1)
-plt.figure(figsize=(12, 6))
-plt.subplot(121)
-plt.plot(xr, [opt_func(x) for x in xr])
-plt.plot([optimal_gamma.x, ], opt_func(optimal_gamma.x), 'ro')
-plt.grid()
-plt.subplot(122)
-plt.plot(calc_raddon_inv(sino))  # TODO: sort for angles order
-plt.grid()
-plt.show()
-
 # %%
-# # %%timeit
 # preview
-bh_corr = optimal_gamma.x
+need_optimal_bh = True
+if need_optimal_bh:
+    bh_corr = optimal_gamma.x
+else:
+    bh_corr = 1
+
 sss = s1[..., int(s1.shape[-1] // 2)]
 t_angles = (uniq_angles - uniq_angles.min()) <= 180  # remove angles >180
-s4 = sss.copy()
 
+s4 = sss.copy()
 s4[s4 < 0] = 0
 s4 = np.power(s4, bh_corr)
 
@@ -518,104 +509,15 @@ print(time.time() - t)
 rec_vol_filtered = rec_vol
 
 # %%
-for i in range(10):
-    plt.figure(figsize=(8, 8))
-    plt.imshow(rec_vol_filtered[i * rec_vol_filtered.shape[0] // 10], cmap=plt.cm.viridis, vmin=0)
-    plt.axis('equal')
-    plt.title(i * i * rec_vol_filtered.shape[0] // 10)
-    plt.colorbar()
-    plt.show()
-
-# %%
-for i in range(10):
-    plt.figure(figsize=(8, 8))
-    plt.imshow(rec_vol_filtered[:, i * rec_vol_filtered.shape[1] // 10, :], cmap=plt.cm.viridis, vmin=0)
-    plt.axis('equal')
-    plt.title(i * i * rec_vol_filtered.shape[0] // 10)
-    plt.colorbar()
-    plt.show()
-
-# %%
-for i in range(10):
-    plt.figure(figsize=(8, 8))
-    plt.imshow(rec_vol_filtered[:, :, i * rec_vol_filtered.shape[2] // 10], cmap=plt.cm.viridis, vmin=0)
-    plt.axis('equal')
-    plt.title(i * i * rec_vol_filtered.shape[0] // 10)
-    plt.colorbar()
-    plt.show()
-
-# %%
-noisy = rec_vol_filtered[int(rec_vol_filtered.shape[0] * 0.5)].astype('float64')
-noisy = resize(noisy, (noisy.shape[0] // 1, noisy.shape[1] // 1))
-# noisy = rec_vol_filtered[int(rec_vol_filtered.shape[0]*0.75)][::1,::1]
-sigma_est = np.mean(estimate_sigma(noisy, multichannel=False))
-print("estimated noise standard deviation = {}".format(sigma_est))
-
-patch_kw = dict(patch_size=7,  # 5x5 patches
-                patch_distance=15,  # 13x13 search area
-                multichannel=False)
-
-# 1 algorithm
-denoise = denoise_nl_means(noisy, h=1.5 * sigma_est, fast_mode=True,
-                           **patch_kw)
-
-# 2 algorithm
-denoise_fast = denoise_nl_means(noisy, h=0.8 * sigma_est, fast_mode=True,
-                                **patch_kw)
-
-plt.figure(figsize=(6, 12))
-plt.subplot(311)
-plt.imshow(noisy, interpolation='bilinear')
-plt.axis('off')
-plt.colorbar()
-plt.title('noisy')
-
-plt.subplot(312)
-plt.imshow(denoise, interpolation='bilinear')
-plt.axis('off')
-plt.colorbar()
-plt.title('non-local means\n(1)')
-
-plt.subplot(313)
-plt.imshow(denoise_fast, interpolation='bilinear')
-plt.axis('off')
-plt.colorbar()
-plt.title('non-local means\n(2)')
-
-plt.show()
-
-plt.figure(figsize=(8, 8))
-plt.subplot(321)
-plt.imshow(noisy, interpolation='bilinear')
-plt.axis('off')
-plt.colorbar()
-plt.title('noisy')
-
-plt.subplot(322)
-plt.hist(noisy.ravel(), bins=100);
-plt.grid()
-
-plt.subplot(323)
-plt.imshow(denoise, interpolation='bilinear')
-plt.axis('off')
-plt.colorbar()
-plt.title('non-local means\n(1)')
-
-plt.subplot(324)
-plt.hist(denoise.ravel(), bins=100);
-plt.grid()
-
-plt.subplot(325)
-plt.imshow(denoise_fast, interpolation='bilinear')
-plt.axis('off')
-plt.colorbar()
-plt.title('non-local means\n(2)')
-
-plt.subplot(326)
-plt.hist(denoise_fast.ravel(), bins=100);
-plt.grid()
-
-plt.show()
+for j in range(3):
+    for i in range(10):
+        plt.figure(figsize=(8, 8))
+        plt.imshow(rec_vol_filtered.take(i * rec_vol_filtered.shape[j] // 10, axis=j),
+                   cmap=plt.cm.viridis, vmin=0)
+        plt.axis('equal')
+        plt.title(i * i * rec_vol_filtered.shape[j] // 10)
+        plt.colorbar()
+        plt.show()
 
 # %%
 save_amira(rec_vol_filtered, tmp_dir, tomo_info['specimen'], 3)

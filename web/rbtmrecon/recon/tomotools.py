@@ -194,7 +194,7 @@ def load_tomo_data(data_file, tmp_dir):
     # TODO: добавить поддержку, когда много кадров на одном угле
     data_images, data_angles = get_frame_group(data_file, 'data', tmp_dir)
 
-    data_images_clear = da.from_array(data_images, chunks=(1, 1024, 1024)) - dark_image
+    data_images_clear = da.from_array(data_images, chunks=(16, 128, 128)) - dark_image
     return empty_beam, data_images_clear, data_angles
 
 
@@ -431,6 +431,23 @@ def save_amira(in_array, out_path, name, reshape=3):
                      str(file_shape[2]) + ' ' + str(file_shape[1]) + ' ' + str(file_shape[0]) +
                      ' 0 ' + str(file_shape[2] - 1) + ' 0 ' + str(file_shape[1] - 1) + ' 0 ' + str(file_shape[0] - 1) +
                      ' ] setLabel ' + name + '\n')
+
+
+def show_frames_with_border(data_images, data_angles, image_id, x_min, x_max, y_min, y_max):
+    angles_sorted_ind = np.argsort(data_angles)
+    t_image = data_images[angles_sorted_ind[image_id]].T
+    plt.figure(figsize=(15, 10))
+    plt.subplot(121)
+    plt.imshow(t_image, cmap=plt.cm.gray)
+    plt.axis('equal')
+    plt.hlines([y_min, y_max], x_min, x_max, 'r')
+    plt.vlines([x_min, x_max], y_min, y_max, 'g')
+    plt.xlabel('X')
+    plt.ylabel('Y')
+    plt.subplot(122)
+    plt.imshow(t_image[y_min:y_max, x_min:x_max], cmap=plt.cm.gray)
+    plt.show()
+    print("x_min, x_max, y_min, y_max = {}, {}, {}, {}".format(x_min, x_max, y_min, y_max))
 
 # %%
 # import ipyvolume as ipv
