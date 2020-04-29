@@ -398,7 +398,7 @@ def test_rec(s1, uniq_angles):
     plt.show()
 
     bh_corr = 1.0
-    t_angles = (uniq_angles - uniq_angles.min()) <= 180  # remove angles >180
+    t_angles = (uniq_angles - uniq_angles.min()) < 180  # remove angles >180
     rec_slice = recon_2d_parallel(s1[t_angles], uniq_angles[t_angles])
 
     plt.figure(figsize=(10, 8))

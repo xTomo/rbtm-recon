@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.4.0
+#       jupytext_version: 1.4.2
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -26,7 +26,7 @@
 import logging
 
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.WARN)
 import time
 import os
 import configparser
@@ -63,6 +63,9 @@ exp_src_dir = '/exp_src'
 # %%
 tomo_info = get_tomoobject_info(experiment_id, STORAGE_SERVER)
 tomo_info
+
+# %%
+recon_config = {'sample': tomo_info}
 
 # %% [markdown]
 # # Loading experimental data
@@ -102,10 +105,16 @@ except KeyError:
     pass
 
 # %%
+recon_config['roi'] = {'x_min': x_min,
+                       'x_max': x_max,
+                       'y_min': y_min,
+                       'y_max': y_max}
+
+# %%
 data_images_crop, _ = load_create_mm(os.path.join(tmp_dir, 'data_images_crop.tmp'),
                                      shape=(len(data_angles), x_max - x_min, y_max - y_min),
                                      dtype='float32')
-for i in range(len(data_angles)):
+for i in tqdm(range(len(data_angles))):
     data_images_crop[i] = data_images[i, x_min:x_max, y_min:y_max]
 
 empty_beam = empty_beam[x_min:x_max, y_min:y_max]
@@ -148,38 +157,37 @@ sinogram, _ = load_create_mm(os.path.join(tmp_dir, 'sinogram.tmp'), shape=uniq_d
 ne.evaluate('-log(uniq_data_images)', out=sinogram);
 
 # %%
-plt.gray()
-plt.figure(figsize=(7, 5))
-s = sinogram[np.argsort(uniq_angles), :, int(sinogram.shape[-1] // 2)]
-plt.imshow(s, interpolation='bilinear')
+rc_level = 10
+
+# %%
+preview_slice_number = int(sinogram.shape[-1] // 2)
+tmp_sinogram = sinogram[np.argsort(uniq_angles), :, preview_slice_number]
+ring_corr = correct_rings(tmp_sinogram, rc_level)
+
+plt.figure(figsize=(15, 8))
+plt.subplot(131)
+plt.imshow(tmp_sinogram, cmap=plt.cm.viridis, interpolation='bilinear')
 plt.axis('tight')
 cbar = plt.colorbar()
 cbar.set_label('Пропускание, усл.ед.', rotation=90)
 plt.title('Синограмма без коррекции')
-
-# %%
-rc_level = 10
-
-# %%
-tmp_sinogram = sinogram[np.argsort(uniq_angles), :, int(sinogram.shape[-1] // 2)]
-ring_corr = correct_rings(tmp_sinogram, rc_level)
-
-plt.figure(figsize=(8, 8))
-plt.imshow(ring_corr, cmap=plt.cm.viridis, interpolation='nearest')
+plt.subplot(132)
+plt.imshow(ring_corr, cmap=plt.cm.viridis, interpolation='bilinear')
 plt.axis('tight')
-plt.colorbar(orientation='horizontal')
+cbar = plt.colorbar()
+cbar.set_label('Пропускание, усл.ед.', rotation=90)
+plt.title('Синограмма с коррекцией колец')
+
+plt.subplot(133)
+plt.imshow(tmp_sinogram - ring_corr, cmap=plt.cm.viridis, interpolation='bilinear')
+plt.axis('tight')
+cbar = plt.colorbar()
+cbar.set_label('Пропускание, усл.ед.', rotation=90)
+plt.title('Разница');
 
 # %%
 for s in tqdm(range(sinogram.shape[1])):
     sinogram[:, s, :] = correct_rings(sinogram[:, s, :], rc_level)
-
-# %%
-tmp_sinogram = sinogram[np.argsort(uniq_angles), :, int(sinogram.shape[-1] // 2)]
-
-plt.figure(figsize=(8, 8))
-plt.imshow(tmp_sinogram, cmap=plt.cm.viridis, interpolation='nearest')
-plt.axis('tight')
-plt.colorbar(orientation='horizontal')
 
 # %%
 position_0, position_180 = get_angles_at_180_deg(uniq_angles)
@@ -207,8 +215,8 @@ for position_180 in posiotions_to_check:
     print(uniq_angles[position_180])
     data_0_orig = np.rot90(sinogram[position_0]).copy()
     data_180_orig = np.rot90(sinogram[position_180]).copy()
-    data_0 = cv2.medianBlur(data_0_orig, 3)
-    data_180 = cv2.medianBlur(data_180_orig, 3)
+    data_0 = safe_median(data_0_orig)
+    data_180 = safe_median(data_180_orig)
 
     data_0 = smooth(data_0)
     data_180 = smooth(data_180)
@@ -296,6 +304,13 @@ plt.colorbar()
 plt.show()
 
 # %%
+recon_config['axis_corr'] = {'shift_x': shift_x,
+                             'alfa': alfa,
+                             'angle_180': uniq_angles[position_180],
+                             'angle_0': uniq_angles[position_0]
+                             }
+
+# %%
 plt.gray()
 plt.figure(figsize=(8, 8))
 im_max = np.max([np.max(data_0_orig), np.max(data_180_orig)])
@@ -356,7 +371,7 @@ for i in tqdm(range(sinogram.shape[0])):
 
 # %%
 s1_angles = uniq_angles
-s1 = np.require(sinogram_fixed[:, :, int(sinogram_fixed.shape[-1] // 3)],
+s1 = np.require(sinogram_fixed[:, :, preview_slice_number],
                 dtype=np.float32, requirements=['C'])
 
 # %%
@@ -384,13 +399,8 @@ corr_factor = sinogram_fixed.sum(axis=-1).sum(axis=-1) / sinogram_fixed_median
 #     sinogram_fixed[i] = sinogram_fixed[i] / corr_factor[i]
 
 # %%
-s2 = np.require(sinogram_fixed[:, :, int(sinogram_fixed.shape[-1] // 2)],
+s2 = np.require(sinogram_fixed[:, :, preview_slice_number],
                 dtype=np.float32, requirements=['C'])
-
-# %%
-s2 = (s1.T / s1.sum(axis=-1) * s1.sum(axis=-1).mean()).T
-test_rec(s1, uniq_angles)
-test_rec(s2, uniq_angles)
 
 # %%
 del data_0_orig, data_180_orig, data_images_good, data_images_crop, data_images
@@ -442,43 +452,41 @@ def find_optimal_bh(sino, angles, show_polt=True):
     optimal_gamma = scipy.optimize.minimize(opt_func, [1.0, ], method='Nelder-Mead')
 
     if show_polt:
-        xr = np.arange(1, np.max([3, optimal_gamma * 1.1]), 0.1)
+        xr = np.arange(1, np.max([3, optimal_gamma.x * 1.1]), 0.1)
         plt.figure(figsize=(12, 6))
         plt.subplot(121)
+        plt.title('Optimal bh')
         plt.plot(xr, [opt_func(x) for x in xr])
         plt.plot([optimal_gamma.x, ], opt_func(optimal_gamma.x), 'ro')
         plt.grid()
         plt.subplot(122)
         plt.title('Radon invatiant')
-        plt.plot(angles, calc_radon_inv(sino))  # TODO: sort for angles order
+        plt.plot(angles[np.argsort(angles)], calc_radon_inv(sino)[np.argsort(angles)])  # TODO: sort for angles order
         plt.grid()
         plt.show()
 
-    return optimal_gamma
+    return optimal_gamma.x
 
-
-sino = s1[..., int(s1.shape[-1] // 2)].copy()
-optimal_gamma = find_optimal_bh(sino, uniq_angles)
-print(optimal_gamma)
 
 # %%
 # preview
-need_optimal_bh = True
+need_optimal_bh = False
 if need_optimal_bh:
-    bh_corr = optimal_gamma.x
+    sino = s1[..., preview_slice_number].copy()
+    optimal_gamma = find_optimal_bh(sino, uniq_angles)
+    print(optimal_gamma)
+    bh_corr = optimal_gamma
 else:
     bh_corr = 1
 
-sss = s1[..., int(s1.shape[-1] // 2)]
-t_angles = (uniq_angles - uniq_angles.min()) <= 180  # remove angles >180
+sss = s1[..., preview_slice_number]
+t_angles = (uniq_angles - uniq_angles.min()) < 180  # remove angles >180
 
 s4 = sss.copy()
 s4[s4 < 0] = 0
 s4 = np.power(s4, bh_corr)
 
 rec_slice = recon_2d_parallel(s4[t_angles], uniq_angles[t_angles])
-
-print('rec_slice.shape=', rec_slice.shape)
 
 plt.figure(figsize=(10, 8))
 plt.imshow(safe_median(rec_slice),
@@ -493,6 +501,110 @@ plt.grid()
 plt.show()
 
 # %%
+recon_config['corr'] = {'bh': bh_corr}
+
+# %%
+from scipy.optimize import curve_fit
+from scipy.signal import medfilt
+
+
+def gauss(x, *p):
+    A, mu, sigma = p
+    return np.abs(A) * np.exp(-(x - mu) ** 2 / (2. * sigma ** 2))
+
+
+def gauss2(x, *p):
+    return gauss(x, p[0], p[1], p[2]) + gauss(x, p[3], p[4], p[5])
+
+
+def optimize_2gaussian(rec, mask):
+    hist, bin_edges = np.histogram(rec[mask], bins=1000)
+    bin_centres = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+    p0 = [1.e3, 0.0, 0.01,
+          1.e3, 0.3, 0.01]  # A1, mu1, sigma1, A2, mu2, sigma2
+
+    coeff, var_matrix = curve_fit(gauss2, bin_centres, hist, p0=p0)
+
+    coeff_g, var_matrix_g = curve_fit(gauss, bin_centres, hist, p0=[1., 0., 1.])
+
+    # Get the fitted curve
+    hist_fit = gauss2(bin_centres, *coeff)
+    hist_fit1 = gauss(bin_centres, coeff[0], coeff[1], coeff[2])
+    hist_fit2 = gauss(bin_centres, coeff[3], coeff[4], coeff[5])
+
+    hist_fit_g = gauss(bin_centres, *coeff_g)
+
+    plt.figure(figsize=(12, 10))
+    plt.subplot(311)
+    plt.title('Histogram. bh_corr= {:.3f}'.format(bh_corr))
+    plt.plot(bin_centres, hist, label='experiment data')
+    plt.plot(bin_centres, hist_fit, lw=2, label='Sum of 2 gausians fit. L2={:.1f}'.format(
+        np.mean(np.sqrt(np.sum((hist - hist_fit) ** 2)))))
+    plt.plot(bin_centres, hist_fit1, label='1st gausians')
+    plt.plot(bin_centres, hist_fit2, label='2nd gausians')
+    plt.plot(bin_centres, hist_fit_g, 'k', lw=2, label='Single Gaussian. L2={:.1f}'.format(
+        np.mean(np.sqrt(np.sum((hist - hist_fit_g) ** 2)))))
+    plt.grid()
+    plt.legend()
+
+    plt.subplot(312)
+    plt.title('Central cut')
+    plt.plot(medfilt(rec[rec.shape[0] // 2], 9))
+    plt.plot(medfilt(rec[:, rec.shape[1] // 2], 9))
+    plt.grid()
+
+    plt.subplot(337)
+    t = mask
+    ds = 500
+    plt.imshow(t[t.shape[0] // 2 - ds:t.shape[0] // 2 + ds,
+               t.shape[1] // 2 - ds:t.shape[1] // 2 + ds],
+               cmap=plt.cm.viridis)
+
+    plt.subplot(338)
+    t = rec * mask
+    ds = 500
+    plt.imshow(safe_median(t[
+                           t.shape[0] // 2 - ds:t.shape[0] // 2 + ds,
+                           t.shape[1] // 2 - ds:t.shape[1] // 2 + ds]),
+               cmap=plt.cm.viridis)
+
+    plt.subplot(339)
+    t = rec * mask
+    ds = 200
+    plt.imshow(safe_median(t[
+                           t.shape[0] // 2 - ds:t.shape[0] // 2 + ds,
+                           t.shape[1] // 2 - ds:t.shape[1] // 2 + ds]),
+               cmap=plt.cm.viridis)
+
+    plt.show()
+
+
+def create_circle_mask(x, y, r, size):
+    X, Y = np.meshgrid(np.arange(size), np.arange(size))
+    X = X - x
+    Y = Y - y
+    R = np.sqrt(X ** 2 + Y ** 2)
+    mask = R < r
+    return mask
+
+
+mask = create_circle_mask(870, 870, 470, rec_slice.shape[0])
+
+sss = s1[..., int(s1.shape[-1] // 2)]
+t_angles = (uniq_angles - uniq_angles.min()) < 180  # remove angles >180
+
+for bh_corr in np.arange(1, 5, 0.5):
+    print(bh_corr)
+    s4 = sss.copy()
+    s4[s4 < 0] = 0
+    s4 = np.power(s4, bh_corr)
+    s4 = s4 / np.mean(s4) * np.mean(sss)
+
+    rec_slice = recon_2d_parallel(s4[t_angles], uniq_angles[t_angles])
+    optimize_2gaussian(rec_slice, mask)
+
+# %%
 # multi 2d case
 t = time.time()
 print(s1.shape)
@@ -501,7 +613,7 @@ for i in tqdm(range(0, s1.shape[-1])):
     sino = s1[:, :, i].copy()
     sino[sino < 0] = 0
     sino = np.power(sino, bh_corr)  # BH!
-    t_angles = (uniq_angles - uniq_angles.min()) <= 180  # remove angles >180
+    t_angles = (uniq_angles - uniq_angles.min()) < 180  # remove angles >180
     rec_vol[i] = recon_2d_parallel(sino[t_angles], angles[t_angles])
 print(time.time() - t)
 
@@ -523,9 +635,65 @@ for j in range(3):
 save_amira(rec_vol_filtered, tmp_dir, tomo_info['specimen'], 3)
 
 # %%
-with h5py.File(os.path.join(tmp_dir, 'tomo_rec.h5'), 'w') as h5f:
+recon_config
+
+
+# %%
+def save_dict_to_hdf5(dic, filename):
+    """
+    ....
+    """
+    with h5py.File(filename, 'w') as h5file:
+        recursively_save_dict_contents_to_group(h5file, '/', dic)
+
+
+def recursively_save_dict_contents_to_group(h5file, path, dic):
+    """
+    ....
+    """
+    for key, item in dic.items():
+        if isinstance(item, (np.ndarray, int, float, np.int32, np.int64, np.float32, np.float64, str, bytes)):
+            h5file[path + key] = item
+        elif isinstance(item, dict):
+            recursively_save_dict_contents_to_group(h5file, path + key + '/', item)
+        else:
+            raise ValueError('Cannot save {} {} type'.format(item, type(item)))
+
+
+def load_dict_from_hdf5(filename):
+    """
+    ....
+    """
+    with h5py.File(filename, 'r') as h5file:
+        return recursively_load_dict_contents_from_group(h5file, '/')
+
+
+def recursively_load_dict_contents_from_group(h5file, path):
+    """
+    ....
+    """
+    ans = {}
+    for key, item in h5file[path].items():
+        if isinstance(item, h5py._hl.dataset.Dataset):
+            ans[key] = item.value
+        elif isinstance(item, h5py._hl.group.Group):
+            ans[key] = recursively_load_dict_contents_from_group(h5file, path + key + '/')
+    return ans
+
+
+# %%
+with h5py.File(os.path.join(tmp_dir, 'tomo_rec.' + tomo_info['specimen'] + '.h5'), 'w') as h5f:
     h5f.create_dataset('Reconstruction', data=rec_vol_filtered, chunks=True,
                        compression='lzf')
+    recursively_save_dict_contents_to_group(h5f, '/recon_config/', recon_config)
+
+# %%
+cfg = configparser.ConfigParser()
+cfg['roi'] = recon_config['roi']
+cfg['corr'] = recon_config['corr']
+cfg['axis_corr'] = recon_config['axis_corr']
+with open(os.path.join(tmp_dir, 'rec_config.ini'), 'w') as configfile:
+    cfg.write(configfile)
 
 # %%
 files_to_remove = glob(os.path.join(tmp_dir, '*.tmp'))
@@ -562,10 +730,12 @@ mkdir_p(os.path.join(storage_dir, experiment_id))
 
 # %% [markdown]
 # # Changelog:
-# * 2.2а (2020.03.18)
+# * 2.2а (2020.04.28)
 #  - Add auto bh option
 #  - Remove sinogram normalization
 #  - move a lot of fuctions in tomotools
+#  - add 2 gaussian fitting
+#  - save reconstruction parameters to file
 # * 2.1а (2020.03.18)
 #  - Add local files loading
 #  - Improving poriosity support
