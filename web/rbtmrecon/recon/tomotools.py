@@ -35,6 +35,10 @@ def get_experiment_hdf5(experiment_id, output_dir, experiment_files_dir=None, st
         try:
             with h5py.File(data_file, 'r') as h5f:
                 pass
+        except OSError as e:  # Seams file is damaged
+            logging.info('Deleting damaged file: {}'.format(data_file))
+            os.remove(data_file)
+
         except Exception as e:
             raise e
         else:
@@ -89,7 +93,7 @@ def get_mm_shape(data_file):
         return None
 
 
-def load_create_mm(data_file, shape, dtype, force_create=True):
+def persistent_array(data_file, shape, dtype, force_create=True):
     if force_create:
         logging.info('Force create')
     elif os.path.exists(data_file):
@@ -111,6 +115,22 @@ def load_create_mm(data_file, shape, dtype, force_create=True):
     return res, False
 
 
+# def persistent_array(data_file, shape, dtype, force_create=True):
+#     compressor = zarr.Blosc(cname='zstd', clevel=3, shuffle=2)
+#     if force_create:
+#         logging.info('Force create')
+#         logging.info('Creating new file: {}'.format(data_file))
+#         res = zarr.open(data_file, dtype=dtype, mode='w',
+#                         shape=shape)
+#         return res, False
+#
+#     elif os.path.exists(data_file):
+#         res = zarr.open(data_file, dtype=dtype, mode='a',
+#                         shape=shape)
+#         logging.info('Loading existing file: {}'.format(data_file))
+#         return res, True
+
+
 def get_frame_group(data_file, group_name, mmap_file_dir):
     with h5py.File(data_file, 'r') as h5f:
         images_count = len(h5f[group_name])
@@ -120,13 +140,13 @@ def get_frame_group(data_file, group_name, mmap_file_dir):
         for k, v in tqdm(h5f[group_name].items()):
             if images is None:
                 mm_shape = (images_count, v.shape[1], v.shape[0])
-                images, is_images_exists = load_create_mm(
+                images, is_images_exists = persistent_array(
                     os.path.join(mmap_file_dir, 'group_' +
                                  group_name + '.tmp'),
                     shape=mm_shape, dtype='float32')
 
             if angles is None:
-                angles, is_angles_exists = load_create_mm(
+                angles, is_angles_exists = persistent_array(
                     os.path.join(
                         mmap_file_dir, 'group_' + group_name + '_angles.tmp'),
                     shape=(images_count,), dtype='float32')
@@ -139,7 +159,7 @@ def get_frame_group(data_file, group_name, mmap_file_dir):
 
             attributes = json.loads(v.attrs[list(v.attrs)[0]])[0]
             angles[file_number] = attributes['frame']['object']['angle position']
-            tmp_image = np.flipud(v.value.astype('float32').swapaxes(0, 1))
+            tmp_image = np.flipud(v[()].astype('float32').swapaxes(0, 1))
             images[file_number] = tmp_image
             file_number = file_number + 1
 
@@ -228,13 +248,13 @@ def find_good_frames(data_images, data_angles):
 
 
 def group_data(data_images, data_angles, mmap_file_dir):
-    uniq_angles, _ = load_create_mm(
+    uniq_angles, _ = persistent_array(
         os.path.join(mmap_file_dir, 'uniq_angles.tmp'),
         shape=(len(list(set(data_angles))),),
         dtype='float32', force_create=True)
     uniq_angles[:] = list(set(data_angles))
 
-    uniq_data_images, _ = load_create_mm(
+    uniq_data_images, _ = persistent_array(
         os.path.join(mmap_file_dir, 'uniq_data_images.tmp'),
         shape=(len(uniq_angles), data_images.shape[1], data_images.shape[2]),
         dtype='float32', force_create=True)
@@ -378,15 +398,10 @@ def find_axis_posiotion(image_0, image_180):
 
 # seraching opposite frames (0 and 180 deg)
 def get_angles_at_180_deg(uniq_angles):
-    array_0 = np.asarray(uniq_angles) % 360
-    cross_array = np.zeros((len(array_0), len(array_0)))
-    for i in range(1, len(array_0)):
-        cross_array[i] = np.roll(array_0, i)
-
-    pos = np.argmin(np.abs(cross_array + 180 - array_0) % 360)
-    print(pos)
-    position_180 = pos % len(array_0)
-    position_0 = (pos - position_180) // len(array_0)
+    t = np.subtract.outer(uniq_angles, uniq_angles + 180) % 360
+    pos = np.argmax(np.abs(t) - 180)
+    position_0 = pos // len(uniq_angles)
+    position_180 = pos % len(uniq_angles)
     print(position_0, position_180)
     return position_0, position_180
 
@@ -417,7 +432,7 @@ def reshape_volume(volume, reshape):
     return res / reshape ** 3
 
 
-def save_amira(in_array, out_path, name, reshape=3):
+def save_amira(in_array, out_path, name, reshape=3, pixel_size=9.0e-3):
     data_path = str(out_path)
     os.makedirs(data_path, exist_ok=True)
     with open(os.path.join(data_path, name + '.raw'), 'wb') as amira_file:
@@ -426,11 +441,15 @@ def save_amira(in_array, out_path, name, reshape=3):
         file_shape = reshaped_vol.shape
         with open(os.path.join(data_path, 'tomo.' + name + '.hx'), 'w') as af:
             af.write('# Amira Script\n')
-            af.write('remove -all\n')
-            af.write(r'[ load -raw ${SCRIPTDIR}/' + name + '.raw little xfastest float 1 ' +
-                     str(file_shape[2]) + ' ' + str(file_shape[1]) + ' ' + str(file_shape[0]) +
-                     ' 0 ' + str(file_shape[2] - 1) + ' 0 ' + str(file_shape[1] - 1) + ' 0 ' + str(file_shape[0] - 1) +
-                     ' ] setLabel ' + name + '\n')
+            # af.write('remove -all\n')
+            template_str = '[ load -unit mm -raw ${{SCRIPTDIR}}/{}.raw ' + \
+                           'little xfastest float 1 {} {} {}  0 {} 0 {} 0 {} ] setLabel {}\n'
+            af.write(template_str.format(
+                name,
+                file_shape[2], file_shape[1], file_shape[0],
+                pixel_size * (file_shape[2] - 1), pixel_size * (file_shape[1] - 1), pixel_size * (file_shape[0] - 1),
+                name)
+            )
 
 
 def show_frames_with_border(data_images, data_angles, image_id, x_min, x_max, y_min, y_max):
