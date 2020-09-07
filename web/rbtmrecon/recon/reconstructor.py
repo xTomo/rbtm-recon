@@ -45,7 +45,7 @@ import scipy.optimize
 import scipy.ndimage
 
 from tomotools import STORAGE_SERVER, safe_median, recon_2d_parallel, get_tomoobject_info, get_experiment_hdf5, \
-    mkdir_p, show_exp_data, load_create_mm, load_tomo_data, find_good_frames, group_data, correct_rings, tqdm, \
+    mkdir_p, show_exp_data, load_tomo_data, find_good_frames, group_data, correct_rings, tqdm, persistent_array, \
     get_angles_at_180_deg, smooth, cv_rotate, find_axis_posiotion, test_rec, save_amira, show_frames_with_border
 
 import ipywidgets
@@ -111,12 +111,11 @@ recon_config['roi'] = {'x_min': x_min,
                        'y_max': y_max}
 
 # %%
-data_images_crop, _ = load_create_mm(os.path.join(tmp_dir, 'data_images_crop.tmp'),
-                                     shape=(len(data_angles), x_max - x_min, y_max - y_min),
-                                     dtype='float32')
-for i in tqdm(range(len(data_angles))):
-    data_images_crop[i] = data_images[i, x_min:x_max, y_min:y_max]
+data_images_crop, _ = persistent_array(os.path.join(tmp_dir, 'data_images_crop.tmp'),
+                                       shape=(len(data_angles), x_max - x_min, y_max - y_min),
+                                       dtype='float32')
 
+data_images_crop[:] = data_images[:, x_min:x_max, y_min:y_max]
 empty_beam = empty_beam[x_min:x_max, y_min:y_max]
 
 # %%
@@ -126,13 +125,13 @@ good_frames = find_good_frames(data_images_crop, data_angles)
 # # Remove bad frames
 
 # %%
-data_images_good, _ = load_create_mm(os.path.join(tmp_dir, 'data_images_good.tmp'),
-                                     shape=(len(good_frames), data_images_crop.shape[1], data_images_crop.shape[2]),
-                                     dtype='float32')
+data_images_good, _ = persistent_array(os.path.join(tmp_dir, 'data_images_good.tmp'),
+                                       shape=(len(good_frames), data_images_crop.shape[1], data_images_crop.shape[2]),
+                                       dtype='float32')
 
 # TODO: Profile this code. In case if no bad frames, just skip it
-for i in tqdm(range(len(good_frames))):
-    data_images_good[i] = data_images_crop[good_frames[i]]
+# for i in tqdm(range(len(good_frames))):
+data_images_good[:] = data_images_crop[good_frames]
 
 data_angles = data_angles[good_frames]
 
@@ -144,7 +143,7 @@ uniq_data_images, uniq_angles = group_data(data_images_good, data_angles, tmp_di
 empty_masked = safe_median(empty_beam)
 for di in tqdm(range(uniq_data_images.shape[0])):
     t = uniq_data_images[di]
-    t = t / empty_beam
+    t = t / empty_masked
     t[t < 1e-8] = 1e-8
     t[t > 1] = 1
     uniq_data_images[di] = safe_median(t)
@@ -152,8 +151,8 @@ for di in tqdm(range(uniq_data_images.shape[0])):
 # del empty_masked
 
 # %%
-sinogram, _ = load_create_mm(os.path.join(tmp_dir, 'sinogram.tmp'), shape=uniq_data_images.shape,
-                             dtype='float32')
+sinogram, _ = persistent_array(os.path.join(tmp_dir, 'sinogram.tmp'), shape=uniq_data_images.shape,
+                               dtype='float32')
 ne.evaluate('-log(uniq_data_images)', out=sinogram);
 
 # %%
@@ -351,11 +350,11 @@ cbar = plt.colorbar()
 cbar.set_label('Поглощение, усл.ед.', rotation=90)
 
 # %%
-sinogram_fixed, _ = load_create_mm(os.path.join(tmp_dir, 'sinogram_fixed.tmp'),
-                                   shape=(
-                                       sinogram.shape[0], sinogram.shape[1] + abs(shift_x),
-                                       sinogram.shape[2]),
-                                   dtype='float32', force_create=True)
+sinogram_fixed, _ = persistent_array(os.path.join(tmp_dir, 'sinogram_fixed.tmp'),
+                                     shape=(
+                                         sinogram.shape[0], sinogram.shape[1] + abs(shift_x),
+                                         sinogram.shape[2]),
+                                     dtype='float32', force_create=True)
 
 # fix axis tlit
 for i in tqdm(range(sinogram.shape[0])):
@@ -422,16 +421,16 @@ for fr in files_to_remove:
         pass
 
 # %%
-uniq_angles, _ = load_create_mm(os.path.join(tmp_dir, 'uniq_angles.tmp'),
-                                shape=None, force_create=False,
-                                dtype='float32')
-s1, _ = load_create_mm(os.path.join(tmp_dir, 'sinogram_fixed.tmp'),
-                       shape=None, force_create=False,
-                       dtype='float32')
+uniq_angles, _ = persistent_array(os.path.join(tmp_dir, 'uniq_angles.tmp'),
+                                  shape=None, force_create=False,
+                                  dtype='float32')
+s1, _ = persistent_array(os.path.join(tmp_dir, 'sinogram_fixed.tmp'),
+                         shape=None, force_create=False,
+                         dtype='float32')
 
-rec_vol, _ = load_create_mm(os.path.join(tmp_dir, 'rec.tmp'),
-                            dtype=np.float32, force_create=False,
-                            shape=(s1.shape[-1], s1.shape[1], s1.shape[1]))
+rec_vol, _ = persistent_array(os.path.join(tmp_dir, 'rec.tmp'),
+                              dtype=np.float32, force_create=False,
+                              shape=(s1.shape[-1], s1.shape[1], s1.shape[1]))
 
 
 # %%
@@ -504,105 +503,105 @@ plt.show()
 recon_config['corr'] = {'bh': bh_corr}
 
 # %%
-from scipy.optimize import curve_fit
-from scipy.signal import medfilt
+# from scipy.optimize import curve_fit
+# from scipy.signal import medfilt
 
 
-def gauss(x, *p):
-    A, mu, sigma = p
-    return np.abs(A) * np.exp(-(x - mu) ** 2 / (2. * sigma ** 2))
+# def gauss(x, *p):
+#     A, mu, sigma = p
+#     return np.abs(A) * np.exp(-(x - mu) ** 2 / (2. * sigma ** 2))
 
 
-def gauss2(x, *p):
-    return gauss(x, p[0], p[1], p[2]) + gauss(x, p[3], p[4], p[5])
+# def gauss2(x, *p):
+#     return gauss(x, p[0], p[1], p[2]) + gauss(x, p[3], p[4], p[5])
 
 
-def optimize_2gaussian(rec, mask):
-    hist, bin_edges = np.histogram(rec[mask], bins=1000)
-    bin_centres = (bin_edges[:-1] + bin_edges[1:]) / 2
+# def optimize_2gaussian(rec, mask):
+#     hist, bin_edges = np.histogram(rec[mask], bins=1000)
+#     bin_centres = (bin_edges[:-1] + bin_edges[1:]) / 2
 
-    p0 = [1.e3, 0.0, 0.01,
-          1.e3, 0.3, 0.01]  # A1, mu1, sigma1, A2, mu2, sigma2
+#     p0 = [1.e3, 0.0, 0.01,
+#           1.e3, 0.3, 0.01]  # A1, mu1, sigma1, A2, mu2, sigma2
 
-    coeff, var_matrix = curve_fit(gauss2, bin_centres, hist, p0=p0)
+#     coeff, var_matrix = curve_fit(gauss2, bin_centres, hist, p0=p0)
 
-    coeff_g, var_matrix_g = curve_fit(gauss, bin_centres, hist, p0=[1., 0., 1.])
+#     coeff_g, var_matrix_g = curve_fit(gauss, bin_centres, hist, p0=[1., 0., 1.])
 
-    # Get the fitted curve
-    hist_fit = gauss2(bin_centres, *coeff)
-    hist_fit1 = gauss(bin_centres, coeff[0], coeff[1], coeff[2])
-    hist_fit2 = gauss(bin_centres, coeff[3], coeff[4], coeff[5])
+#     # Get the fitted curve
+#     hist_fit = gauss2(bin_centres, *coeff)
+#     hist_fit1 = gauss(bin_centres, coeff[0], coeff[1], coeff[2])
+#     hist_fit2 = gauss(bin_centres, coeff[3], coeff[4], coeff[5])
 
-    hist_fit_g = gauss(bin_centres, *coeff_g)
+#     hist_fit_g = gauss(bin_centres, *coeff_g)
 
-    plt.figure(figsize=(12, 10))
-    plt.subplot(311)
-    plt.title('Histogram. bh_corr= {:.3f}'.format(bh_corr))
-    plt.plot(bin_centres, hist, label='experiment data')
-    plt.plot(bin_centres, hist_fit, lw=2, label='Sum of 2 gausians fit. L2={:.1f}'.format(
-        np.mean(np.sqrt(np.sum((hist - hist_fit) ** 2)))))
-    plt.plot(bin_centres, hist_fit1, label='1st gausians')
-    plt.plot(bin_centres, hist_fit2, label='2nd gausians')
-    plt.plot(bin_centres, hist_fit_g, 'k', lw=2, label='Single Gaussian. L2={:.1f}'.format(
-        np.mean(np.sqrt(np.sum((hist - hist_fit_g) ** 2)))))
-    plt.grid()
-    plt.legend()
+#     plt.figure(figsize=(12, 10))
+#     plt.subplot(311)
+#     plt.title('Histogram. bh_corr= {:.3f}'.format(bh_corr))
+#     plt.plot(bin_centres, hist, label='experiment data')
+#     plt.plot(bin_centres, hist_fit, lw=2, label='Sum of 2 gausians fit. L2={:.1f}'.format(
+#         np.mean(np.sqrt(np.sum((hist - hist_fit) ** 2)))))
+#     plt.plot(bin_centres, hist_fit1, label='1st gausians')
+#     plt.plot(bin_centres, hist_fit2, label='2nd gausians')
+#     plt.plot(bin_centres, hist_fit_g, 'k', lw=2, label='Single Gaussian. L2={:.1f}'.format(
+#         np.mean(np.sqrt(np.sum((hist - hist_fit_g) ** 2)))))
+#     plt.grid()
+#     plt.legend()
 
-    plt.subplot(312)
-    plt.title('Central cut')
-    plt.plot(medfilt(rec[rec.shape[0] // 2], 9))
-    plt.plot(medfilt(rec[:, rec.shape[1] // 2], 9))
-    plt.grid()
+#     plt.subplot(312)
+#     plt.title('Central cut')
+#     plt.plot(medfilt(rec[rec.shape[0] // 2], 9))
+#     plt.plot(medfilt(rec[:, rec.shape[1] // 2], 9))
+#     plt.grid()
 
-    plt.subplot(337)
-    t = mask
-    ds = 500
-    plt.imshow(t[t.shape[0] // 2 - ds:t.shape[0] // 2 + ds,
-               t.shape[1] // 2 - ds:t.shape[1] // 2 + ds],
-               cmap=plt.cm.viridis)
+#     plt.subplot(337)
+#     t = mask
+#     ds = 500
+#     plt.imshow(t[t.shape[0] // 2 - ds:t.shape[0] // 2 + ds,
+#                t.shape[1] // 2 - ds:t.shape[1] // 2 + ds],
+#                cmap=plt.cm.viridis)
 
-    plt.subplot(338)
-    t = rec * mask
-    ds = 500
-    plt.imshow(safe_median(t[
-                           t.shape[0] // 2 - ds:t.shape[0] // 2 + ds,
-                           t.shape[1] // 2 - ds:t.shape[1] // 2 + ds]),
-               cmap=plt.cm.viridis)
+#     plt.subplot(338)
+#     t = rec * mask
+#     ds = 500
+#     plt.imshow(safe_median(t[
+#                            t.shape[0] // 2 - ds:t.shape[0] // 2 + ds,
+#                            t.shape[1] // 2 - ds:t.shape[1] // 2 + ds]),
+#                cmap=plt.cm.viridis)
 
-    plt.subplot(339)
-    t = rec * mask
-    ds = 200
-    plt.imshow(safe_median(t[
-                           t.shape[0] // 2 - ds:t.shape[0] // 2 + ds,
-                           t.shape[1] // 2 - ds:t.shape[1] // 2 + ds]),
-               cmap=plt.cm.viridis)
+#     plt.subplot(339)
+#     t = rec * mask
+#     ds = 200
+#     plt.imshow(safe_median(t[
+#                            t.shape[0] // 2 - ds:t.shape[0] // 2 + ds,
+#                            t.shape[1] // 2 - ds:t.shape[1] // 2 + ds]),
+#                cmap=plt.cm.viridis)
 
-    plt.show()
-
-
-def create_circle_mask(x, y, r, size):
-    X, Y = np.meshgrid(np.arange(size), np.arange(size))
-    X = X - x
-    Y = Y - y
-    R = np.sqrt(X ** 2 + Y ** 2)
-    mask = R < r
-    return mask
+#     plt.show()
 
 
-mask = create_circle_mask(870, 870, 470, rec_slice.shape[0])
+# def create_circle_mask(x, y, r, size):
+#     X, Y = np.meshgrid(np.arange(size), np.arange(size))
+#     X = X - x
+#     Y = Y - y
+#     R = np.sqrt(X ** 2 + Y ** 2)
+#     mask = R < r
+#     return mask
 
-sss = s1[..., int(s1.shape[-1] // 2)]
-t_angles = (uniq_angles - uniq_angles.min()) < 180  # remove angles >180
 
-for bh_corr in np.arange(1, 5, 0.5):
-    print(bh_corr)
-    s4 = sss.copy()
-    s4[s4 < 0] = 0
-    s4 = np.power(s4, bh_corr)
-    s4 = s4 / np.mean(s4) * np.mean(sss)
+# mask = create_circle_mask(870, 870, 470, rec_slice.shape[0])
 
-    rec_slice = recon_2d_parallel(s4[t_angles], uniq_angles[t_angles])
-    optimize_2gaussian(rec_slice, mask)
+# sss = s1[..., int(s1.shape[-1] // 2)]
+# t_angles = (uniq_angles - uniq_angles.min()) < 180  # remove angles >180
+
+# for bh_corr_t in np.arange(1, 5, 0.5):
+#     print(bh_corr_t)
+#     s4 = sss.copy()
+#     s4[s4 < 0] = 0
+#     s4 = np.power(s4, bh_corr_t)
+#     s4 = s4 / np.mean(s4) * np.mean(sss)
+
+#     rec_slice = recon_2d_parallel(s4[t_angles], uniq_angles[t_angles])
+#     optimize_2gaussian(rec_slice, mask)
 
 # %%
 # multi 2d case
@@ -728,6 +727,9 @@ mkdir_p(os.path.join(storage_dir, experiment_id))
 # %%
 # !ls -lha {storage_dir+'/'+experiment_id}
 
+# %%
+# %reset -sf
+
 # %% [markdown]
 # # Changelog:
 # * 2.2а (2020.04.28)
@@ -776,3 +778,5 @@ mkdir_p(os.path.join(storage_dir, experiment_id))
 #  - Add NLM filtering
 # * 1.0 (2017.02.01)
 #  - First automation version.
+
+# %%

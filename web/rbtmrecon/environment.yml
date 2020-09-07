@@ -23,6 +23,9 @@ dependencies:
   - pylint
   - ipywidgets
   - jupytext
-  - pip  
+  - pip
+  - zarr
+  - dask
+  - cupy
   - pip:
     - pymongo

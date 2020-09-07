@@ -22,25 +22,30 @@
         <li><a href="{{ tomo_object['files']['amira_hx'] }}">Amira HX file</a></li>    
     {% endif %}
 
-    {% if 'amira_raw' in tomo_object['files']%}
-        <li><a href="{{ tomo_object['files']['amira_raw'] }}">Amira RAW file</a></li> 
-    {% endif %}
+            {% if 'amira_raw' in tomo_object['files'] %}
+                <li><a href="{{ tomo_object['files']['amira_raw'] }}">Amira RAW file</a></li>
+            {% endif %}
 
-    {% if 'tomo_rec' in tomo_object['files']%}
-        <li><a href="{{ tomo_object['files']['tomo_rec'] }}">HDF5 file with full reconstruction</a></li>  
-    {% endif %}
+            {% if 'tomo_rec' in tomo_object['files'] %}
+                <li><a href="{{ tomo_object['files']['tomo_rec'] }}">HDF5 file with full reconstruction</a></li>
+            {% endif %}
         </ul>
     </div>
     <div>
-        <a href="http://10.0.7.153:5551/tree/{{  tomo_object['_id'] }}">
+        <form action='/copyfiles/{{ tomo_object["_id"] }}' method="GET">
+            <button type='submit' name='copy_button'>Copy files</button>
+        </form>
+    </div>
+    <div>
+        <a href="http://10.0.7.153:5551/tree/{{ tomo_object['_id'] }}">
             Manual reconstruction
         </a>
     </div>
-{#    {% if 'tomo_preview' in tomo_object['files']%}#}
-{#    <div>#}
-{#        <embed src="{{ tomo_object['files']['tomo_preview'] }}" width=1000 height=800/>#}
-{#    </div>#}
-{#    {% endif %}#}
+    {#    {% if 'tomo_preview' in tomo_object['files']%}#}
+    {#    <div>#}
+    {#        <embed src="{{ tomo_object['files']['tomo_preview'] }}" width=1000 height=800/>#}
+    {#    </div>#}
+    {#    {% endif %}#}
     <div>
         <h2> Reconstruction status</h2>
         {% if not tomo_object['tomo_status'] in ['reconstructing'] %}

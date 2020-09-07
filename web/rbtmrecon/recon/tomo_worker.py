@@ -100,4 +100,4 @@ if __name__ == "__main__":
             else:
                 raise ValueError('Unknown action {}'.format(rec_obj['action']))
         else:
-            time.sleep(5)
+            time.sleep(10)
