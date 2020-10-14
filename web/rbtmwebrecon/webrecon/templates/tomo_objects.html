@@ -4,36 +4,36 @@
 <div>
     <table class="table">
         {% for tomo_object in tomo_objects %}
-        <tr>
-            <td>
-                <a href="{{  url_for('view_tomo_object',to_id=tomo_object['_id']) }}">
-                    {{ tomo_object['specimen'] }}
-                </a>
-            </td>
-            <td>
-                {{tomo_object['tomo_status']}}
-            </td>
-            <td>
-                {% if not tomo_object['tomo_status'] in ['reconstructing'] %}
-                <form action='/reconstruct/{{ tomo_object["_id"] }}' method="GET">
-                    <button type='submit' name='rec_button'>Reconstruct it</button>
-                </form>
-                {% else %}
-                Reconstruction in process...
-                <form action='/reset/{{ tomo_object["_id"] }}' method="GET">
-                    <button type='submit' name='reset_button'>Reset status</button>
-                </form>
-                {% endif %}
-            </td>
-            <td>
-                <form action='/copyfiles/{{ tomo_object["_id"] }}' method="GET">
-                    <button type='submit' name='copy_button'>Copy files</button>
-                </form>
-            </td>
-            <td>
-                <a href="http://10.0.7.153:5551/tree/{{  tomo_object['_id'] }}">
-                    Manual reconstruction
-                </a>
+            <tr>
+                <td>
+                    <a href="{{ url_for('view_tomo_object',to_id=tomo_object['_id']) }}">
+                        {{ tomo_object['specimen'] }}
+                    </a>
+                </td>
+                <td>
+                    {{ tomo_object['tomo_status'] }}
+                </td>
+                <td>
+                    {#                {% if not tomo_object['tomo_status'] in ['reconstructing'] %}#}
+                    {#                <form action='/reconstruct/{{ tomo_object["_id"] }}' method="GET">#}
+                    {#                    <button type='submit' name='rec_button'>Reconstruct it</button>#}
+                    {#                </form>#}
+                    {#                {% else %}#}
+                    {#                Reconstruction in process...#}
+                    <form action='/reset/{{ tomo_object["_id"] }}' method="GET">
+                        <button type='submit' name='reset_button'>Reset status</button>
+                    </form>
+                    {#                {% endif %}#}
+                </td>
+                <td>
+                    <form action='/copyfiles/{{ tomo_object["_id"] }}' method="GET">
+                        <button type='submit' name='copy_button'>Copy files</button>
+                    </form>
+                </td>
+                <td>
+                    <a href="http://10.0.7.153:5551/tree/{{ tomo_object['_id'] }}">
+                        Manual reconstruction
+                    </a>
             </td>
         </tr>
         {% endfor %}
