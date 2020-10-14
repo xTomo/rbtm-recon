@@ -447,7 +447,9 @@ def save_amira(in_array, out_path, name, reshape=3, pixel_size=9.0e-3):
             af.write(template_str.format(
                 name,
                 file_shape[2], file_shape[1], file_shape[0],
-                pixel_size * (file_shape[2] - 1), pixel_size * (file_shape[1] - 1), pixel_size * (file_shape[0] - 1),
+                pixel_size * reshape * (file_shape[2] - 1),
+                pixel_size * reshape * (file_shape[1] - 1),
+                pixel_size * reshape * (file_shape[0] - 1),
                 name)
             )
 
