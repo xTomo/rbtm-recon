@@ -191,11 +191,12 @@ for s in tqdm(range(sinogram.shape[1])):
 # %%
 position_0, position_180 = get_angles_at_180_deg(uniq_angles)
 
-posiotion_180_sorted = np.argwhere(np.isclose(position_180, np.argsort(uniq_angles)))[0][0]
-print(posiotion_180_sorted)
+position_180_sorted = np.argwhere(np.isclose(position_180, np.argsort(uniq_angles)))[0][0]
+print(position_0, position_180_sorted)
+print(uniq_angles[position_0], uniq_angles[position_180])
 posiotions_to_check = np.argsort(uniq_angles)[
-                      posiotion_180_sorted - 3:np.min(
-                          [posiotion_180_sorted + 5, len(uniq_angles) - 1])]  # TODO: check ranges
+                      position_180_sorted - 3:np.min(
+                          [position_180_sorted + 5, len(uniq_angles) - 1])]  # TODO: check ranges
 print(uniq_angles[posiotions_to_check])
 
 # %%
@@ -255,12 +256,13 @@ plt.figure()
 plt.plot(uniq_angles[posiotions_to_check], opt_func_values)
 plt.grid()
 new_position_180 = posiotions_to_check[np.argmin(opt_func_values)]
-print(new_position_180)
+print(uniq_angles[position_0], uniq_angles[position_180], uniq_angles[new_position_180])
 
 # %%
 uniq_angles_orig = uniq_angles.copy()
-uniq_angles *= 180. / uniq_angles[new_position_180]
-position_0, position_180 = get_angles_at_180_deg(uniq_angles)
+uniq_angles *= 180. / (uniq_angles_orig[new_position_180] - uniq_angles_orig[position_0]) % 360
+new_position_0, position_180 = get_angles_at_180_deg(uniq_angles)
+print(uniq_angles[position_0], uniq_angles[position_180])
 
 # %%
 print(uniq_angles[position_180])
