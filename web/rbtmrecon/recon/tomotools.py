@@ -398,8 +398,8 @@ def find_axis_posiotion(image_0, image_180):
 
 # seraching opposite frames (0 and 180 deg)
 def get_angles_at_180_deg(uniq_angles):
-    t = np.subtract.outer(uniq_angles, uniq_angles + 180) % 360
-    pos = np.argmax(np.abs(t) - 180)
+    t = np.subtract.outer(uniq_angles, uniq_angles + 180.) % 360.
+    pos = np.argmin(np.abs(t%360))
     position_0 = pos // len(uniq_angles)
     position_180 = pos % len(uniq_angles)
     print(position_0, position_180)

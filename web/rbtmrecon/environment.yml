@@ -27,5 +27,6 @@ dependencies:
   - zarr
   - dask
   - cupy
+  - pillow
   - pip:
     - pymongo
