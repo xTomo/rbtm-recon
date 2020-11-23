@@ -37,15 +37,15 @@ import numpy as np
 
 import h5py
 
-
 import scipy.optimize
 import scipy.ndimage
 
 import imreg_dft as ird
 
-from tomotools import (STORAGE_SERVER, safe_median, recon_2d_parallel, get_tomoobject_info, get_experiment_hdf5,   # noqa
-    mkdir_p, show_exp_data, load_tomo_data, find_good_frames, group_data, correct_rings, tqdm, persistent_array,    # noqa
-    get_angles_at_180_deg, smooth, cv_rotate, find_axis_posiotion, test_rec, save_amira, show_frames_with_border)   # noqa
+from .tomotools import (STORAGE_SERVER, safe_median, recon_2d_parallel, get_tomoobject_info, get_experiment_hdf5,
+                        mkdir_p, show_exp_data, load_tomo_data, find_good_frames, group_data, correct_rings, tqdm,
+                        persistent_array,
+                        get_angles_at_180_deg, test_rec, save_amira, show_frames_with_border)
 
 import ipywidgets
 
@@ -243,9 +243,9 @@ print(uniq_angles[position_0], uniq_angles[position_180])
 
 data_0_orig = np.rot90(sinogram[position_0]).copy()
 data_180_orig = np.fliplr(np.rot90(sinogram[position_180]).copy())
-data_0 = safe_median(data_0_orig)
-data_180 = safe_median(data_180_orig)
-transorm_result = ird.similarity(data_0, data_180, order=1, numiter=3, constraints={'scale': (1., 0)})
+data_0 = data_0_orig
+data_180 = data_180_orig
+transorm_result = ird.similarity(data_0, data_180, order=1, numiter=5, constraints={'scale': (1., 0)})
 
 # %%
 fig = plt.figure(figsize=(12, 12))
@@ -257,7 +257,7 @@ transorm_result
 
 # %%
 shift_x = -transorm_result['tvec'][1] / 2.
-alfa = - transorm_result['angle']
+alfa = - transorm_result['angle'] / 2
 tr_dict = {"scale": 1, "angle": alfa, "tvec": (0, shift_x)}
 
 # %%
@@ -290,7 +290,7 @@ cbar = plt.colorbar()
 cbar.set_label('Поглощение, усл.ед.', rotation=90)
 
 plt.subplot(223)
-plt.imshow(data_0 - data_180, vmin=-im_max / 2, vmax=im_max / 2, cmap=plt.cm.gray_r)
+plt.imshow(data_0 - data_180, vmin=-im_max / 2, vmax=im_max / 2, cmap=plt.cm.seismic)
 plt.axis('tight')
 plt.title('в')
 plt.xlabel('Каналы детектора')
@@ -298,11 +298,11 @@ plt.ylabel('Каналы детектора')
 cbar = plt.colorbar()
 cbar.set_label('Поглощение, усл.ед.', rotation=90)
 
-tt_180 = np.fliplr(ird.imreg.transform_img_dict(np.fliplr(data_180), tr_dict))
-tt_0 = ird.imreg.transform_img_dict(data_0, tr_dict)
+tt_180 = np.fliplr(ird.imreg.transform_img_dict(np.fliplr(data_180), tr_dict, order=1))
+tt_0 = ird.imreg.transform_img_dict(data_0, tr_dict, order=1)
 
 plt.subplot(224)
-plt.imshow(tt_0 - tt_180, vmin=-im_max / 2, vmax=im_max / 2, cmap=plt.cm.gray_r)
+plt.imshow(tt_0 - tt_180, vmin=-im_max / 2, vmax=im_max / 2, cmap=plt.cm.seismic)
 plt.axis('tight')
 plt.title('г')
 plt.xlabel('Каналы детектора')
@@ -319,7 +319,7 @@ sinogram_fixed, _ = persistent_array(os.path.join(tmp_dir, 'sinogram_fixed.tmp')
 # fix axis tlit
 for i in tqdm(range(sinogram.shape[0])):
     sinogram_fixed[i] = np.rot90(
-        ird.imreg.transform_img_dict(np.rot90(sinogram[i]), tr_dict),
+        ird.imreg.transform_img_dict(np.rot90(sinogram[i]), tr_dict, order=1),
         -1)
 
 # %%
@@ -576,10 +576,10 @@ rec_vol_filtered = rec_vol
 # %%
 for j in range(3):
     for i in range(10):
-        plt.figure(figsize=(8, 8))
+        plt.figure(figsize=(10, 8))
         plt.imshow(rec_vol_filtered.take(i * rec_vol_filtered.shape[j] // 10, axis=j),
                    cmap=plt.cm.viridis, vmin=0)
-        plt.axis('equal')
+        plt.axis('image')
         plt.title(i * i * rec_vol_filtered.shape[j] // 10)
         plt.colorbar()
         plt.show()

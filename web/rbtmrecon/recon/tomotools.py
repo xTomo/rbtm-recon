@@ -15,10 +15,8 @@ import pylab as plt
 import requests
 import scipy.ndimage
 import scipy.optimize
-from skimage.metrics import normalized_root_mse  # noqa
+import tomo.recon.astra_utils as astra_utils  # noqa
 from tqdm.notebook import tqdm  # noqa
-
-import tomo.recon.astra_utils as astra_utils
 
 # STORAGE_SERVER = "http://10.0.7.153:5006/"
 STORAGE_SERVER = "http://rbtmstorage_server_1:5006/"
@@ -307,96 +305,6 @@ def correct_rings(sino0, level):
 
 # # !cd {images_dir} && avconv -r 10 -i "prj_%03d.png" -b:v 1000k prj.avi
 # # !cd {images_dir} && rm prj.mp4
-
-
-def cv_rotate(x, angle):
-    """
-    Rotate square array using OpenCV2 around center of the array
-    :param x: 2d numpy array
-    :param angle: angle in degrees
-    :return: rotated array
-    """
-    x_center = tuple(
-        np.array((x.shape[1], x.shape[0]), dtype='float32') / 2.0 - 0.5)
-    rot_mat = cv2.getRotationMatrix2D(x_center, angle, 1.0)
-    xro = cv2.warpAffine(
-        x, rot_mat, (x.shape[1], x.shape[0]), flags=cv2.INTER_LINEAR)
-    return xro
-
-
-def smooth(x):
-    return x - scipy.ndimage.filters.gaussian_filter(x, 50) + scipy.ndimage.filters.gaussian_filter(x, 10)
-
-
-def find_axis_posiotion(image_0, image_180):
-    def corr(x):
-        alfa = x[0]
-        shift_x = int(x[1])
-        if shift_x >= 0:
-            t_180 = image_180[:, shift_x:]
-            t_0 = image_0[:, shift_x:]
-        else:
-            t_180 = image_180[:, :shift_x]
-            t_0 = image_0[:, :shift_x]
-
-        tt_180 = np.fliplr(cv_rotate(t_180, alfa))
-        tt_180 = cv2.medianBlur(tt_180, 3)  # *t_mask
-        tt_0 = cv_rotate(t_0, alfa)
-        tt_0 = cv2.medianBlur(tt_0, 3)  # *t_mask
-
-        res = normalized_root_mse(tt_0, tt_180)
-
-        return res
-
-    s180 = image_180.sum(axis=0)
-    r180 = np.flipud(np.arange(len(s180)))
-    p180 = (s180 * r180).sum() / s180.sum()
-
-    s0 = image_0.sum(axis=0)
-    r0 = np.arange(len(s0))
-    p0 = (s0 * r0).sum() / s0.sum()
-
-    x0 = [1., 0.5 * (p0 - p180)]
-
-    left = x0[1] - 200
-    right = x0[1] + 200
-    qq = [corr([0, q]) for q in np.arange(left, right)]
-    min_pos = left + np.argmin(qq)
-    if min_pos == left or min_pos == right:
-        position_found = False
-    else:
-        position_found = True
-
-    plt.figure()
-    plt.plot(np.arange(left, right), qq)
-    plt.grid()
-    plt.show()
-
-    while not position_found:
-        if min_pos == left:
-            right = left
-            left = right - 200
-        elif min_pos == right:
-            left = right
-            right = left + 200
-
-        qq = [corr([0, q]) for q in np.arange(left, right)]
-        min_pos = left + np.argmin(qq)
-        if min_pos == left or min_pos == right:
-            position_found = False
-        else:
-            position_found = True
-
-        plt.figure()
-        plt.plot(np.arange(left, right), qq)
-        plt.grid()
-        plt.show()
-
-    shift_0 = min_pos
-    x0 = [1., shift_0],
-    res = scipy.optimize.minimize(corr, x0, method='Powell')
-    return res
-
 
 # seraching opposite frames (0 and 180 deg)
 def get_angles_at_180_deg(uniq_angles):
