@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+# %%
 import json
 import logging
 import os
@@ -14,7 +16,7 @@ import requests
 import scipy.ndimage
 import scipy.optimize
 from skimage.metrics import normalized_root_mse  # noqa
-from tqdm import tqdm_notebook as tqdm
+from tqdm.notebook import tqdm  # noqa
 
 import tomo.recon.astra_utils as astra_utils
 
@@ -398,17 +400,19 @@ def find_axis_posiotion(image_0, image_180):
 
 # seraching opposite frames (0 and 180 deg)
 def get_angles_at_180_deg(uniq_angles):
-    t = np.subtract.outer(uniq_angles, uniq_angles + 180.) % 360.
-    pos = np.argmin(np.abs(t%360))
+    t = np.subtract.outer(uniq_angles, uniq_angles) % 360
+    pos = np.argmin(np.abs(t - 180) % 360)
     position_0 = pos // len(uniq_angles)
     position_180 = pos % len(uniq_angles)
-    print(position_0, position_180)
+    #     print(position_0, position_180)
+    #     print(uniq_angles[position_0], uniq_angles[position_180])
     return position_0, position_180
 
 
 def test_rec(s1, uniq_angles):
     plt.figure(figsize=(7, 7))
     plt.imshow(s1[np.argsort(uniq_angles)], interpolation='bilinear', cmap=plt.cm.gray_r)
+    plt.axis('tight')
     plt.colorbar()
     plt.show()
 
@@ -454,19 +458,29 @@ def save_amira(in_array, out_path, name, reshape=3, pixel_size=9.0e-3):
             )
 
 
-def show_frames_with_border(data_images, data_angles, image_id, x_min, x_max, y_min, y_max):
+def show_frames_with_border(data_images, empty_beam, data_angles, image_id, x_min, x_max, y_min, y_max):
+    te = np.asarray(empty_beam).T
+    te[te < 1] = 1
+
     angles_sorted_ind = np.argsort(data_angles)
-    t_image = data_images[angles_sorted_ind[image_id]].T
-    plt.figure(figsize=(15, 10))
+    td = np.asarray(data_images[angles_sorted_ind[image_id]].T)
+    td[td < 1] = 1
+
+    d = np.log(te) - np.log(td)
+
+    plt.figure(figsize=(16, 8))
     plt.subplot(121)
-    plt.imshow(t_image, cmap=plt.cm.gray)
-    plt.axis('equal')
+    plt.imshow(d, cmap=plt.cm.gray, vmin=np.percentile(d.flat, 1), vmax=np.percentile(d.flat, 99.9))
+    plt.axis('image')
     plt.hlines([y_min, y_max], x_min, x_max, 'r')
     plt.vlines([x_min, x_max], y_min, y_max, 'g')
     plt.xlabel('X')
     plt.ylabel('Y')
     plt.subplot(122)
-    plt.imshow(t_image[y_min:y_max, x_min:x_max], cmap=plt.cm.gray)
+    plt.imshow(d[y_min:y_max, x_min:x_max], cmap=plt.cm.gray,
+               vmin=np.percentile(d[y_min:y_max, x_min:x_max].flat, 1),
+               vmax=np.percentile(d[y_min:y_max, x_min:x_max].flat, 99.9))
+    plt.axis('auto')
     plt.show()
     print("x_min, x_max, y_min, y_max = {}, {}, {}, {}".format(x_min, x_max, y_min, y_max))
 

@@ -37,16 +37,15 @@ import numpy as np
 
 import h5py
 
-import cv2
-
-import numexpr as ne
 
 import scipy.optimize
 import scipy.ndimage
 
-from tomotools import STORAGE_SERVER, safe_median, recon_2d_parallel, get_tomoobject_info, get_experiment_hdf5, \
-    mkdir_p, show_exp_data, load_tomo_data, find_good_frames, group_data, correct_rings, tqdm, persistent_array, \
-    get_angles_at_180_deg, smooth, cv_rotate, find_axis_posiotion, test_rec, save_amira, show_frames_with_border
+import imreg_dft as ird
+
+from tomotools import (STORAGE_SERVER, safe_median, recon_2d_parallel, get_tomoobject_info, get_experiment_hdf5,   # noqa
+    mkdir_p, show_exp_data, load_tomo_data, find_good_frames, group_data, correct_rings, tqdm, persistent_array,    # noqa
+    get_angles_at_180_deg, smooth, cv_rotate, find_axis_posiotion, test_rec, save_amira, show_frames_with_border)   # noqa
 
 import ipywidgets
 
@@ -81,12 +80,59 @@ mkdir_p(tmp_dir)
 empty_beam, data_images, data_angles = load_tomo_data(data_file, tmp_dir)
 show_exp_data(empty_beam, data_images)
 
+
+# %%
+def find_roi(data_images, empty_beam):
+    te = np.asarray(empty_beam)
+    te[te < 1] = 1
+    x_mins = []
+    x_maxs = []
+    y_mins = []
+    y_maxs = [te.shape[1]]
+    for ia in tqdm(np.argsort(data_angles)[::len(data_angles) // 8]):
+        td = np.asarray(data_images[ia])
+        td[td < 1] = 1
+
+        d = np.log(te) - np.log(td)
+        d[d < 0] = 0
+        q = d > np.percentile(np.asarray(d[::2, ::2]), 10)
+        mask = scipy.ndimage.binary_opening(q, np.ones((9, 9), dtype=int))
+
+        x_mask = np.argwhere(np.sum(mask, axis=1) > 10)  # np.percentile(mask, 99.9, axis=1)
+        x_min = np.min(x_mask)
+        x_max = np.max(x_mask)
+
+        y_mask = np.argwhere(np.sum(mask, axis=0) > 10)  # np.percentile(mask, 99.9, axis=1)
+        y_min = np.min(y_mask)
+        y_max = np.max(y_mask)
+
+        x_mins.append(x_min)
+        y_mins.append(y_min)
+        x_maxs.append(x_max)
+        y_maxs.append(y_max)
+    #         plt.figure(figsize=(10,10))
+    #         plt.imshow(d, vmin=-1, vmax=2, cmap=plt.cm.gray)
+    #         plt.hlines([x_min, x_max], y_min, y_max, 'g')
+    #         plt.vlines([y_min, y_max], x_min, x_max, 'r')
+    #         plt.imshow(mask, cmap=plt.cm.gray)
+    #         plt.colorbar()
+    #         plt.show()
+    x_min = np.maximum(0, np.min(x_mins) - 50)
+    y_min = np.maximum(0, np.min(y_mins) - 50)
+    x_max = np.minimum(te.shape[0] - 1, np.max(x_maxs) + 50)
+    y_max = np.minimum(te.shape[1] - 1, np.max(y_maxs) + 50)
+
+    return x_min, x_max, y_min, y_max
+
+
 # %%
 # TODO: store this in ini file
-x_min, x_max, y_min, y_max = 600, 2320, 100, 2550
+x_min, x_max, y_min, y_max = find_roi(data_images, empty_beam)
+print("x_min, x_max, y_min, y_max = ", x_min, x_max, y_min, y_max)
 
 # %%
 ff = ipywidgets.interact_manual(show_frames_with_border, data_images=ipywidgets.fixed(data_images),
+                                empty_beam=ipywidgets.fixed(empty_beam),
                                 data_angles=ipywidgets.fixed(data_angles),
                                 image_id=ipywidgets.IntSlider(min=0, max=len(data_angles), step=1, value=0),
                                 x_min=ipywidgets.IntSlider(min=0, max=data_images.shape[1], step=1, value=x_min),
@@ -109,6 +155,9 @@ recon_config['roi'] = {'x_min': x_min,
                        'x_max': x_max,
                        'y_min': y_min,
                        'y_max': y_max}
+
+# %%
+show_frames_with_border(data_images, empty_beam, data_angles, 0, x_min, x_max, y_min, y_max)
 
 # %%
 data_images_crop, _ = persistent_array(os.path.join(tmp_dir, 'data_images_crop.tmp'),
@@ -139,21 +188,20 @@ data_angles = data_angles[good_frames]
 uniq_data_images, uniq_angles = group_data(data_images_good, data_angles, tmp_dir)
 
 # %%
-# normalize data frames and calculate sinograms
-empty_masked = safe_median(empty_beam)
-for di in tqdm(range(uniq_data_images.shape[0])):
-    t = uniq_data_images[di]
-    t = t / empty_masked
-    t[t < 1e-8] = 1e-8
-    t[t > 1] = 1
-    uniq_data_images[di] = safe_median(t)
-
-# del empty_masked
-
-# %%
 sinogram, _ = persistent_array(os.path.join(tmp_dir, 'sinogram.tmp'), shape=uniq_data_images.shape,
                                dtype='float32')
-ne.evaluate('-log(uniq_data_images)', out=sinogram);
+te = np.asarray(empty_beam)
+te[te < 1] = 1
+log_te = np.log(te)
+for di in tqdm(range(uniq_data_images.shape[0])):
+    td = uniq_data_images[di]
+    td[td < 1] = 1
+
+    d = log_te - np.log(td)
+    d = safe_median(d)
+    d[d < 0] = 0
+    sinogram[di] = d
+# ne.evaluate('-log(uniq_data_images)', out=sinogram);
 
 # %%
 rc_level = 10
@@ -190,119 +238,27 @@ for s in tqdm(range(sinogram.shape[1])):
 
 # %%
 position_0, position_180 = get_angles_at_180_deg(uniq_angles)
-
-position_180_sorted = np.argwhere(np.isclose(position_180, np.argsort(uniq_angles)))[0][0]
-print(position_0, position_180_sorted)
-print(uniq_angles[position_0], uniq_angles[position_180])
-posiotions_to_check = np.argsort(uniq_angles)[
-                      position_180_sorted - 3:np.min(
-                          [position_180_sorted + 5, len(uniq_angles) - 1])]  # TODO: check ranges
-print(uniq_angles[posiotions_to_check])
-
-# %%
-data_0_orig = np.rot90(sinogram[position_0]).copy()
-data_0 = cv2.medianBlur(data_0_orig, 3)
-data_0 = smooth(data_0)
-
-# %%
-plt.figure(figsize=(8, 8))
-plt.imshow(smooth(data_0_orig))
-plt.colorbar()
-
-# %%
-opt_func_values = []
-for position_180 in posiotions_to_check:
-    print(uniq_angles[position_180])
-    data_0_orig = np.rot90(sinogram[position_0]).copy()
-    data_180_orig = np.rot90(sinogram[position_180]).copy()
-    data_0 = safe_median(data_0_orig)
-    data_180 = safe_median(data_180_orig)
-
-    data_0 = smooth(data_0)
-    data_180 = smooth(data_180)
-
-    res = find_axis_posiotion(data_0, data_180)
-    opt_func_values.append(res['fun'])
-    print(res)
-    # alfa, shift_x, shift_y = res.x[0]/10, int(res.x[1]), int(res.x[2])//10
-
-    alfa, shift_x, shift_y = res.x[0], int(np.floor(res.x[1])), 0
-
-    if shift_x >= 0:
-        t_180 = data_180_orig[:, shift_x:]
-        t_0 = data_0_orig[:, shift_x:]
-    else:
-        t_180 = data_180_orig[:, :shift_x]
-        t_0 = data_0_orig[:, :shift_x]
-
-    if shift_y > 0:
-        t_180 = t_180[shift_y:, :]
-        t_0 = t_0[:-shift_y, :]
-    elif shift_y < 0:
-        t_180 = t_180[:shift_y, :]
-        t_0 = t_0[-shift_y:, :]
-
-    tt_180 = np.fliplr(cv_rotate(t_180, alfa))
-    tt_0 = cv_rotate(t_0, alfa)
-
-    plt.figure(figsize=(7, 7))
-    plt.imshow(tt_180 - tt_0, cmap=plt.cm.viridis)
-    plt.title('a={}, sx={} sy={}'.format(alfa, shift_x, shift_y))
-    plt.colorbar()
-    plt.show()
-
-# %%
-plt.figure()
-plt.plot(uniq_angles[posiotions_to_check], opt_func_values)
-plt.grid()
-new_position_180 = posiotions_to_check[np.argmin(opt_func_values)]
-print(uniq_angles[position_0], uniq_angles[position_180], uniq_angles[new_position_180])
-
-# %%
-uniq_angles_orig = uniq_angles.copy()
-uniq_angles *= 180. / (uniq_angles_orig[new_position_180] - uniq_angles_orig[position_0]) % 360
-new_position_0, position_180 = get_angles_at_180_deg(uniq_angles)
+print(position_0, position_180)
 print(uniq_angles[position_0], uniq_angles[position_180])
 
-# %%
-print(uniq_angles[position_180])
 data_0_orig = np.rot90(sinogram[position_0]).copy()
-data_180_orig = np.rot90(sinogram[position_180]).copy()
-data_0 = cv2.medianBlur(data_0_orig, 3)
-data_180 = cv2.medianBlur(data_180_orig, 3)
+data_180_orig = np.fliplr(np.rot90(sinogram[position_180]).copy())
+data_0 = safe_median(data_0_orig)
+data_180 = safe_median(data_180_orig)
+transorm_result = ird.similarity(data_0, data_180, order=1, numiter=3, constraints={'scale': (1., 0)})
 
-data_0 = smooth(data_0)
-data_180 = smooth(data_180)
-
-res = find_axis_posiotion(data_0, data_180)
-# opt_func_values.append(res['fun'])
-print(res)
-
-# TODO: FIX shift_y
-alfa, shift_x, shift_y = res.x[0], int(np.floor(res.x[1])), 0
-
-if shift_x >= 0:
-    t_180 = data_180_orig[:, shift_x:]
-    t_0 = data_0_orig[:, shift_x:]
-else:
-    t_180 = data_180_orig[:, :shift_x]
-    t_0 = data_0_orig[:, :shift_x]
-
-if shift_y > 0:
-    t_180 = t_180[shift_y:, :]
-    t_0 = t_0[:-shift_y, :]
-elif shift_y < 0:
-    t_180 = t_180[:shift_y, :]
-    t_0 = t_0[-shift_y:, :]
-
-tt_180 = np.fliplr(cv_rotate(t_180, alfa))
-tt_0 = cv_rotate(t_0, alfa)
-
-plt.figure(figsize=(8, 8))
-plt.imshow(tt_180 - tt_0, cmap=plt.cm.viridis)
-plt.title('a={}, sx={} sy={}'.format(alfa, shift_x, shift_y))
-plt.colorbar()
+# %%
+fig = plt.figure(figsize=(12, 12))
+ird.imshow(data_0, data_180, transorm_result['timg'], fig=fig)
 plt.show()
+
+# %%
+transorm_result
+
+# %%
+shift_x = -transorm_result['tvec'][1] / 2.
+alfa = - transorm_result['angle']
+tr_dict = {"scale": 1, "angle": alfa, "tvec": (0, shift_x)}
 
 # %%
 recon_config['axis_corr'] = {'shift_x': shift_x,
@@ -313,10 +269,10 @@ recon_config['axis_corr'] = {'shift_x': shift_x,
 
 # %%
 plt.gray()
-plt.figure(figsize=(8, 8))
-im_max = np.max([np.max(data_0_orig), np.max(data_180_orig)])
+plt.figure(figsize=(12, 12))
+im_max = np.max([np.max(data_0), np.max(data_180)])
 plt.subplot(221)
-plt.imshow(data_0_orig, vmin=0, vmax=im_max, cmap=plt.cm.gray_r)
+plt.imshow(data_0, vmin=0, vmax=im_max, cmap=plt.cm.gray_r)
 plt.axis('tight')
 plt.title('a')
 plt.xlabel('Каналы детектора')
@@ -325,7 +281,7 @@ cbar = plt.colorbar()
 cbar.set_label('Поглощение, усл.ед.', rotation=90)
 
 plt.subplot(222)
-plt.imshow(data_180_orig, vmin=0, vmax=im_max, cmap=plt.cm.gray_r)
+plt.imshow(data_180, vmin=0, vmax=im_max, cmap=plt.cm.gray_r)
 plt.axis('tight')
 plt.title('б')
 plt.xlabel('Каналы детектора')
@@ -334,7 +290,7 @@ cbar = plt.colorbar()
 cbar.set_label('Поглощение, усл.ед.', rotation=90)
 
 plt.subplot(223)
-plt.imshow(data_0_orig - np.fliplr(data_180_orig), vmin=-im_max / 2, vmax=im_max / 2, cmap=plt.cm.gray_r)
+plt.imshow(data_0 - data_180, vmin=-im_max / 2, vmax=im_max / 2, cmap=plt.cm.gray_r)
 plt.axis('tight')
 plt.title('в')
 plt.xlabel('Каналы детектора')
@@ -342,8 +298,11 @@ plt.ylabel('Каналы детектора')
 cbar = plt.colorbar()
 cbar.set_label('Поглощение, усл.ед.', rotation=90)
 
+tt_180 = np.fliplr(ird.imreg.transform_img_dict(np.fliplr(data_180), tr_dict))
+tt_0 = ird.imreg.transform_img_dict(data_0, tr_dict)
+
 plt.subplot(224)
-plt.imshow(1.0 * (tt_180 - tt_0), vmin=-im_max / 2, vmax=im_max / 2, cmap=plt.cm.gray_r)
+plt.imshow(tt_0 - tt_180, vmin=-im_max / 2, vmax=im_max / 2, cmap=plt.cm.gray_r)
 plt.axis('tight')
 plt.title('г')
 plt.xlabel('Каналы детектора')
@@ -352,23 +311,16 @@ cbar = plt.colorbar()
 cbar.set_label('Поглощение, усл.ед.', rotation=90)
 
 # %%
+tim = ird.imreg.transform_img_dict(data_0, tr_dict)
 sinogram_fixed, _ = persistent_array(os.path.join(tmp_dir, 'sinogram_fixed.tmp'),
-                                     shape=(
-                                         sinogram.shape[0], sinogram.shape[1] + abs(shift_x),
-                                         sinogram.shape[2]),
+                                     shape=(sinogram.shape[0], tim.shape[1], tim.shape[0]),
                                      dtype='float32', force_create=True)
 
 # fix axis tlit
 for i in tqdm(range(sinogram.shape[0])):
-    t = sinogram[i].copy()
-
-    t_angle = uniq_angles[i]
-    t = cv_rotate(t, alfa)
-
-    if shift_x > 0:
-        sinogram_fixed[i, :-shift_x] = t
-    else:
-        sinogram_fixed[i, -shift_x:] = t
+    sinogram_fixed[i] = np.rot90(
+        ird.imreg.transform_img_dict(np.rot90(sinogram[i]), tr_dict),
+        -1)
 
 # %%
 s1_angles = uniq_angles
@@ -376,7 +328,7 @@ s1 = np.require(sinogram_fixed[:, :, preview_slice_number],
                 dtype=np.float32, requirements=['C'])
 
 # %%
-test_rec(s1, s1_angles)
+test_rec(s1, uniq_angles)
 
 # %%
 plt.figure(figsize=(7, 7))
@@ -400,12 +352,12 @@ corr_factor = sinogram_fixed.sum(axis=-1).sum(axis=-1) / sinogram_fixed_median
 #     sinogram_fixed[i] = sinogram_fixed[i] / corr_factor[i]
 
 # %%
-s2 = np.require(sinogram_fixed[:, :, preview_slice_number],
-                dtype=np.float32, requirements=['C'])
+# s2 = np.require(sinogram_fixed[:, :, preview_slice_number],
+#                 dtype=np.float32, requirements=['C'])
 
 # %%
 del data_0_orig, data_180_orig, data_images_good, data_images_crop, data_images
-del sinogram, sinogram_fixed, uniq_angles, uniq_angles_orig, uniq_data_images
+del sinogram, sinogram_fixed, uniq_angles, uniq_data_images
 
 # %%
 files_to_remove = glob(os.path.join(tmp_dir, '*.tmp'))
@@ -734,6 +686,9 @@ mkdir_p(os.path.join(storage_dir, experiment_id))
 
 # %% [markdown]
 # # Changelog:
+# * 2.3 (2020.11.23)
+#  - Auto roi
+#  - Searching shift with phase correlation
 # * 2.2а (2020.04.28)
 #  - Add auto bh option
 #  - Remove sinogram normalization

@@ -30,3 +30,4 @@ dependencies:
   - pillow
   - pip:
     - pymongo
+    - imreg_dft
