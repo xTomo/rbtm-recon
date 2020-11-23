@@ -95,14 +95,14 @@ def find_roi(data_images, empty_beam):
 
         d = np.log(te) - np.log(td)
         d[d < 0] = 0
-        q = d > np.percentile(np.asarray(d[::2, ::2]), 10)
+        q = d > np.percentile(np.asarray(d), 20)
         mask = scipy.ndimage.binary_opening(q, np.ones((9, 9), dtype=int))
 
-        x_mask = np.argwhere(np.sum(mask, axis=1) > 10)  # np.percentile(mask, 99.9, axis=1)
+        x_mask = np.argwhere(np.sum(mask, axis=1) > 20)  # np.percentile(mask, 99.9, axis=1)
         x_min = np.min(x_mask)
         x_max = np.max(x_mask)
 
-        y_mask = np.argwhere(np.sum(mask, axis=0) > 10)  # np.percentile(mask, 99.9, axis=1)
+        y_mask = np.argwhere(np.sum(mask, axis=0) > 20)  # np.percentile(mask, 99.9, axis=1)
         y_min = np.min(y_mask)
         y_max = np.max(y_mask)
 
