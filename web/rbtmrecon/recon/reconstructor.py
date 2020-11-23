@@ -42,10 +42,10 @@ import scipy.ndimage
 
 import imreg_dft as ird
 
-from .tomotools import (STORAGE_SERVER, safe_median, recon_2d_parallel, get_tomoobject_info, get_experiment_hdf5,
-                        mkdir_p, show_exp_data, load_tomo_data, find_good_frames, group_data, correct_rings, tqdm,
-                        persistent_array,
-                        get_angles_at_180_deg, test_rec, save_amira, show_frames_with_border)
+from tomotools import (STORAGE_SERVER, safe_median, recon_2d_parallel, get_tomoobject_info, get_experiment_hdf5,
+                       mkdir_p, show_exp_data, load_tomo_data, find_good_frames, group_data, correct_rings, tqdm,
+                       persistent_array,
+                       get_angles_at_180_deg, test_rec, save_amira, show_frames_with_border)
 
 import ipywidgets
 
