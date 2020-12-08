@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.4.2
+#       jupytext_version: 1.7.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -43,9 +43,9 @@ import scipy.ndimage
 import imreg_dft as ird
 
 from tomotools import (STORAGE_SERVER, safe_median, recon_2d_parallel, get_tomoobject_info, get_experiment_hdf5,
-                       mkdir_p, show_exp_data, load_tomo_data, find_good_frames, group_data, correct_rings, tqdm,
-                       persistent_array,
-                       get_angles_at_180_deg, test_rec, save_amira, show_frames_with_border)
+                       mkdir_p, show_exp_data, load_tomo_data, group_data, correct_rings, tqdm,
+                       persistent_array, get_angles_at_180_deg, test_rec, save_amira, show_frames_with_border,
+                       recursively_save_dict_contents_to_group)
 
 import ipywidgets
 
@@ -127,7 +127,8 @@ def find_roi(data_images, empty_beam):
 
 # %%
 # TODO: store this in ini file
-x_min, x_max, y_min, y_max = find_roi(data_images, empty_beam)
+# x_min, x_max, y_min, y_max = find_roi(data_images, empty_beam)
+x_min, x_max, y_min, y_max = 865, 3123, 324, 2443
 print("x_min, x_max, y_min, y_max = ", x_min, x_max, y_min, y_max)
 
 # %%
@@ -165,10 +166,11 @@ data_images_crop, _ = persistent_array(os.path.join(tmp_dir, 'data_images_crop.t
                                        dtype='float32')
 
 data_images_crop[:] = data_images[:, x_min:x_max, y_min:y_max]
-empty_beam = empty_beam[x_min:x_max, y_min:y_max]
+empty_beam_crop = empty_beam[x_min:x_max, y_min:y_max]
 
 # %%
-good_frames = find_good_frames(data_images_crop, data_angles)
+# good_frames = find_good_frames(data_images_crop, data_angles)
+good_frames = range(len(data_images_crop))
 
 # %% [markdown]
 # # Remove bad frames
@@ -190,7 +192,7 @@ uniq_data_images, uniq_angles = group_data(data_images_good, data_angles, tmp_di
 # %%
 sinogram, _ = persistent_array(os.path.join(tmp_dir, 'sinogram.tmp'), shape=uniq_data_images.shape,
                                dtype='float32')
-te = np.asarray(empty_beam)
+te = np.asarray(empty_beam_crop)
 te[te < 1] = 1
 log_te = np.log(te)
 for di in tqdm(range(uniq_data_images.shape[0])):
@@ -239,20 +241,21 @@ for s in tqdm(range(sinogram.shape[1])):
 # %%
 position_0, position_180 = get_angles_at_180_deg(uniq_angles)
 print(position_0, position_180)
-print(uniq_angles[position_0], uniq_angles[position_180])
+print(uniq_angles[position_0], uniq_angles[position_180], uniq_angles[position_180] - uniq_angles[position_0])
 
 data_0_orig = np.rot90(sinogram[position_0]).copy()
 data_180_orig = np.fliplr(np.rot90(sinogram[position_180]).copy())
 data_0 = data_0_orig
 data_180 = data_180_orig
-transorm_result = ird.similarity(data_0, data_180, order=1, numiter=5, constraints={'scale': (1., 0)})
+transorm_result = ird.similarity(data_0, data_180, order=1, numiter=5,
+                                 constraints={"scale": (1., 0),
+                                              "angle": (0.2, 0.1),
+                                              "ty": (0, 0)})
 
-# %%
 fig = plt.figure(figsize=(12, 12))
 ird.imshow(data_0, data_180, transorm_result['timg'], fig=fig)
 plt.show()
 
-# %%
 transorm_result
 
 # %%
@@ -432,26 +435,26 @@ if need_optimal_bh:
 else:
     bh_corr = 1
 
-sss = s1[..., preview_slice_number]
-t_angles = (uniq_angles - uniq_angles.min()) < 180  # remove angles >180
-
-s4 = sss.copy()
-s4[s4 < 0] = 0
-s4 = np.power(s4, bh_corr)
-
-rec_slice = recon_2d_parallel(s4[t_angles], uniq_angles[t_angles])
-
-plt.figure(figsize=(10, 8))
-plt.imshow(safe_median(rec_slice),
-           vmin=0, vmax=np.percentile(rec_slice, 95) * 1.2, cmap=plt.cm.viridis)
-plt.axis('equal')
-plt.colorbar()
-plt.show()
-
-plt.figure(figsize=(10, 5))
-plt.plot(safe_median(rec_slice)[870, :], '-o', ms=3, lw=2.0)
-plt.grid()
-plt.show()
+# sss = s1[..., preview_slice_number]
+# t_angles = (uniq_angles - uniq_angles.min()) < 180  # remove angles >180
+#
+# s4 = sss.copy()
+# s4[s4 < 0] = 0
+# s4 = np.power(s4, bh_corr)
+#
+# rec_slice = recon_2d_parallel(s4[t_angles], uniq_angles[t_angles])
+#
+# plt.figure(figsize=(10, 8))
+# plt.imshow(safe_median(rec_slice),
+#            vmin=0, vmax=np.percentile(rec_slice, 95) * 1.2, cmap=plt.cm.viridis)
+# plt.axis('equal')
+# plt.colorbar()
+# plt.show()
+#
+# plt.figure(figsize=(10, 5))
+# plt.plot(safe_median(rec_slice)[rec_slice.shape[0]//2, :], '-o', ms=3, lw=2.0)
+# plt.grid()
+# plt.show()
 
 # %%
 recon_config['corr'] = {'bh': bh_corr}
@@ -574,13 +577,16 @@ print(time.time() - t)
 rec_vol_filtered = rec_vol
 
 # %%
-for j in range(3):
-    for i in range(10):
+for j in range(2):
+    N = 20  # number of cuts
+    for i in range(N):
         plt.figure(figsize=(10, 8))
-        plt.imshow(rec_vol_filtered.take(i * rec_vol_filtered.shape[j] // 10, axis=j),
-                   cmap=plt.cm.viridis, vmin=0)
+        data = rec_vol_filtered.take(i * rec_vol_filtered.shape[j] // N, axis=j)
+        plt.imshow(data, cmap=plt.cm.viridis,
+                   vmin=np.maximum(0, np.percentile(data[:], 10)),
+                   vmax=np.percentile(data[:], 99.9))
         plt.axis('image')
-        plt.title(i * i * rec_vol_filtered.shape[j] // 10)
+        plt.title(i * rec_vol_filtered.shape[j] // N)
         plt.colorbar()
         plt.show()
 
@@ -590,55 +596,72 @@ save_amira(rec_vol_filtered, tmp_dir, tomo_info['specimen'], 3)
 # %%
 recon_config
 
-
-# %%
-def save_dict_to_hdf5(dic, filename):
-    """
-    ....
-    """
-    with h5py.File(filename, 'w') as h5file:
-        recursively_save_dict_contents_to_group(h5file, '/', dic)
-
-
-def recursively_save_dict_contents_to_group(h5file, path, dic):
-    """
-    ....
-    """
-    for key, item in dic.items():
-        if isinstance(item, (np.ndarray, int, float, np.int32, np.int64, np.float32, np.float64, str, bytes)):
-            h5file[path + key] = item
-        elif isinstance(item, dict):
-            recursively_save_dict_contents_to_group(h5file, path + key + '/', item)
-        else:
-            raise ValueError('Cannot save {} {} type'.format(item, type(item)))
-
-
-def load_dict_from_hdf5(filename):
-    """
-    ....
-    """
-    with h5py.File(filename, 'r') as h5file:
-        return recursively_load_dict_contents_from_group(h5file, '/')
-
-
-def recursively_load_dict_contents_from_group(h5file, path):
-    """
-    ....
-    """
-    ans = {}
-    for key, item in h5file[path].items():
-        if isinstance(item, h5py._hl.dataset.Dataset):
-            ans[key] = item.value
-        elif isinstance(item, h5py._hl.group.Group):
-            ans[key] = recursively_load_dict_contents_from_group(h5file, path + key + '/')
-    return ans
-
-
 # %%
 with h5py.File(os.path.join(tmp_dir, 'tomo_rec.' + tomo_info['specimen'] + '.h5'), 'w') as h5f:
     h5f.create_dataset('Reconstruction', data=rec_vol_filtered, chunks=True,
                        compression='lzf')
     recursively_save_dict_contents_to_group(h5f, '/recon_config/', recon_config)
+
+# %%
+import k3d
+from tomotools import reshape_volume
+
+# %%
+resize = int(np.power(np.prod(rec_vol_filtered.shape) / 1e7, 1. / 3))
+print(resize)
+small_rec = reshape_volume(rec_vol_filtered, resize)
+
+# %%
+volume = k3d.volume(
+    small_rec.astype(np.float32),
+    #     alpha_coef=1000,
+    #     shadow='dynamic',
+    #     samples=600,
+    #     shadow_res=128,
+    #     shadow_delay=50,
+    color_range=[np.percentile(small_rec, 10), np.percentile(small_rec, 99.9)],
+    color_map=(np.array(k3d.colormaps.matplotlib_color_maps.jet).reshape(-1, 4)).astype(np.float32),
+    compression_level=4
+)
+size = small_rec.shape
+volume.transform.bounds = [-size[0] / 2, size[0] / 2,
+                           -size[1] / 2, size[1] / 2,
+                           -size[2] / 2, size[2] / 2]
+
+plot = k3d.plot(camera_auto_fit=True)
+plot += volume
+plot.lighting = 2
+plot.display()
+
+# %%
+resize = int(np.power(np.prod(rec_vol_filtered.shape) / 1e6, 1. / 3))
+print(resize)
+small_rec = reshape_volume(rec_vol_filtered, resize)
+volume = k3d.volume(
+    small_rec.astype(np.float32),
+    #     alpha_coef=1000,
+    #     shadow='dynamic',
+    #     samples=600,
+    #     shadow_res=128,
+    #     shadow_delay=50,
+    color_range=[np.percentile(small_rec, 10), np.percentile(small_rec, 99.9)],
+    color_map=(np.array(k3d.colormaps.matplotlib_color_maps.jet).reshape(-1, 4)).astype(np.float32),
+    compression_level=4
+)
+size = small_rec.shape
+volume.transform.bounds = [-size[0] / 2, size[0] / 2,
+                           -size[1] / 2, size[1] / 2,
+                           -size[2] / 2, size[2] / 2]
+
+plot = k3d.plot(camera_auto_fit=True)
+plot += volume
+plot.lighting = 2
+plot.display()
+
+# %%
+plot.fetch_snapshot()
+with open('./tomo_3d.html', 'w') as fp:
+    fp.write(plot.snapshot)
 
 # %%
 cfg = configparser.ConfigParser()
@@ -686,6 +709,8 @@ mkdir_p(os.path.join(storage_dir, experiment_id))
 
 # %% [markdown]
 # # Changelog:
+# * 2.4 (2020.12.08)
+#  - 3d render
 # * 2.3 (2020.11.23)
 #  - Auto roi
 #  - Searching shift with phase correlation
