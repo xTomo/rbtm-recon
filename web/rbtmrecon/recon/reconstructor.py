@@ -41,13 +41,17 @@ import scipy.optimize
 import scipy.ndimage
 
 import imreg_dft as ird
+from tomopy.prep.stripe import remove_all_stripe
 
 from tomotools import (STORAGE_SERVER, safe_median, recon_2d_parallel, get_tomoobject_info, get_experiment_hdf5,
-                       mkdir_p, show_exp_data, load_tomo_data, group_data, correct_rings, tqdm,
+                       mkdir_p, show_exp_data, load_tomo_data, group_data, tqdm, find_roi,
                        persistent_array, get_angles_at_180_deg, test_rec, save_amira, show_frames_with_border,
                        recursively_save_dict_contents_to_group)
 
 import ipywidgets
+
+# %%
+plt.rcParams['figure.facecolor'] = 'white'
 
 # %%
 # # settings for docker
@@ -64,7 +68,17 @@ tomo_info = get_tomoobject_info(experiment_id, STORAGE_SERVER)
 tomo_info
 
 # %%
-recon_config = {'sample': tomo_info}
+if os.path.exists("rec_config.ini"):
+    recon_conf = configparser.ConfigParser()
+    recon_conf.read("rec_config.ini")
+    recon_config = recon_conf._sections
+    del recon_conf
+else:
+    recon_config = {}
+recon_config
+
+# %%
+recon_config['sample'] = tomo_info
 
 # %% [markdown]
 # # Loading experimental data
@@ -80,62 +94,25 @@ mkdir_p(tmp_dir)
 empty_beam, data_images, data_angles = load_tomo_data(data_file, tmp_dir)
 show_exp_data(empty_beam, data_images)
 
-
 # %%
-def find_roi(data_images, empty_beam):
-    te = np.asarray(empty_beam)
-    te[te < 1] = 1
-    x_mins = []
-    x_maxs = []
-    y_mins = []
-    y_maxs = [te.shape[1]]
-    for ia in tqdm(np.argsort(data_angles)[::len(data_angles) // 8]):
-        td = np.asarray(data_images[ia])
-        td[td < 1] = 1
+if 'roi' in recon_config:
+    print("Read from ini file")
+    x_min, x_max, y_min, y_max = (recon_config['roi']['x_min'],
+                                  recon_config['roi']['x_max'],
+                                  recon_config['roi']['y_min'],
+                                  recon_config['roi']['y_max'])
+else:
 
-        d = np.log(te) - np.log(td)
-        d[d < 0] = 0
-        q = d > np.percentile(np.asarray(d), 20)
-        mask = scipy.ndimage.binary_opening(q, np.ones((9, 9), dtype=int))
-
-        x_mask = np.argwhere(np.sum(mask, axis=1) > 20)  # np.percentile(mask, 99.9, axis=1)
-        x_min = np.min(x_mask)
-        x_max = np.max(x_mask)
-
-        y_mask = np.argwhere(np.sum(mask, axis=0) > 20)  # np.percentile(mask, 99.9, axis=1)
-        y_min = np.min(y_mask)
-        y_max = np.max(y_mask)
-
-        x_mins.append(x_min)
-        y_mins.append(y_min)
-        x_maxs.append(x_max)
-        y_maxs.append(y_max)
-    #         plt.figure(figsize=(10,10))
-    #         plt.imshow(d, vmin=-1, vmax=2, cmap=plt.cm.gray)
-    #         plt.hlines([x_min, x_max], y_min, y_max, 'g')
-    #         plt.vlines([y_min, y_max], x_min, x_max, 'r')
-    #         plt.imshow(mask, cmap=plt.cm.gray)
-    #         plt.colorbar()
-    #         plt.show()
-    x_min = np.maximum(0, np.min(x_mins) - 50)
-    y_min = np.maximum(0, np.min(y_mins) - 50)
-    x_max = np.minimum(te.shape[0] - 1, np.max(x_maxs) + 50)
-    y_max = np.minimum(te.shape[1] - 1, np.max(y_maxs) + 50)
-
-    return x_min, x_max, y_min, y_max
-
-
-# %%
-# TODO: store this in ini file
-# x_min, x_max, y_min, y_max = find_roi(data_images, empty_beam)
-x_min, x_max, y_min, y_max = 865, 3123, 324, 2443
+    x_min, x_max, y_min, y_max = find_roi(data_images, empty_beam, data_angles)
+    # x_min, x_max, y_min, y_max = 865, 3123, 324, 2443
 print("x_min, x_max, y_min, y_max = ", x_min, x_max, y_min, y_max)
+
 
 # %%
 ff = ipywidgets.interact_manual(show_frames_with_border, data_images=ipywidgets.fixed(data_images),
                                 empty_beam=ipywidgets.fixed(empty_beam),
                                 data_angles=ipywidgets.fixed(data_angles),
-                                image_id=ipywidgets.IntSlider(min=0, max=len(data_angles), step=1, value=0),
+                                image_id=ipywidgets.IntSlider(min=0, max=len(data_angles) - 1, step=1, value=0),
                                 x_min=ipywidgets.IntSlider(min=0, max=data_images.shape[1], step=1, value=x_min),
                                 x_max=ipywidgets.IntSlider(min=0, max=data_images.shape[1], step=1, value=x_max),
                                 y_min=ipywidgets.IntSlider(min=0, max=data_images.shape[2], step=1, value=y_min),
@@ -144,10 +121,14 @@ ff = ipywidgets.interact_manual(show_frames_with_border, data_images=ipywidgets.
 
 # %%
 try:
-    x_min = ff.widget.kwargs['x_min']
-    x_max = ff.widget.kwargs['x_max']
-    y_min = ff.widget.kwargs['y_min']
-    y_max = ff.widget.kwargs['y_max']
+    if ff.widget.kwargs['x_min'] is not None:
+        x_min = ff.widget.kwargs['x_min']
+    if ff.widget.kwargs['x_max'] is not None:
+        x_max = ff.widget.kwargs['x_max']
+    if ff.widget.kwargs['y_min'] is not None:
+        y_min = ff.widget.kwargs['y_min']
+    if ff.widget.kwargs['y_max'] is not None:
+        y_max = ff.widget.kwargs['y_max']
 except KeyError:
     pass
 
@@ -168,26 +149,9 @@ data_images_crop, _ = persistent_array(os.path.join(tmp_dir, 'data_images_crop.t
 data_images_crop[:] = data_images[:, x_min:x_max, y_min:y_max]
 empty_beam_crop = empty_beam[x_min:x_max, y_min:y_max]
 
-# %%
-# good_frames = find_good_frames(data_images_crop, data_angles)
-good_frames = range(len(data_images_crop))
-
-# %% [markdown]
-# # Remove bad frames
 
 # %%
-data_images_good, _ = persistent_array(os.path.join(tmp_dir, 'data_images_good.tmp'),
-                                       shape=(len(good_frames), data_images_crop.shape[1], data_images_crop.shape[2]),
-                                       dtype='float32')
-
-# TODO: Profile this code. In case if no bad frames, just skip it
-# for i in tqdm(range(len(good_frames))):
-data_images_good[:] = data_images_crop[good_frames]
-
-data_angles = data_angles[good_frames]
-
-# %%
-uniq_data_images, uniq_angles = group_data(data_images_good, data_angles, tmp_dir)
+uniq_data_images, uniq_angles = group_data(data_images_crop, data_angles, tmp_dir)
 
 # %%
 sinogram, _ = persistent_array(os.path.join(tmp_dir, 'sinogram.tmp'), shape=uniq_data_images.shape,
@@ -206,50 +170,28 @@ for di in tqdm(range(uniq_data_images.shape[0])):
 # ne.evaluate('-log(uniq_data_images)', out=sinogram);
 
 # %%
-rc_level = 10
-
-# %%
-preview_slice_number = int(sinogram.shape[-1] // 2)
-tmp_sinogram = sinogram[np.argsort(uniq_angles), :, preview_slice_number]
-ring_corr = correct_rings(tmp_sinogram, rc_level)
-
-plt.figure(figsize=(15, 8))
-plt.subplot(131)
-plt.imshow(tmp_sinogram, cmap=plt.cm.viridis, interpolation='bilinear')
-plt.axis('tight')
-cbar = plt.colorbar()
-cbar.set_label('Пропускание, усл.ед.', rotation=90)
-plt.title('Синограмма без коррекции')
-plt.subplot(132)
-plt.imshow(ring_corr, cmap=plt.cm.viridis, interpolation='bilinear')
-plt.axis('tight')
-cbar = plt.colorbar()
-cbar.set_label('Пропускание, усл.ед.', rotation=90)
-plt.title('Синограмма с коррекцией колец')
-
-plt.subplot(133)
-plt.imshow(tmp_sinogram - ring_corr, cmap=plt.cm.viridis, interpolation='bilinear')
-plt.axis('tight')
-cbar = plt.colorbar()
-cbar.set_label('Пропускание, усл.ед.', rotation=90)
-plt.title('Разница');
-
-# %%
-for s in tqdm(range(sinogram.shape[1])):
-    sinogram[:, s, :] = correct_rings(sinogram[:, s, :], rc_level)
-
-# %%
 position_0, position_180 = get_angles_at_180_deg(uniq_angles)
+# position_0 +=3
+# position_180 +=1
 print(position_0, position_180)
 print(uniq_angles[position_0], uniq_angles[position_180], uniq_angles[position_180] - uniq_angles[position_0])
 
-data_0_orig = np.rot90(sinogram[position_0]).copy()
-data_180_orig = np.fliplr(np.rot90(sinogram[position_180]).copy())
-data_0 = data_0_orig
-data_180 = data_180_orig
-transorm_result = ird.similarity(data_0, data_180, order=1, numiter=5,
+data_0_orig = np.rot90(sinogram[position_0])
+data_180_orig = np.fliplr(np.rot90(sinogram[position_180]))
+filt = scipy.signal.gaussian(data_0_orig.shape[0], data_0_orig.shape[0] / 2)
+# plt.plot(filt)
+
+data_0 = (data_0_orig.T * filt).T
+data_180 = (data_180_orig.T * filt).T
+
+# data_0 = data_0_orig
+# data_180 = data_180_orig
+# data_0 = np.pad(data_0, 100, mode='constant')
+# data_180 = np.pad(data_180, 100, mode='constant')
+
+transorm_result = ird.similarity(data_0, data_180, order=2, numiter=5,
                                  constraints={"scale": (1., 0),
-                                              "angle": (0.2, 0.1),
+                                              "angle": (0, 5.),
                                               "ty": (0, 0)})
 
 fig = plt.figure(figsize=(12, 12))
@@ -275,7 +217,7 @@ plt.gray()
 plt.figure(figsize=(12, 12))
 im_max = np.max([np.max(data_0), np.max(data_180)])
 plt.subplot(221)
-plt.imshow(data_0, vmin=0, vmax=im_max, cmap=plt.cm.gray_r)
+plt.imshow(data_0_orig, vmin=0, vmax=im_max, cmap=plt.cm.gray_r)
 plt.axis('tight')
 plt.title('a')
 plt.xlabel('Каналы детектора')
@@ -284,7 +226,7 @@ cbar = plt.colorbar()
 cbar.set_label('Поглощение, усл.ед.', rotation=90)
 
 plt.subplot(222)
-plt.imshow(data_180, vmin=0, vmax=im_max, cmap=plt.cm.gray_r)
+plt.imshow(data_180_orig, vmin=0, vmax=im_max, cmap=plt.cm.gray_r)
 plt.axis('tight')
 plt.title('б')
 plt.xlabel('Каналы детектора')
@@ -293,7 +235,7 @@ cbar = plt.colorbar()
 cbar.set_label('Поглощение, усл.ед.', rotation=90)
 
 plt.subplot(223)
-plt.imshow(data_0 - data_180, vmin=-im_max / 2, vmax=im_max / 2, cmap=plt.cm.seismic)
+plt.imshow(data_0_orig - data_180_orig, vmin=-im_max / 2, vmax=im_max / 2, cmap=plt.cm.seismic)
 plt.axis('tight')
 plt.title('в')
 plt.xlabel('Каналы детектора')
@@ -301,11 +243,11 @@ plt.ylabel('Каналы детектора')
 cbar = plt.colorbar()
 cbar.set_label('Поглощение, усл.ед.', rotation=90)
 
-tt_180 = np.fliplr(ird.imreg.transform_img_dict(np.fliplr(data_180), tr_dict, order=1))
-tt_0 = ird.imreg.transform_img_dict(data_0, tr_dict, order=1)
+tt_180 = np.fliplr(ird.imreg.transform_img_dict(np.fliplr(data_180_orig), tr_dict, order=1))
+tt_0 = ird.imreg.transform_img_dict(data_0_orig, tr_dict, order=1)
 
 plt.subplot(224)
-plt.imshow(tt_0 - tt_180, vmin=-im_max / 2, vmax=im_max / 2, cmap=plt.cm.seismic)
+plt.imshow(tt_0 - tt_180, vmin=-im_max / 10, vmax=im_max / 10, cmap=plt.cm.seismic)
 plt.axis('tight')
 plt.title('г')
 plt.xlabel('Каналы детектора')
@@ -314,52 +256,95 @@ cbar = plt.colorbar()
 cbar.set_label('Поглощение, усл.ед.', rotation=90)
 
 # %%
-tim = ird.imreg.transform_img_dict(data_0, tr_dict)
+tim = ird.imreg.transform_img_dict(data_0_orig, tr_dict)
 sinogram_fixed, _ = persistent_array(os.path.join(tmp_dir, 'sinogram_fixed.tmp'),
                                      shape=(sinogram.shape[0], tim.shape[1], tim.shape[0]),
                                      dtype='float32', force_create=True)
 
 # fix axis tlit
-for i in tqdm(range(sinogram.shape[0])):
+for i in tqdm(range(sinogram_fixed.shape[0])):
     sinogram_fixed[i] = np.rot90(
-        ird.imreg.transform_img_dict(np.rot90(sinogram[i]), tr_dict, order=1),
+        ird.imreg.transform_img_dict(np.rot90(sinogram[i]), tr_dict, order=2, bgval=0),
         -1)
+
+# %%
+preview_slice_number = int(sinogram_fixed.shape[-1] // 2)
 
 # %%
 s1_angles = uniq_angles
 s1 = np.require(sinogram_fixed[:, :, preview_slice_number],
                 dtype=np.float32, requirements=['C'])
+test_rec(s1, uniq_angles, 20)
 
 # %%
-test_rec(s1, uniq_angles)
+from tomopy.recon.rotation import find_center_vo
 
 # %%
-plt.figure(figsize=(7, 7))
+rot_center = find_center_vo(s1, uniq_angles)
+print(rot_center)
 
-plt.imshow(s1[np.argsort(uniq_angles)], interpolation='bilinear', cmap=plt.cm.gray_r)
+# %%
+center_shift = np.rint((rot_center - s1.shape[1] / 2.) / 2.)
+print(center_shift)
+
+# %%
+s2 = ird.imreg.transform_img_dict(s1, {'tvec': (0, -center_shift + 1), 'scale': 1, 'angle': 0})
+test_rec(s2, uniq_angles, 20)
+
+# %%
+# fix axis tlit
+for i in tqdm(range(sinogram_fixed.shape[0])):
+    sinogram_fixed[i] = ird.imreg.transform_img_dict(sinogram_fixed[i],
+                                                     {'tvec': (-center_shift + 1, 0), 'scale': 1, 'angle': 0},
+                                                     order=2, bgval=0)
+
+# %%
+tmp_sinogram = s2[np.argsort(uniq_angles)]
+ring_corr = remove_all_stripe(tmp_sinogram[:, None, :], 10, 11, 5)
+ring_corr = np.squeeze(ring_corr)
+plt.figure(figsize=(15, 8))
+plt.subplot(131)
+plt.imshow(tmp_sinogram, cmap=plt.cm.viridis, interpolation='bilinear')
 plt.axis('tight')
 cbar = plt.colorbar()
 cbar.set_label('Пропускание, усл.ед.', rotation=90)
 plt.title('Синограмма без коррекции')
-plt.xlabel('Номер канала детектора')
-plt.ylabel('Номер угла поворота')
+plt.subplot(132)
+plt.imshow(ring_corr, cmap=plt.cm.viridis, interpolation='bilinear')
+plt.axis('tight')
+cbar = plt.colorbar()
+cbar.set_label('Пропускание, усл.ед.', rotation=90)
+plt.title('Синограмма с коррекцией колец')
+
+plt.subplot(133)
+plt.imshow(tmp_sinogram - ring_corr, cmap=plt.cm.viridis, interpolation='bilinear')
+plt.axis('tight')
+cbar = plt.colorbar()
+cbar.set_label('Пропускание, усл.ед.', rotation=90)
+plt.title('Разница');
+
+s1_angles = np.sort(uniq_angles)
+s1 = np.require(ring_corr,
+                dtype=np.float32, requirements=['C'])
+# s1[np.isnan(s1)] = 0
+test_rec(s1, s1_angles, 20)
 
 # %%
-# TODO: check mu physical value
-sinogram_fixed_median = np.median(sinogram_fixed.sum(axis=-1).sum(axis=-1))
-corr_factor = sinogram_fixed.sum(axis=-1).sum(axis=-1) / sinogram_fixed_median
+# #uncomment to fix rings
+# step = 50
+# for i in tqdm(range(np.int(np.ceil(sinogram_fixed.shape[1]/step)))):
+#     start = i*step
+#     stop = np.min([(i+1)*step, sinogram_fixed.shape[1]])
+#     sinogram_fixed[:,start:stop,:] = remove_all_stripe(sinogram_fixed[:,start:stop,:],10, 11, 5)
 
 # %%
-# #TODO: fix bad data
-# for i in range(len(sinogram_fixed)):
-#     sinogram_fixed[i] = sinogram_fixed[i] / corr_factor[i]
+s1_angles = uniq_angles
+s1 = np.require(sinogram_fixed[:, :, preview_slice_number - 0],
+                dtype=np.float32, requirements=['C'])
+test_rec(s1, uniq_angles, 20)
 
 # %%
-# s2 = np.require(sinogram_fixed[:, :, preview_slice_number],
-#                 dtype=np.float32, requirements=['C'])
-
-# %%
-del data_0_orig, data_180_orig, data_images_good, data_images_crop, data_images
+del data_0_orig, data_180_orig, data_images_crop, data_images
 del sinogram, sinogram_fixed, uniq_angles, uniq_data_images
 
 # %%
@@ -460,107 +445,6 @@ else:
 recon_config['corr'] = {'bh': bh_corr}
 
 # %%
-# from scipy.optimize import curve_fit
-# from scipy.signal import medfilt
-
-
-# def gauss(x, *p):
-#     A, mu, sigma = p
-#     return np.abs(A) * np.exp(-(x - mu) ** 2 / (2. * sigma ** 2))
-
-
-# def gauss2(x, *p):
-#     return gauss(x, p[0], p[1], p[2]) + gauss(x, p[3], p[4], p[5])
-
-
-# def optimize_2gaussian(rec, mask):
-#     hist, bin_edges = np.histogram(rec[mask], bins=1000)
-#     bin_centres = (bin_edges[:-1] + bin_edges[1:]) / 2
-
-#     p0 = [1.e3, 0.0, 0.01,
-#           1.e3, 0.3, 0.01]  # A1, mu1, sigma1, A2, mu2, sigma2
-
-#     coeff, var_matrix = curve_fit(gauss2, bin_centres, hist, p0=p0)
-
-#     coeff_g, var_matrix_g = curve_fit(gauss, bin_centres, hist, p0=[1., 0., 1.])
-
-#     # Get the fitted curve
-#     hist_fit = gauss2(bin_centres, *coeff)
-#     hist_fit1 = gauss(bin_centres, coeff[0], coeff[1], coeff[2])
-#     hist_fit2 = gauss(bin_centres, coeff[3], coeff[4], coeff[5])
-
-#     hist_fit_g = gauss(bin_centres, *coeff_g)
-
-#     plt.figure(figsize=(12, 10))
-#     plt.subplot(311)
-#     plt.title('Histogram. bh_corr= {:.3f}'.format(bh_corr))
-#     plt.plot(bin_centres, hist, label='experiment data')
-#     plt.plot(bin_centres, hist_fit, lw=2, label='Sum of 2 gausians fit. L2={:.1f}'.format(
-#         np.mean(np.sqrt(np.sum((hist - hist_fit) ** 2)))))
-#     plt.plot(bin_centres, hist_fit1, label='1st gausians')
-#     plt.plot(bin_centres, hist_fit2, label='2nd gausians')
-#     plt.plot(bin_centres, hist_fit_g, 'k', lw=2, label='Single Gaussian. L2={:.1f}'.format(
-#         np.mean(np.sqrt(np.sum((hist - hist_fit_g) ** 2)))))
-#     plt.grid()
-#     plt.legend()
-
-#     plt.subplot(312)
-#     plt.title('Central cut')
-#     plt.plot(medfilt(rec[rec.shape[0] // 2], 9))
-#     plt.plot(medfilt(rec[:, rec.shape[1] // 2], 9))
-#     plt.grid()
-
-#     plt.subplot(337)
-#     t = mask
-#     ds = 500
-#     plt.imshow(t[t.shape[0] // 2 - ds:t.shape[0] // 2 + ds,
-#                t.shape[1] // 2 - ds:t.shape[1] // 2 + ds],
-#                cmap=plt.cm.viridis)
-
-#     plt.subplot(338)
-#     t = rec * mask
-#     ds = 500
-#     plt.imshow(safe_median(t[
-#                            t.shape[0] // 2 - ds:t.shape[0] // 2 + ds,
-#                            t.shape[1] // 2 - ds:t.shape[1] // 2 + ds]),
-#                cmap=plt.cm.viridis)
-
-#     plt.subplot(339)
-#     t = rec * mask
-#     ds = 200
-#     plt.imshow(safe_median(t[
-#                            t.shape[0] // 2 - ds:t.shape[0] // 2 + ds,
-#                            t.shape[1] // 2 - ds:t.shape[1] // 2 + ds]),
-#                cmap=plt.cm.viridis)
-
-#     plt.show()
-
-
-# def create_circle_mask(x, y, r, size):
-#     X, Y = np.meshgrid(np.arange(size), np.arange(size))
-#     X = X - x
-#     Y = Y - y
-#     R = np.sqrt(X ** 2 + Y ** 2)
-#     mask = R < r
-#     return mask
-
-
-# mask = create_circle_mask(870, 870, 470, rec_slice.shape[0])
-
-# sss = s1[..., int(s1.shape[-1] // 2)]
-# t_angles = (uniq_angles - uniq_angles.min()) < 180  # remove angles >180
-
-# for bh_corr_t in np.arange(1, 5, 0.5):
-#     print(bh_corr_t)
-#     s4 = sss.copy()
-#     s4[s4 < 0] = 0
-#     s4 = np.power(s4, bh_corr_t)
-#     s4 = s4 / np.mean(s4) * np.mean(sss)
-
-#     rec_slice = recon_2d_parallel(s4[t_angles], uniq_angles[t_angles])
-#     optimize_2gaussian(rec_slice, mask)
-
-# %%
 # multi 2d case
 t = time.time()
 print(s1.shape)
@@ -574,31 +458,28 @@ for i in tqdm(range(0, s1.shape[-1])):
 print(time.time() - t)
 
 # %%
-rec_vol_filtered = rec_vol
-
-# %%
 for j in range(2):
     N = 20  # number of cuts
     for i in range(N):
         plt.figure(figsize=(10, 8))
-        data = rec_vol_filtered.take(i * rec_vol_filtered.shape[j] // N, axis=j)
+        data = rec_vol.take(i * rec_vol.shape[j] // N, axis=j)
         plt.imshow(data, cmap=plt.cm.viridis,
                    vmin=np.maximum(0, np.percentile(data[:], 10)),
                    vmax=np.percentile(data[:], 99.9))
         plt.axis('image')
-        plt.title(i * rec_vol_filtered.shape[j] // N)
+        plt.title(i * rec_vol.shape[j] // N)
         plt.colorbar()
         plt.show()
 
 # %%
-save_amira(rec_vol_filtered, tmp_dir, tomo_info['specimen'], 3)
+save_amira(rec_vol, tmp_dir, tomo_info['specimen'], 3)
 
 # %%
 recon_config
 
 # %%
 with h5py.File(os.path.join(tmp_dir, 'tomo_rec.' + tomo_info['specimen'] + '.h5'), 'w') as h5f:
-    h5f.create_dataset('Reconstruction', data=rec_vol_filtered, chunks=True,
+    h5f.create_dataset('Reconstruction', data=rec_vol, chunks=True,
                        compression='lzf')
     recursively_save_dict_contents_to_group(h5f, '/recon_config/', recon_config)
 
@@ -607,9 +488,9 @@ import k3d
 from tomotools import reshape_volume
 
 # %%
-resize = int(np.power(np.prod(rec_vol_filtered.shape) / 1e7, 1. / 3))
+resize = int(np.power(np.prod(rec_vol.shape) / 1e7, 1. / 3))
 print(resize)
-small_rec = reshape_volume(rec_vol_filtered, resize)
+small_rec = reshape_volume(rec_vol, resize)
 
 # %%
 volume = k3d.volume(
@@ -634,9 +515,9 @@ plot.lighting = 2
 plot.display()
 
 # %%
-resize = int(np.power(np.prod(rec_vol_filtered.shape) / 1e6, 1. / 3))
+resize = int(np.power(np.prod(rec_vol.shape) / 1e6, 1. / 3))
 print(resize)
-small_rec = reshape_volume(rec_vol_filtered, resize)
+small_rec = reshape_volume(rec_vol, resize)
 volume = k3d.volume(
     small_rec.astype(np.float32),
     #     alpha_coef=1000,
@@ -657,6 +538,11 @@ plot = k3d.plot(camera_auto_fit=True)
 plot += volume
 plot.lighting = 2
 plot.display()
+
+# %%
+plot.fetch_snapshot()
+with open('./tomo_3d.html', 'w') as fp:
+    fp.write(plot.snapshot)
 
 # %%
 plot.fetch_snapshot()
@@ -709,6 +595,10 @@ mkdir_p(os.path.join(storage_dir, experiment_id))
 
 # %% [markdown]
 # # Changelog:
+# * 2.5 (2021.03.01)
+#  - fiх shift and tilt detection
+#  - add ring correction from tomopy
+#  - read roi from ini file
 # * 2.4 (2020.12.08)
 #  - 3d render
 # * 2.3 (2020.11.23)

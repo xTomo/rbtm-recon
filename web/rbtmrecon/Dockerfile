@@ -9,7 +9,7 @@ ENV PATH /opt/conda/bin:$PATH
 
 RUN DEBIAN_FRONTEND=noninteractive  apt-get update --fix-missing && apt-get install -y wget bzip2 ca-certificates \
     libglib2.0-0 libxext6 libsm6 libxrender1 htop libgl1-mesa-glx\
-    git mercurial subversion mc vim && \
+    git mercurial subversion ffmpeg mc vim && \
     apt-get clean && \
     apt-get autoremove -y && apt-get autoclean -y &&\
     rm -rf /var/lib/apt/lists/*

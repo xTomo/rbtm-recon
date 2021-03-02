@@ -294,17 +294,17 @@ def correct_rings(sino0, level):
 
 # # build frames for video
 # images_dir = os.path.join(tmp_dir,'images')
-# tomotools.mkdir_p(images_dir)
-# im_max=np.max(sinogram)
-# im_min=np.min(sinogram)
+# mkdir_p(images_dir)
+# im_max=np.percentile(sinogram, 99.9)
+# im_min=np.percentile(sinogram, 10)
 # print(im_min, im_max)
-# for ia, a in tomotools.log_progress(list(enumerate(np.argsort(uniq_angles)))):
+# for ia, a in tqdm(list(enumerate(np.argsort(uniq_angles)))):
 # #     print('{:34}'.format(ia))
 #     plt.imsave(os.path.join(images_dir,'prj_{:03}.png'.format(ia)),
 #                np.rot90(sinogram[a],3), vmin=im_min, vmax=im_max,
 #                cmap=plt.cm.gray_r)
 
-# # !cd {images_dir} && avconv -r 10 -i "prj_%03d.png" -b:v 1000k prj.avi
+# !cd {images_dir} && ffmpeg -r 10 -i "prj_%03d.png" -b:v 1000k prj.avi
 # # !cd {images_dir} && rm prj.mp4
 
 # seraching opposite frames (0 and 180 deg)
@@ -318,7 +318,7 @@ def get_angles_at_180_deg(uniq_angles):
     return position_0, position_180
 
 
-def test_rec(s1, uniq_angles):
+def test_rec(s1, uniq_angles, vmaxk=1.2):
     plt.figure(figsize=(7, 7))
     plt.imshow(s1[np.argsort(uniq_angles)], interpolation='bilinear', cmap=plt.cm.gray_r)
     plt.axis('tight')
@@ -331,13 +331,16 @@ def test_rec(s1, uniq_angles):
 
     plt.figure(figsize=(10, 8))
     plt.imshow(safe_median(rec_slice),
-               vmin=0, vmax=np.percentile(rec_slice, 95) * 1.2, cmap=plt.cm.viridis)
+               vmin=0, vmax=np.percentile(rec_slice, 95) * vmaxk, cmap=plt.cm.viridis)
     plt.axis('equal')
     plt.colorbar()
     plt.show()
 
 
 def reshape_volume(volume, reshape):
+    if reshape == 1:
+        return volume
+
     res = np.zeros([s // reshape for s in volume.shape], dtype='float32')
     xs, ys, zs = [s * reshape for s in res.shape]
     for x, y, z in np.ndindex(reshape, reshape, reshape):
@@ -348,6 +351,7 @@ def reshape_volume(volume, reshape):
 def save_amira(in_array, out_path, name, reshape=3, pixel_size=9.0e-3):
     data_path = str(out_path)
     os.makedirs(data_path, exist_ok=True)
+    name = name.replace(' ', '_')
     with open(os.path.join(data_path, name + '.raw'), 'wb') as amira_file:
         reshaped_vol = reshape_volume(in_array, reshape)
         reshaped_vol.tofile(amira_file)
@@ -435,10 +439,9 @@ def recursively_load_dict_contents_from_group(h5file, path):
             ans[key] = recursively_load_dict_contents_from_group(h5file, path + key + '/')
     return ans
 
-# %%
+
 # import ipyvolume as ipv
 
-# %%
 # ipv.figure()
 # ipv.volshow(reshape_volume(rec_vol_filtered,10),
 #             max_shape=1024,
@@ -455,3 +458,147 @@ def recursively_load_dict_contents_from_group(h5file, path):
 # ipv.squarelim()
 # # ipv.show()
 # ipv.save(os.path.join(tmp_dir,'tomo.html'))
+
+def find_roi(data_images, empty_beam, data_angles):
+    te = np.asarray(empty_beam)
+    te[te < 1] = 1
+    x_mins = []
+    x_maxs = []
+    y_mins = []
+    y_maxs = [te.shape[1]]
+    for ia in tqdm(np.argsort(data_angles)[::len(data_angles) // 8]):
+        td = np.asarray(data_images[ia])
+        td[td < 1] = 1
+
+        d = np.log(te) - np.log(td)
+        d[d < 0] = 0
+        q = d > np.percentile(np.asarray(d), 20)
+        mask = scipy.ndimage.binary_opening(q, np.ones((9, 9), dtype=int))
+
+        x_mask = np.argwhere(np.sum(mask, axis=1) > 20)  # np.percentile(mask, 99.9, axis=1)
+        x_min = np.min(x_mask)
+        x_max = np.max(x_mask)
+
+        y_mask = np.argwhere(np.sum(mask, axis=0) > 20)  # np.percentile(mask, 99.9, axis=1)
+        y_min = np.min(y_mask)
+        y_max = np.max(y_mask)
+
+        x_mins.append(x_min)
+        y_mins.append(y_min)
+        x_maxs.append(x_max)
+        y_maxs.append(y_max)
+    #         plt.figure(figsize=(10,10))
+    #         plt.imshow(d, vmin=-1, vmax=2, cmap=plt.cm.gray)
+    #         plt.hlines([x_min, x_max], y_min, y_max, 'g')
+    #         plt.vlines([y_min, y_max], x_min, x_max, 'r')
+    #         plt.imshow(mask, cmap=plt.cm.gray)
+    #         plt.colorbar()
+    #         plt.show()
+    x_min = np.maximum(0, np.min(x_mins) - 50)
+    y_min = np.maximum(0, np.min(y_mins) - 50)
+    x_max = np.minimum(te.shape[0] - 1, np.max(x_maxs) + 50)
+    y_max = np.minimum(te.shape[1] - 1, np.max(y_maxs) + 50)
+
+    return x_min, x_max, y_min, y_max
+
+## For BH with 2 gaussans approximation
+
+# from scipy.optimize import curve_fit
+# from scipy.signal import medfilt
+
+
+# def gauss(x, *p):
+#     A, mu, sigma = p
+#     return np.abs(A) * np.exp(-(x - mu) ** 2 / (2. * sigma ** 2))
+
+
+# def gauss2(x, *p):
+#     return gauss(x, p[0], p[1], p[2]) + gauss(x, p[3], p[4], p[5])
+
+
+# def optimize_2gaussian(rec, mask):
+#     hist, bin_edges = np.histogram(rec[mask], bins=1000)
+#     bin_centres = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+#     p0 = [1.e3, 0.0, 0.01,
+#           1.e3, 0.3, 0.01]  # A1, mu1, sigma1, A2, mu2, sigma2
+
+#     coeff, var_matrix = curve_fit(gauss2, bin_centres, hist, p0=p0)
+
+#     coeff_g, var_matrix_g = curve_fit(gauss, bin_centres, hist, p0=[1., 0., 1.])
+
+#     # Get the fitted curve
+#     hist_fit = gauss2(bin_centres, *coeff)
+#     hist_fit1 = gauss(bin_centres, coeff[0], coeff[1], coeff[2])
+#     hist_fit2 = gauss(bin_centres, coeff[3], coeff[4], coeff[5])
+
+#     hist_fit_g = gauss(bin_centres, *coeff_g)
+
+#     plt.figure(figsize=(12, 10))
+#     plt.subplot(311)
+#     plt.title('Histogram. bh_corr= {:.3f}'.format(bh_corr))
+#     plt.plot(bin_centres, hist, label='experiment data')
+#     plt.plot(bin_centres, hist_fit, lw=2, label='Sum of 2 gausians fit. L2={:.1f}'.format(
+#         np.mean(np.sqrt(np.sum((hist - hist_fit) ** 2)))))
+#     plt.plot(bin_centres, hist_fit1, label='1st gausians')
+#     plt.plot(bin_centres, hist_fit2, label='2nd gausians')
+#     plt.plot(bin_centres, hist_fit_g, 'k', lw=2, label='Single Gaussian. L2={:.1f}'.format(
+#         np.mean(np.sqrt(np.sum((hist - hist_fit_g) ** 2)))))
+#     plt.grid()
+#     plt.legend()
+
+#     plt.subplot(312)
+#     plt.title('Central cut')
+#     plt.plot(medfilt(rec[rec.shape[0] // 2], 9))
+#     plt.plot(medfilt(rec[:, rec.shape[1] // 2], 9))
+#     plt.grid()
+
+#     plt.subplot(337)
+#     t = mask
+#     ds = 500
+#     plt.imshow(t[t.shape[0] // 2 - ds:t.shape[0] // 2 + ds,
+#                t.shape[1] // 2 - ds:t.shape[1] // 2 + ds],
+#                cmap=plt.cm.viridis)
+
+#     plt.subplot(338)
+#     t = rec * mask
+#     ds = 500
+#     plt.imshow(safe_median(t[
+#                            t.shape[0] // 2 - ds:t.shape[0] // 2 + ds,
+#                            t.shape[1] // 2 - ds:t.shape[1] // 2 + ds]),
+#                cmap=plt.cm.viridis)
+
+#     plt.subplot(339)
+#     t = rec * mask
+#     ds = 200
+#     plt.imshow(safe_median(t[
+#                            t.shape[0] // 2 - ds:t.shape[0] // 2 + ds,
+#                            t.shape[1] // 2 - ds:t.shape[1] // 2 + ds]),
+#                cmap=plt.cm.viridis)
+
+#     plt.show()
+
+
+# def create_circle_mask(x, y, r, size):
+#     X, Y = np.meshgrid(np.arange(size), np.arange(size))
+#     X = X - x
+#     Y = Y - y
+#     R = np.sqrt(X ** 2 + Y ** 2)
+#     mask = R < r
+#     return mask
+
+
+# mask = create_circle_mask(870, 870, 470, rec_slice.shape[0])
+
+# sss = s1[..., int(s1.shape[-1] // 2)]
+# t_angles = (uniq_angles - uniq_angles.min()) < 180  # remove angles >180
+
+# for bh_corr_t in np.arange(1, 5, 0.5):
+#     print(bh_corr_t)
+#     s4 = sss.copy()
+#     s4[s4 < 0] = 0
+#     s4 = np.power(s4, bh_corr_t)
+#     s4 = s4 / np.mean(s4) * np.mean(sss)
+
+#     rec_slice = recon_2d_parallel(s4[t_angles], uniq_angles[t_angles])
+#     optimize_2gaussian(rec_slice, mask)
