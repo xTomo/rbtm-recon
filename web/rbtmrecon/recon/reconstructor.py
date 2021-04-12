@@ -42,6 +42,7 @@ import scipy.ndimage
 
 import imreg_dft as ird
 from tomopy.prep.stripe import remove_all_stripe
+from tomopy.recon.rotation import find_center_vo
 
 from tomotools import (STORAGE_SERVER, safe_median, recon_2d_parallel, get_tomoobject_info, get_experiment_hdf5,
                        mkdir_p, show_exp_data, load_tomo_data, group_data, tqdm, find_roi,
@@ -133,6 +134,12 @@ except KeyError:
     pass
 
 # %%
+x_min = int(x_min)
+x_max = int(x_max)
+y_min = int(y_min)
+y_max = int(y_max)
+
+# %%
 recon_config['roi'] = {'x_min': x_min,
                        'x_max': x_max,
                        'y_min': y_min,
@@ -189,7 +196,7 @@ data_180 = (data_180_orig.T * filt).T
 # data_0 = np.pad(data_0, 100, mode='constant')
 # data_180 = np.pad(data_180, 100, mode='constant')
 
-transorm_result = ird.similarity(data_0, data_180, order=2, numiter=5,
+transorm_result = ird.similarity(data_0, data_180, order=1, numiter=4,
                                  constraints={"scale": (1., 0),
                                               "angle": (0, 5.),
                                               "ty": (0, 0)})
@@ -274,10 +281,7 @@ preview_slice_number = int(sinogram_fixed.shape[-1] // 2)
 s1_angles = uniq_angles
 s1 = np.require(sinogram_fixed[:, :, preview_slice_number],
                 dtype=np.float32, requirements=['C'])
-test_rec(s1, uniq_angles, 20)
-
-# %%
-from tomopy.recon.rotation import find_center_vo
+test_rec(s1, uniq_angles, 2)
 
 # %%
 rot_center = find_center_vo(s1, uniq_angles)
@@ -288,14 +292,15 @@ center_shift = np.rint((rot_center - s1.shape[1] / 2.) / 2.)
 print(center_shift)
 
 # %%
-s2 = ird.imreg.transform_img_dict(s1, {'tvec': (0, -center_shift + 1), 'scale': 1, 'angle': 0})
-test_rec(s2, uniq_angles, 20)
+shift_corr = 2  # change this for turning -2, -1, 0, 1, 2
+s2 = ird.imreg.transform_img_dict(s1, {'tvec': (0, -center_shift + shift_corr), 'scale': 1, 'angle': 0})
+test_rec(s2, uniq_angles, 2)
 
 # %%
-# fix axis tlit
+# experimental fix axis tlit
 for i in tqdm(range(sinogram_fixed.shape[0])):
     sinogram_fixed[i] = ird.imreg.transform_img_dict(sinogram_fixed[i],
-                                                     {'tvec': (-center_shift + 1, 0), 'scale': 1, 'angle': 0},
+                                                     {'tvec': (-center_shift + shift_corr, 0), 'scale': 1, 'angle': 0},
                                                      order=2, bgval=0)
 
 # %%
@@ -327,7 +332,7 @@ s1_angles = np.sort(uniq_angles)
 s1 = np.require(ring_corr,
                 dtype=np.float32, requirements=['C'])
 # s1[np.isnan(s1)] = 0
-test_rec(s1, s1_angles, 20)
+test_rec(s1, s1_angles, 2)
 
 # %%
 # #uncomment to fix rings
@@ -341,7 +346,7 @@ test_rec(s1, s1_angles, 20)
 s1_angles = uniq_angles
 s1 = np.require(sinogram_fixed[:, :, preview_slice_number - 0],
                 dtype=np.float32, requirements=['C'])
-test_rec(s1, uniq_angles, 20)
+test_rec(s1, uniq_angles, 2)
 
 # %%
 del data_0_orig, data_180_orig, data_images_crop, data_images
@@ -472,7 +477,7 @@ for j in range(2):
         plt.show()
 
 # %%
-save_amira(rec_vol, tmp_dir, tomo_info['specimen'], 3)
+save_amira(rec_vol, tmp_dir, tomo_info['specimen'], 1)
 
 # %%
 recon_config
@@ -505,9 +510,9 @@ volume = k3d.volume(
     compression_level=4
 )
 size = small_rec.shape
-volume.transform.bounds = [-size[0] / 2, size[0] / 2,
+volume.transform.bounds = [-size[2] / 2, size[2] / 2,
                            -size[1] / 2, size[1] / 2,
-                           -size[2] / 2, size[2] / 2]
+                           -size[0] / 2, size[0] / 2]
 
 plot = k3d.plot(camera_auto_fit=True)
 plot += volume
@@ -530,9 +535,9 @@ volume = k3d.volume(
     compression_level=4
 )
 size = small_rec.shape
-volume.transform.bounds = [-size[0] / 2, size[0] / 2,
+volume.transform.bounds = [-size[2] / 2, size[2] / 2,
                            -size[1] / 2, size[1] / 2,
-                           -size[2] / 2, size[2] / 2]
+                           -size[0] / 2, size[0] / 2]
 
 plot = k3d.plot(camera_auto_fit=True)
 plot += volume
@@ -595,6 +600,10 @@ mkdir_p(os.path.join(storage_dir, experiment_id))
 
 # %% [markdown]
 # # Changelog:
+# * 2.5.1 (2021.04.12)
+#  - fix crash in indexes converting to int
+#  - change interpolation of rotation
+#  - axis rotation manual mode added
 # * 2.5 (2021.03.01)
 #  - fiх shift and tilt detection
 #  - add ring correction from tomopy
