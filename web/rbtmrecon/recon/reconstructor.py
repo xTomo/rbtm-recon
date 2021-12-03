@@ -298,10 +298,10 @@ test_rec(s2, uniq_angles, 2)
 
 # %%
 # experimental fix axis tlit
-for i in tqdm(range(sinogram_fixed.shape[0])):
-    sinogram_fixed[i] = ird.imreg.transform_img_dict(sinogram_fixed[i],
-                                                     {'tvec': (-center_shift + shift_corr, 0), 'scale': 1, 'angle': 0},
-                                                     order=2, bgval=0)
+# for i in tqdm(range(sinogram_fixed.shape[0])):
+#     sinogram_fixed[i] = ird.imreg.transform_img_dict(sinogram_fixed[i],
+#                                                      {'tvec': (-center_shift + shift_corr, 0), 'scale': 1, 'angle': 0},
+#                                                      order=2, bgval=0)
 
 # %%
 tmp_sinogram = s2[np.argsort(uniq_angles)]
@@ -477,7 +477,7 @@ for j in range(2):
         plt.show()
 
 # %%
-save_amira(rec_vol, tmp_dir, tomo_info['specimen'], 1)
+save_amira(rec_vol, tmp_dir, tomo_info['specimen'], 3)
 
 # %%
 recon_config
