@@ -1,7 +1,7 @@
 name: xrecon
 channels:
   - conda-forge
-  - astra-toolbox/label/dev
+  - astra-toolbox
   - defaults
 dependencies:
   - scipy
@@ -16,7 +16,7 @@ dependencies:
   - jupyter
   - ipython
   - nbformat
-  - python=3
+  - python=3.9
   - pyqt
   - tqdm
   - autopep8
@@ -30,6 +30,6 @@ dependencies:
   - pillow
   - k3d
   - pip:
-    - pymongo
+    - pymongo==3
     - imreg_dft
     - pyvista

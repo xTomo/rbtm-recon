@@ -1,4 +1,4 @@
-version: '2.4'
+version: '2.4'  # work with docker-compose 1.25.4
 services:
   test:
     runtime: nvidia
