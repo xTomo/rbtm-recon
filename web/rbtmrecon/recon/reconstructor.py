@@ -102,9 +102,6 @@ empty_beam, data_images, data_angles = load_tomo_data(data_file, tmp_dir)
 show_exp_data(empty_beam, data_images)
 
 # %%
-
-
-# %%
 if 'roi' in recon_config:
     print("Read from ini file")
     x_min, x_max, y_min, y_max = (recon_config['roi']['x_min'],
@@ -248,8 +245,8 @@ transorm_result['tvec'][0] / 2
 # shift_x = -transorm_result['tvec'][1] / 2.
 # alfa = - transorm_result['angle'] / 2
 
-shift_x = np.mean(txs)
-alfa = np.mean(angles)
+shift_x = np.median(txs)
+alfa = np.median(angles)
 tr_dict = {"scale": 1, "angle": alfa, "tvec": (0, shift_x)}
 
 # %%
