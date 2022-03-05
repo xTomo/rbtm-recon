@@ -194,8 +194,8 @@ def find_axis(data_0_orig, data_180_orig, show_output=True):
     o180 = filters.threshold_otsu(data_180_orig, nbins=1024)
     m180 = data_180_orig > o180
 
-    data_0 = data_0_orig * m0
-    data_180 = data_180_orig * m180
+    data_0 = data_0_orig  # * m0
+    data_180 = data_180_orig  # * m180
 
     #     data_0 = m0.astype('float32')
     #     data_180 = m180.astype('float32')
@@ -214,7 +214,7 @@ def find_axis(data_0_orig, data_180_orig, show_output=True):
                                      constraints={"scale": (1., 0),
                                                   "angle": (0, 0.5),
                                                   "ty": (0, 100),
-                                                  "tx": (tx_est, 20), })
+                                                  "tx": (tx_est, 100), })
 
     if show_output:
         fig = plt.figure(figsize=(12, 12))
