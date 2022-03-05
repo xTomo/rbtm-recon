@@ -7,12 +7,16 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.7.1
+#       jupytext_version: 1.13.4
 #   kernelspec:
-#     display_name: Python 3
+#     display_name: Python 3 (ipykernel)
 #     language: python
 #     name: python3
 # ---
+
+# %%
+# %load_ext autoreload
+# %autoreload
 
 # %%
 # #jupytext --to notebook reconstructor.py
@@ -39,13 +43,15 @@ import h5py
 
 import scipy.optimize
 import scipy.ndimage
+from skimage import filters
+import scipy.ndimage as ndi
 
 import imreg_dft as ird
 from tomopy.prep.stripe import remove_all_stripe
 from tomopy.recon.rotation import find_center_vo
 
 from tomotools import (STORAGE_SERVER, safe_median, recon_2d_parallel, get_tomoobject_info, get_experiment_hdf5,
-                       mkdir_p, show_exp_data, load_tomo_data, group_data, tqdm, find_roi,
+                       mkdir_p, show_exp_data, load_tomo_data, tqdm, find_roi,
                        persistent_array, get_angles_at_180_deg, test_rec, save_amira, show_frames_with_border,
                        recursively_save_dict_contents_to_group)
 
@@ -96,6 +102,9 @@ empty_beam, data_images, data_angles = load_tomo_data(data_file, tmp_dir)
 show_exp_data(empty_beam, data_images)
 
 # %%
+
+
+# %%
 if 'roi' in recon_config:
     print("Read from ini file")
     x_min, x_max, y_min, y_max = (recon_config['roi']['x_min'],
@@ -107,7 +116,6 @@ else:
     x_min, x_max, y_min, y_max = find_roi(data_images, empty_beam, data_angles)
     # x_min, x_max, y_min, y_max = 865, 3123, 324, 2443
 print("x_min, x_max, y_min, y_max = ", x_min, x_max, y_min, y_max)
-
 
 # %%
 ff = ipywidgets.interact_manual(show_frames_with_border, data_images=ipywidgets.fixed(data_images),
@@ -156,9 +164,10 @@ data_images_crop, _ = persistent_array(os.path.join(tmp_dir, 'data_images_crop.t
 data_images_crop[:] = data_images[:, x_min:x_max, y_min:y_max]
 empty_beam_crop = empty_beam[x_min:x_max, y_min:y_max]
 
-
 # %%
-uniq_data_images, uniq_angles = group_data(data_images_crop, data_angles, tmp_dir)
+# don't check non unique files
+# uniq_data_images, uniq_angles = group_data(data_images_crop, data_angles, tmp_dir)
+uniq_data_images, uniq_angles = data_images_crop, data_angles
 
 # %%
 sinogram, _ = persistent_array(os.path.join(tmp_dir, 'sinogram.tmp'), shape=uniq_data_images.shape,
@@ -174,42 +183,73 @@ for di in tqdm(range(uniq_data_images.shape[0])):
     d = safe_median(d)
     d[d < 0] = 0
     sinogram[di] = d
+
+
 # ne.evaluate('-log(uniq_data_images)', out=sinogram);
 
 # %%
-position_0, position_180 = get_angles_at_180_deg(uniq_angles)
-# position_0 +=3
-# position_180 +=1
-print(position_0, position_180)
-print(uniq_angles[position_0], uniq_angles[position_180], uniq_angles[position_180] - uniq_angles[position_0])
+def find_axis(data_0_orig, data_180_orig, show_output=True):
+    o0 = filters.threshold_otsu(data_0_orig, nbins=1024)
+    m0 = data_0_orig > o0
+    o180 = filters.threshold_otsu(data_180_orig, nbins=1024)
+    m180 = data_180_orig > o180
 
-data_0_orig = np.rot90(sinogram[position_0])
-data_180_orig = np.fliplr(np.rot90(sinogram[position_180]))
-filt = scipy.signal.gaussian(data_0_orig.shape[0], data_0_orig.shape[0] / 2)
-# plt.plot(filt)
+    data_0 = data_0_orig * m0
+    data_180 = data_180_orig * m180
 
-data_0 = (data_0_orig.T * filt).T
-data_180 = (data_180_orig.T * filt).T
+    #     data_0 = m0.astype('float32')
+    #     data_180 = m180.astype('float32')
 
-# data_0 = data_0_orig
-# data_180 = data_180_orig
-# data_0 = np.pad(data_0, 100, mode='constant')
-# data_180 = np.pad(data_180, 100, mode='constant')
+    data_0 = np.pad(data_0, 100, mode='constant')
+    data_180 = np.pad(data_180, 100, mode='constant')
 
-transorm_result = ird.similarity(data_0, data_180, order=1, numiter=4,
-                                 constraints={"scale": (1., 0),
-                                              "angle": (0, 5.),
-                                              "ty": (0, 0)})
+    cy_0, cx_0 = ndi.center_of_mass(data_0_orig)
+    cy_180, cx_180 = ndi.center_of_mass(data_180_orig)
 
-fig = plt.figure(figsize=(12, 12))
-ird.imshow(data_0, data_180, transorm_result['timg'], fig=fig)
-plt.show()
+    tx_est = (cx_0 - cx_180) / 2
+    if show_output:
+        print(cy_0, cx_0, cy_180, cx_180, tx_est)
 
-transorm_result
+    transorm_result = ird.similarity(data_0, data_180, order=1, numiter=3,
+                                     constraints={"scale": (1., 0),
+                                                  "angle": (0, 0.5),
+                                                  "ty": (0, 100),
+                                                  "tx": (tx_est, 20), })
+
+    if show_output:
+        fig = plt.figure(figsize=(12, 12))
+        ird.imshow(data_0, data_180, transorm_result['timg'], fig=fig)
+        plt.show()
+
+        print(transorm_result)
+
+    return transorm_result
+
+
+# find shift and tilt based on many frames
+positions_0, positions_180 = get_angles_at_180_deg(uniq_angles)
+txs = []
+angles = []
+for position_0, position_180 in tqdm(list(zip(positions_0[:3], positions_180[:3]))):
+    print(uniq_angles[position_0], uniq_angles[position_180], uniq_angles[position_180] - uniq_angles[position_0])
+    data_0_orig = np.rot90(sinogram[position_0])
+    data_180_orig = np.fliplr(np.rot90(sinogram[position_180]))
+    transorm_result = find_axis(data_0_orig, data_180_orig, show_output=True)
+    tx = -transorm_result['tvec'][1] / 2.
+    angle = - transorm_result['angle'] / 2
+    print(tx, angle)
+    txs.append(tx)
+    angles.append(angle)
 
 # %%
-shift_x = -transorm_result['tvec'][1] / 2.
-alfa = - transorm_result['angle'] / 2
+transorm_result['tvec'][0] / 2
+
+# %%
+# shift_x = -transorm_result['tvec'][1] / 2.
+# alfa = - transorm_result['angle'] / 2
+
+shift_x = np.mean(txs)
+alfa = np.mean(angles)
 tr_dict = {"scale": 1, "angle": alfa, "tvec": (0, shift_x)}
 
 # %%
@@ -222,9 +262,10 @@ recon_config['axis_corr'] = {'shift_x': shift_x,
 # %%
 plt.gray()
 plt.figure(figsize=(12, 12))
-im_max = np.max([np.max(data_0), np.max(data_180)])
+im_max = np.max([np.percentile(data_0_orig, 98), np.percentile(data_180_orig, 98)])
+im_min = np.min([np.percentile(data_0_orig, 2), np.percentile(data_180_orig, 2)])
 plt.subplot(221)
-plt.imshow(data_0_orig, vmin=0, vmax=im_max, cmap=plt.cm.gray_r)
+plt.imshow(data_0_orig, vmin=im_min, vmax=im_max, cmap=plt.cm.gray_r)
 plt.axis('tight')
 plt.title('a')
 plt.xlabel('Каналы детектора')
@@ -233,7 +274,7 @@ cbar = plt.colorbar()
 cbar.set_label('Поглощение, усл.ед.', rotation=90)
 
 plt.subplot(222)
-plt.imshow(data_180_orig, vmin=0, vmax=im_max, cmap=plt.cm.gray_r)
+plt.imshow(data_180_orig, vmin=im_min, vmax=im_max, cmap=plt.cm.gray_r)
 plt.axis('tight')
 plt.title('б')
 plt.xlabel('Каналы детектора')
@@ -251,10 +292,10 @@ cbar = plt.colorbar()
 cbar.set_label('Поглощение, усл.ед.', rotation=90)
 
 tt_180 = np.fliplr(ird.imreg.transform_img_dict(np.fliplr(data_180_orig), tr_dict, order=1))
-tt_0 = ird.imreg.transform_img_dict(data_0_orig, tr_dict, order=1)
+tt_0 = np.flipud(ird.imreg.transform_img_dict(np.flipud(data_0_orig), tr_dict, order=1))
 
 plt.subplot(224)
-plt.imshow(tt_0 - tt_180, vmin=-im_max / 10, vmax=im_max / 10, cmap=plt.cm.seismic)
+plt.imshow(tt_0 - tt_180, vmin=-im_max / 2, vmax=im_max / 2, cmap=plt.cm.seismic)
 plt.axis('tight')
 plt.title('г')
 plt.xlabel('Каналы детектора')
@@ -268,20 +309,21 @@ sinogram_fixed, _ = persistent_array(os.path.join(tmp_dir, 'sinogram_fixed.tmp')
                                      shape=(sinogram.shape[0], tim.shape[1], tim.shape[0]),
                                      dtype='float32', force_create=True)
 
-# fix axis tlit
+# fix axis tilt
 for i in tqdm(range(sinogram_fixed.shape[0])):
     sinogram_fixed[i] = np.rot90(
         ird.imreg.transform_img_dict(np.rot90(sinogram[i]), tr_dict, order=2, bgval=0),
         -1)
 
 # %%
-preview_slice_number = int(sinogram_fixed.shape[-1] // 2)
+# preview_slice_number = int(sinogram_fixed.shape[-1] // 2)
+preview_slice_number = 170
 
 # %%
 s1_angles = uniq_angles
 s1 = np.require(sinogram_fixed[:, :, preview_slice_number],
                 dtype=np.float32, requirements=['C'])
-test_rec(s1, uniq_angles, 2)
+test_rec(s1, np.array(uniq_angles), 4)
 
 # %%
 rot_center = find_center_vo(s1, uniq_angles)
@@ -294,10 +336,11 @@ print(center_shift)
 # %%
 shift_corr = 2  # change this for turning -2, -1, 0, 1, 2
 s2 = ird.imreg.transform_img_dict(s1, {'tvec': (0, -center_shift + shift_corr), 'scale': 1, 'angle': 0})
-test_rec(s2, uniq_angles, 2)
+test_rec(s2, np.array(uniq_angles), 10)
 
 # %%
-# experimental fix axis tlit
+# uncoment in case of manual axis search experimental fix axis tilt
+
 # for i in tqdm(range(sinogram_fixed.shape[0])):
 #     sinogram_fixed[i] = ird.imreg.transform_img_dict(sinogram_fixed[i],
 #                                                      {'tvec': (-center_shift + shift_corr, 0), 'scale': 1, 'angle': 0},
@@ -332,7 +375,7 @@ s1_angles = np.sort(uniq_angles)
 s1 = np.require(ring_corr,
                 dtype=np.float32, requirements=['C'])
 # s1[np.isnan(s1)] = 0
-test_rec(s1, s1_angles, 2)
+test_rec(s1, s1_angles, 10)
 
 # %%
 # #uncomment to fix rings
@@ -346,7 +389,7 @@ test_rec(s1, s1_angles, 2)
 s1_angles = uniq_angles
 s1 = np.require(sinogram_fixed[:, :, preview_slice_number - 0],
                 dtype=np.float32, requirements=['C'])
-test_rec(s1, uniq_angles, 2)
+test_rec(s1, np.array(uniq_angles), 10)
 
 # %%
 del data_0_orig, data_180_orig, data_images_crop, data_images

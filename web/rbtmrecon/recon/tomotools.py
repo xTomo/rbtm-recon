@@ -8,7 +8,6 @@ import time
 from urllib.request import urlretrieve
 
 import cv2
-import dask.array as da
 import h5py
 import numpy as np
 import pylab as plt
@@ -83,37 +82,52 @@ def get_tomoobject_info(experiment_id, storage_server=STORAGE_SERVER):
     return experiment_info
 
 
-def get_mm_shape(data_file):
-    if os.path.exists(data_file + '.size'):
-        res = np.loadtxt(data_file + '.size').astype('uint16')
-        if res.ndim > 0:
-            return tuple(res)
-        else:
-            return res,
-    else:
-        return None
-
+# def get_mm_shape(data_file):
+#     if os.path.exists(data_file + '.size'):
+#         res = np.loadtxt(data_file + '.size').astype('uint16')
+#         if res.ndim > 0:
+#             return tuple(res)
+#         else:
+#             return res,
+#     else:
+#         return None
 
 def persistent_array(data_file, shape, dtype, force_create=True):
     if force_create:
         logging.info('Force create')
-    elif os.path.exists(data_file):
-        mm_shape = get_mm_shape(data_file)
-        if (shape is None) and (mm_shape is not None):
-            res = np.memmap(data_file, dtype=dtype, mode='r+', shape=mm_shape)
-            logging.info('Loading existing file: {}'.format(data_file))
-            return res, True
-        elif (np.array(shape) == mm_shape).all():
-            res = np.memmap(data_file, dtype=dtype, mode='r+', shape=shape)
-            logging.info('Loading existing file: {}'.format(data_file))
-            return res, True
-        else:
-            logging.info('Shape missmatch.')
+        logging.info('Creating new file: {}'.format(data_file))
+        h5f = h5py.File(data_file, 'w')
+        res = h5f.create_dataset('data', dtype=dtype,
+                                 shape=shape)
+        return res, False
 
-    logging.info('Creating new file: {}'.format(data_file))
-    res = np.memmap(data_file, dtype=dtype, mode='w+', shape=shape)
-    np.savetxt(data_file + '.size', res.shape, fmt='%5u')
-    return res, False
+    elif os.path.exists(data_file):
+        h5f = h5py.File(data_file, 'r+')
+        res = h5f['data']
+        logging.info('Loading existing file: {}'.format(data_file))
+        return res, True
+
+
+# def persistent_array(data_file, shape, dtype, force_create=True):
+#     if force_create:
+#         logging.info('Force create')
+#     elif os.path.exists(data_file):
+#         mm_shape = get_mm_shape(data_file)
+#         if (shape is None) and (mm_shape is not None):
+#             res = np.memmap(data_file, dtype=dtype, mode='r+', shape=mm_shape)
+#             logging.info('Loading existing file: {}'.format(data_file))
+#             return res, True
+#         elif (np.array(shape) == mm_shape).all():
+#             res = np.memmap(data_file, dtype=dtype, mode='r+', shape=shape)
+#             logging.info('Loading existing file: {}'.format(data_file))
+#             return res, True
+#         else:
+#             logging.info('Shape missmatch.')
+
+#     logging.info('Creating new file: {}'.format(data_file))
+#     res = np.memmap(data_file, dtype=dtype, mode='w+', shape=shape)
+#     np.savetxt(data_file + '.size', res.shape, fmt='%5u')
+#     return res, False
 
 
 # def persistent_array(data_file, shape, dtype, force_create=True):
@@ -132,7 +146,7 @@ def persistent_array(data_file, shape, dtype, force_create=True):
 #         return res, True
 
 
-def get_frame_group(data_file, group_name, mmap_file_dir):
+def get_frame_group(data_file, group_name, mmap_file_dir, dark_image):
     with h5py.File(data_file, 'r') as h5f:
         images_count = len(h5f[group_name])
         images = None
@@ -157,13 +171,11 @@ def get_frame_group(data_file, group_name, mmap_file_dir):
                     'Images and angles in group {} found. Skip it'.format(
                         group_name))
                 break
-
             attributes = json.loads(v.attrs[list(v.attrs)[0]])[0]
             angles[file_number] = attributes['frame']['object']['angle position']
-            tmp_image = np.flipud(v[()].astype('float32').swapaxes(0, 1))
-            images[file_number] = tmp_image
+            tmp_image = np.rot90(v[()])
+            images[file_number] = tmp_image - dark_image
             file_number = file_number + 1
-
     return images, angles
 
 
@@ -203,8 +215,8 @@ def show_exp_data(empty_beam, data_images):
 
 
 def load_tomo_data(data_file, tmp_dir):
-    empty_images, _ = get_frame_group(data_file, 'empty', tmp_dir)
-    dark_images, _ = get_frame_group(data_file, 'dark', tmp_dir)
+    empty_images, _ = get_frame_group(data_file, 'empty', tmp_dir, 0)
+    dark_images, _ = get_frame_group(data_file, 'dark', tmp_dir, 0)
 
     empty_image = np.median(empty_images, axis=0)
     dark_image = np.median(dark_images, axis=0)
@@ -213,10 +225,8 @@ def load_tomo_data(data_file, tmp_dir):
 
     # Загружаем кадры с даннымии
     # TODO: добавить поддержку, когда много кадров на одном угле
-    data_images, data_angles = get_frame_group(data_file, 'data', tmp_dir)
-
-    data_images_clear = da.from_array(data_images, chunks=(16, 128, 128)) - dark_image
-    return empty_beam, data_images_clear, data_angles
+    data_images, data_angles = get_frame_group(data_file, 'data', tmp_dir, dark_image)
+    return empty_beam, data_images, data_angles
 
 
 # TODO: Profile this function
@@ -310,15 +320,18 @@ def correct_rings(sino0, level):
 # seraching opposite frames (0 and 180 deg)
 def get_angles_at_180_deg(uniq_angles):
     t = np.subtract.outer(uniq_angles, uniq_angles) % 360
-    pos = np.argmin(np.abs(t - 180) % 360)
-    position_0 = pos // len(uniq_angles)
-    position_180 = pos % len(uniq_angles)
-    #     print(position_0, position_180)
-    #     print(uniq_angles[position_0], uniq_angles[position_180])
+    pos = np.argwhere(np.abs(t - 180) % 360 == 0)
+    position_0 = []
+    position_180 = []
+    for tpos in pos:
+        p0, p180 = tpos
+        if p0 < p180:
+            position_0.append(p0)
+            position_180.append(p180)
     return position_0, position_180
 
 
-def test_rec(s1, uniq_angles, vmaxk=1.2):
+def test_rec(s1, uniq_angles, vmaxk=1.):
     plt.figure(figsize=(7, 7))
     plt.imshow(s1[np.argsort(uniq_angles)], interpolation='bilinear', cmap=plt.cm.gray_r)
     plt.axis('tight')
@@ -331,9 +344,10 @@ def test_rec(s1, uniq_angles, vmaxk=1.2):
 
     plt.figure(figsize=(10, 8))
     plt.imshow(safe_median(rec_slice),
-               vmin=0, vmax=np.percentile(rec_slice, 95) * vmaxk, cmap=plt.cm.viridis)
+               vmin=np.percentile(rec_slice, 2), vmax=np.percentile(rec_slice, 98) * vmaxk, cmap=plt.cm.viridis)
     plt.axis('equal')
     plt.colorbar()
+    plt.title('ddddd')
     plt.show()
 
 
@@ -602,3 +616,5 @@ def find_roi(data_images, empty_beam, data_angles):
 
 #     rec_slice = recon_2d_parallel(s4[t_angles], uniq_angles[t_angles])
 #     optimize_2gaussian(rec_slice, mask)
+
+# %%
