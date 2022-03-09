@@ -12,6 +12,7 @@ dependencies:
   - tomopy
   - scikit-image
   - h5py
+  - requests
 #  - ipyvolume
   - jupyter
   - ipython
