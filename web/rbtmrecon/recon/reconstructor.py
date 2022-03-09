@@ -114,9 +114,6 @@ else:
 print("x_min, x_max, y_min, y_max = ", x_min, x_max, y_min, y_max)
 
 # %%
-plt.imshow(data_images[300])
-
-# %%
 ff = ipywidgets.interact_manual(show_frames_with_border, data_images=ipywidgets.fixed(data_images[::10]),
                                 empty_beam=ipywidgets.fixed(empty_beam),
                                 data_angles=ipywidgets.fixed(data_angles),
