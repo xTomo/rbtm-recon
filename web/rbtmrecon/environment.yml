@@ -12,7 +12,7 @@ dependencies:
   - tomopy
   - scikit-image
   - h5py
-  - ipyvolume
+#  - ipyvolume
   - jupyter
   - ipython
   - nbformat
@@ -24,7 +24,7 @@ dependencies:
   - ipywidgets
   - jupytext
   - pip
-  - zarr
+  #  - zarr
   - dask
   - cupy
   - pillow

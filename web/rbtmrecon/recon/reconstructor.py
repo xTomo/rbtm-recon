@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.13.4
+#       jupytext_version: 1.13.7
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -15,8 +15,8 @@
 # ---
 
 # %%
-# %load_ext autoreload
-# %autoreload
+# # %load_ext autoreload
+# # %autoreload
 
 # %%
 # #jupytext --to notebook reconstructor.py
@@ -43,7 +43,6 @@ import h5py
 
 import scipy.optimize
 import scipy.ndimage
-from skimage import filters
 import scipy.ndimage as ndi
 
 import imreg_dft as ird
@@ -115,10 +114,13 @@ else:
 print("x_min, x_max, y_min, y_max = ", x_min, x_max, y_min, y_max)
 
 # %%
-ff = ipywidgets.interact_manual(show_frames_with_border, data_images=ipywidgets.fixed(data_images),
+plt.imshow(data_images[300])
+
+# %%
+ff = ipywidgets.interact_manual(show_frames_with_border, data_images=ipywidgets.fixed(data_images[::10]),
                                 empty_beam=ipywidgets.fixed(empty_beam),
                                 data_angles=ipywidgets.fixed(data_angles),
-                                image_id=ipywidgets.IntSlider(min=0, max=len(data_angles) - 1, step=1, value=0),
+                                image_id=ipywidgets.IntSlider(min=0, max=len(data_angles) // 10 - 1, step=1, value=0),
                                 x_min=ipywidgets.IntSlider(min=0, max=data_images.shape[1], step=1, value=x_min),
                                 x_max=ipywidgets.IntSlider(min=0, max=data_images.shape[1], step=1, value=x_max),
                                 y_min=ipywidgets.IntSlider(min=0, max=data_images.shape[2], step=1, value=y_min),
@@ -164,7 +166,7 @@ empty_beam_crop = empty_beam[x_min:x_max, y_min:y_max]
 # %%
 # don't check non unique files
 # uniq_data_images, uniq_angles = group_data(data_images_crop, data_angles, tmp_dir)
-uniq_data_images, uniq_angles = data_images_crop, data_angles
+uniq_data_images, uniq_angles = data_images_crop, data_angles[()]
 
 # %%
 sinogram, _ = persistent_array(os.path.join(tmp_dir, 'sinogram.tmp'), shape=uniq_data_images.shape,
@@ -186,10 +188,10 @@ for di in tqdm(range(uniq_data_images.shape[0])):
 
 # %%
 def find_axis(data_0_orig, data_180_orig, show_output=True):
-    o0 = filters.threshold_otsu(data_0_orig, nbins=1024)
-    m0 = data_0_orig > o0
-    o180 = filters.threshold_otsu(data_180_orig, nbins=1024)
-    m180 = data_180_orig > o180
+    #     o0 = filters.threshold_otsu(data_0_orig, nbins=1024)
+    #     m0 = data_0_orig > o0
+    #     o180 = filters.threshold_otsu(data_180_orig, nbins=1024)
+    #     m180 = data_180_orig > o180
 
     data_0 = data_0_orig  # * m0
     data_180 = data_180_orig  # * m180
@@ -218,7 +220,7 @@ def find_axis(data_0_orig, data_180_orig, show_output=True):
         ird.imshow(data_0, data_180, transorm_result['timg'], fig=fig)
         plt.show()
 
-        print(transorm_result)
+    #         print(transorm_result)
 
     return transorm_result
 
@@ -227,19 +229,16 @@ def find_axis(data_0_orig, data_180_orig, show_output=True):
 positions_0, positions_180 = get_angles_at_180_deg(uniq_angles)
 txs = []
 angles = []
-for position_0, position_180 in tqdm(list(zip(positions_0[:3], positions_180[:3]))):
-    print(uniq_angles[position_0], uniq_angles[position_180], uniq_angles[position_180] - uniq_angles[position_0])
+for position_0, position_180 in tqdm(list(zip(positions_0[::3], positions_180[::3]))):
+    #     print(uniq_angles[position_0], uniq_angles[position_180], uniq_angles[position_180] - uniq_angles[position_0])
     data_0_orig = np.rot90(sinogram[position_0])
     data_180_orig = np.fliplr(np.rot90(sinogram[position_180]))
     transorm_result = find_axis(data_0_orig, data_180_orig, show_output=True)
     tx = -transorm_result['tvec'][1] / 2.
     angle = - transorm_result['angle'] / 2
-    print(tx, angle)
+    print(tx, angle, transorm_result['success'])
     txs.append(tx)
     angles.append(angle)
-
-# %%
-transorm_result['tvec'][0] / 2
 
 # %%
 # shift_x = -transorm_result['tvec'][1] / 2.
@@ -313,14 +312,14 @@ for i in tqdm(range(sinogram_fixed.shape[0])):
         -1)
 
 # %%
-# preview_slice_number = int(sinogram_fixed.shape[-1] // 2)
-preview_slice_number = 170
+preview_slice_number = int(sinogram_fixed.shape[-1] // 2)
+# preview_slice_number = 170
 
 # %%
 s1_angles = uniq_angles
 s1 = np.require(sinogram_fixed[:, :, preview_slice_number],
                 dtype=np.float32, requirements=['C'])
-test_rec(s1, np.array(uniq_angles), 4)
+test_rec(s1, np.array(uniq_angles), 1.2)
 
 # %%
 rot_center = find_center_vo(s1, uniq_angles)
@@ -331,9 +330,9 @@ center_shift = np.rint((rot_center - s1.shape[1] / 2.) / 2.)
 print(center_shift)
 
 # %%
-shift_corr = 2  # change this for turning -2, -1, 0, 1, 2
+shift_corr = -1  # change this for turning -2, -1, 0, 1, 2
 s2 = ird.imreg.transform_img_dict(s1, {'tvec': (0, -center_shift + shift_corr), 'scale': 1, 'angle': 0})
-test_rec(s2, np.array(uniq_angles), 10)
+test_rec(s2, np.array(uniq_angles), 1.2)
 
 # %%
 # uncoment in case of manual axis search experimental fix axis tilt
@@ -344,7 +343,10 @@ test_rec(s2, np.array(uniq_angles), 10)
 #                                                      order=2, bgval=0)
 
 # %%
-tmp_sinogram = s2[np.argsort(uniq_angles)]
+s1 = np.require(sinogram_fixed[:, :, preview_slice_number],
+                dtype=np.float32, requirements=['C'])
+
+tmp_sinogram = s1[np.argsort(uniq_angles)]
 ring_corr = remove_all_stripe(tmp_sinogram[:, None, :], 10, 11, 5)
 ring_corr = np.squeeze(ring_corr)
 plt.figure(figsize=(15, 8))
@@ -372,7 +374,7 @@ s1_angles = np.sort(uniq_angles)
 s1 = np.require(ring_corr,
                 dtype=np.float32, requirements=['C'])
 # s1[np.isnan(s1)] = 0
-test_rec(s1, s1_angles, 10)
+test_rec(s1, s1_angles, 1.2)
 
 # %%
 # #uncomment to fix rings
@@ -386,16 +388,16 @@ test_rec(s1, s1_angles, 10)
 s1_angles = uniq_angles
 s1 = np.require(sinogram_fixed[:, :, preview_slice_number - 0],
                 dtype=np.float32, requirements=['C'])
-test_rec(s1, np.array(uniq_angles), 10)
+test_rec(s1, np.array(uniq_angles), 1.2)
 
 # %%
-del data_0_orig, data_180_orig, data_images_crop, data_images
+del data_0_orig, data_180_orig, data_images_crop, data_images, data_angles, s1_angles
 del sinogram, sinogram_fixed, uniq_angles, uniq_data_images
 
 # %%
 files_to_remove = glob(os.path.join(tmp_dir, '*.tmp'))
 files_to_remove = [f for f in files_to_remove if f.split('/')[-1] not in [
-    'uniq_angles.tmp', 'sinogram_fixed.tmp']]
+    'group_data_angles.tmp', 'sinogram_fixed.tmp']]
 
 for fr in files_to_remove:
     try:
@@ -408,9 +410,10 @@ for fr in files_to_remove:
         pass
 
 # %%
-uniq_angles, _ = persistent_array(os.path.join(tmp_dir, 'uniq_angles.tmp'),
+uniq_angles, _ = persistent_array(os.path.join(tmp_dir, 'group_data_angles.tmp'),
                                   shape=None, force_create=False,
                                   dtype='float32')
+
 s1, _ = persistent_array(os.path.join(tmp_dir, 'sinogram_fixed.tmp'),
                          shape=None, force_create=False,
                          dtype='float32')
@@ -535,7 +538,7 @@ from tomotools import reshape_volume
 # %%
 resize = int(np.power(np.prod(rec_vol.shape) / 1e7, 1. / 3))
 print(resize)
-small_rec = reshape_volume(rec_vol, resize)
+small_rec = reshape_volume(rec_vol, 10)
 
 # %%
 volume = k3d.volume(
@@ -583,11 +586,6 @@ plot = k3d.plot(camera_auto_fit=True)
 plot += volume
 plot.lighting = 2
 plot.display()
-
-# %%
-plot.fetch_snapshot()
-with open('./tomo_3d.html', 'w') as fp:
-    fp.write(plot.snapshot)
 
 # %%
 plot.fetch_snapshot()

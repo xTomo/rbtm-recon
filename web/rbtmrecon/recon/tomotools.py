@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-# %%
 import json
 import logging
 import os
@@ -82,52 +80,53 @@ def get_tomoobject_info(experiment_id, storage_server=STORAGE_SERVER):
     return experiment_info
 
 
-# def get_mm_shape(data_file):
-#     if os.path.exists(data_file + '.size'):
-#         res = np.loadtxt(data_file + '.size').astype('uint16')
-#         if res.ndim > 0:
-#             return tuple(res)
-#         else:
-#             return res,
-#     else:
-#         return None
-
-def persistent_array(data_file, shape, dtype, force_create=True):
-    if force_create:
-        logging.info('Force create')
-        logging.info('Creating new file: {}'.format(data_file))
-        h5f = h5py.File(data_file, 'w')
-        res = h5f.create_dataset('data', dtype=dtype,
-                                 shape=shape)
-        return res, False
-
-    elif os.path.exists(data_file):
-        h5f = h5py.File(data_file, 'r+')
-        res = h5f['data']
-        logging.info('Loading existing file: {}'.format(data_file))
-        return res, True
+def get_mm_shape(data_file):
+    if os.path.exists(data_file + '.size'):
+        res = np.loadtxt(data_file + '.size').astype('uint16')
+        if res.ndim > 0:
+            return tuple(res)
+        else:
+            return res,
+    else:
+        return None
 
 
 # def persistent_array(data_file, shape, dtype, force_create=True):
 #     if force_create:
 #         logging.info('Force create')
-#     elif os.path.exists(data_file):
-#         mm_shape = get_mm_shape(data_file)
-#         if (shape is None) and (mm_shape is not None):
-#             res = np.memmap(data_file, dtype=dtype, mode='r+', shape=mm_shape)
-#             logging.info('Loading existing file: {}'.format(data_file))
-#             return res, True
-#         elif (np.array(shape) == mm_shape).all():
-#             res = np.memmap(data_file, dtype=dtype, mode='r+', shape=shape)
-#             logging.info('Loading existing file: {}'.format(data_file))
-#             return res, True
-#         else:
-#             logging.info('Shape missmatch.')
+#         logging.info('Creating new file: {}'.format(data_file))
+#         h5f = h5py.File(data_file, 'w')
+#         res = h5f.create_dataset('data', dtype=dtype,
+#                                  shape=shape)
+#         return res, False
 
-#     logging.info('Creating new file: {}'.format(data_file))
-#     res = np.memmap(data_file, dtype=dtype, mode='w+', shape=shape)
-#     np.savetxt(data_file + '.size', res.shape, fmt='%5u')
-#     return res, False
+#     elif os.path.exists(data_file):
+#         h5f = h5py.File(data_file, 'r+')
+#         res = h5f['data']
+#         logging.info('Loading existing file: {}'.format(data_file))
+#         return res, True
+
+
+def persistent_array(data_file, shape, dtype, force_create=True):
+    if force_create:
+        logging.info('Force create')
+    elif os.path.exists(data_file):
+        mm_shape = get_mm_shape(data_file)
+        if (shape is None) and (mm_shape is not None):
+            res = np.memmap(data_file, dtype=dtype, mode='r+', shape=mm_shape)
+            logging.info('Loading existing file: {}'.format(data_file))
+            return res, True
+        elif (np.array(shape) == mm_shape).all():
+            res = np.memmap(data_file, dtype=dtype, mode='r+', shape=shape)
+            logging.info('Loading existing file: {}'.format(data_file))
+            return res, True
+        else:
+            logging.info('Shape missmatch.')
+
+    logging.info('Creating new file: {}'.format(data_file))
+    res = np.memmap(data_file, dtype=dtype, mode='w+', shape=shape)
+    np.savetxt(data_file + '.size', res.shape, fmt='%5u')
+    return res, False
 
 
 # def persistent_array(data_file, shape, dtype, force_create=True):
@@ -315,7 +314,7 @@ def correct_rings(sino0, level):
 #                cmap=plt.cm.gray_r)
 
 # !cd {images_dir} && ffmpeg -r 10 -i "prj_%03d.png" -b:v 1000k prj.avi
-# # !cd {images_dir} && rm prj.mp4
+# !cd {images_dir} && rm prj.mp4
 
 # seraching opposite frames (0 and 180 deg)
 def get_angles_at_180_deg(uniq_angles):
@@ -616,5 +615,3 @@ def find_roi(data_images, empty_beam, data_angles):
 
 #     rec_slice = recon_2d_parallel(s4[t_angles], uniq_angles[t_angles])
 #     optimize_2gaussian(rec_slice, mask)
-
-# %%
