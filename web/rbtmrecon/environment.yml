@@ -30,6 +30,7 @@ dependencies:
   - cupy
   - pillow
   - k3d
+  - scikit-learn
   - pip:
     - pymongo==3
     - imreg_dft
