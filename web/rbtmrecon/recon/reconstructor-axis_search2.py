@@ -280,8 +280,8 @@ def axis_search2(sinogram_mem, uniq_angles_mem, debug=False):
         angles = uniq_angles_mem
 
         l_calc_loss = lambda shift: calc_loss(sino2d, angles, shift, return_data=False)
-        optim = minimize_scalar(l_calc_loss,  
-                                bounds=(sino2d.shape[1]//4, sino2d.shape[1]//4*3),
+        optim = minimize_scalar(l_calc_loss, method='brent',
+#                                 bounds=(sino2d.shape[1]//4, sino2d.shape[1]//4*3),
                                 options = {'xtol':0.001})
         shift = optim['x']
         shift_points.append([slice_numb, shift])
