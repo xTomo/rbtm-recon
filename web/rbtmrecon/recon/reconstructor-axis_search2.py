@@ -211,7 +211,7 @@ def create_circular_mask(h, w, center=None, radius=None):
     mask = dist_from_center <= radius
     return mask
 
-def recon_2d_parallel(sino, angles):
+def recon_2d_parallel_nonorm(sino, angles):
     rec = astra_utils.astra_recon_2d_parallel(sino, angles, ['FBP_CUDA'])
     return rec
 
@@ -226,7 +226,7 @@ def shift_sino(sino2d, shift):
 def calc_loss(sino2d, angles, shift, return_data=True):
     mask = create_circular_mask(sino2d.shape[1],sino2d.shape[1])
     tmp_sino = shift_sino(sino2d, shift)
-    recon = recon_2d_parallel(tmp_sino, angles)
+    recon = recon_2d_parallel_nonorm(tmp_sino, angles)
     sino_back = fp_2d_parallel(recon*mask, angles)
     loss = np.mean((sino_back-tmp_sino)**2)
     if return_data:
