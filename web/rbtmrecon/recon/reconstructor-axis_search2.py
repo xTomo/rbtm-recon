@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.13.7
+#       jupytext_version: 1.14.4
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -192,8 +192,8 @@ import cupyx.scipy.ndimage as cndi
 
 def transfrom_image(im, shift_x, angle):
     imcu = cp.asarray(im)
-    imcu = cndi.shift(imcu, [shift_x, 0], order=2)
-    imcu = cndi.rotate(imcu, angle, order=2, reshape=False)
+    imcu = cndi.rotate(imcu, angle, order=2, reshape=False, mode='nearest')
+    imcu = cndi.shift(imcu, [shift_x, 0], order=2, mode='nearest')
     return imcu.get()
 
 
@@ -203,7 +203,7 @@ def create_circular_mask(h, w, center=None, radius=None):
     if center is None: # use the middle of the image
         center = (int(w/2), int(h/2))
     if radius is None: # use the smallest distance between the center and image walls
-        radius = min(center[0], center[1], w-center[0], h-center[1]) - 10
+        radius = min(center[0], center[1], w-center[0], h-center[1]) - 50
 
     Y, X = np.ogrid[:h, :w]
     dist_from_center = np.sqrt((X - center[0])**2 + (Y-center[1])**2)
@@ -211,8 +211,9 @@ def create_circular_mask(h, w, center=None, radius=None):
     mask = dist_from_center <= radius
     return mask
 
-def recon_2d_parallel_nonorm(sino, angles):
-    rec = astra_utils.astra_recon_2d_parallel(sino, angles, ['FBP_CUDA'])
+
+def recon_2d_parallel_nonorm(sino, angles):  # used for axis search
+    rec = astra_utils.astra_recon_2d_parallel(sino[angles<180], angles[angles<180], ['FBP_CUDA'])
     return rec
 
 def fp_2d_parallel(sample, angles):
@@ -220,82 +221,77 @@ def fp_2d_parallel(sample, angles):
     return rec
 
 def shift_sino(sino2d, shift):
-    tmp_sino = scipy.ndimage.shift(sino2d, [0,shift], order=2, mode='nearest')   
+    tmp_sino = scipy.ndimage.shift(sino2d, [0,shift], order=2, mode='constant')
     return tmp_sino
 
 def calc_loss(sino2d, angles, shift, return_data=True):
+    expand = 4*int(np.abs(shift))
+    shifted_sino = np.pad(sino2d, [[0,0], [expand,expand]])
+    
+    shifted_sino = shift_sino(shifted_sino, shift)
+    recon = recon_2d_parallel_nonorm(shifted_sino, angles)
+    
+    if not expand == 0:
+        shifted_sino = shifted_sino[:, expand:-expand]
+        recon = recon[expand:-expand, expand:-expand]
+    
+#     print(sino2d.shape, shifted_sino.shape, recon.shape, shift)
+    
     mask = create_circular_mask(sino2d.shape[1],sino2d.shape[1])
-    tmp_sino = shift_sino(sino2d, shift)
-    recon = recon_2d_parallel_nonorm(tmp_sino, angles)
     sino_back = fp_2d_parallel(recon*mask, angles)
-    loss = np.mean((sino_back-tmp_sino)**2)
+    loss = np.mean((sino_back-shifted_sino)**4)
+    
     if return_data:
-        return loss, recon, sino_back, tmp_sino
+        return loss, recon, sino_back, shifted_sino
     else:
         return loss
 
 def linear_func(x, a, b):
     return a * x + b
     
-def find_shift_axis(sino2d, angles):
-
-    loss = []
-    sino2d = ndi.median_filter(sino2d, 3)
-    sino2d = remove_stripe_ti(sino2d[:, None, :])
-    
-    sino2d = np.squeeze(sino2d)
-    mask = create_circular_mask(sino2d.shape[1],sino2d.shape[1])
-
-    
-    shifts = np.arange(-62, -55, 0.5)
-    for shift in tqdm(shifts):
-        l, recon, sino_back, tmp_sino = calc_loss(sino2d, angles, shift)
-        
-        loss.append(l)
-        
-        plt.figure(figsize=(14,7))
-        plt.subplot(121)
-        plt.title(shift)
-        plt.imshow(recon, vmin = np.percentile(recon,10), vmax = np.percentile(recon,99.9))
-#         plt.colorbar()
-        plt.axis('tight')
-        plt.subplot(122)
-        plt.imshow((sino_back-tmp_sino))
-        plt.colorbar()
-        plt.show()
-    
-    plt.figure()
-    plt.plot(shifts, loss)
-    plt.grid()
-    plt.show()  
-
 def axis_search2(sinogram_mem, uniq_angles_mem, debug=False):
     n_slices = 10
-    start_slice = sinogram_mem.shape[2]//n_slices
     shift_points = []
+    losses = []
     shift_0 = 0
+    ds = sinogram_mem.shape[2]//n_slices//2
     for slice_idx in tqdm(range(1, n_slices)):
-        slice_numb = start_slice*slice_idx
-        sino2d = np.sum(sinogram_mem[:, :, slice_numb-3:slice_numb+4], axis=-1)
+        slice_numb = sinogram_mem.shape[2]*slice_idx//n_slices
+        sino2d = np.mean(sinogram_mem[:, :, slice_numb-ds:slice_numb+ds+1], axis=-1)
         angles = uniq_angles_mem
 
         l_calc_loss = lambda shift: calc_loss(sino2d, angles, shift, return_data=False)
         optim = minimize_scalar(l_calc_loss, method='brent',
 #                                 bounds=(sino2d.shape[1]//4, sino2d.shape[1]//4*3),
-                                options = {'xtol':0.001})
+                                options = {'xtol':0.1})
         shift = optim['x']
         shift_points.append([slice_numb, shift])
         
+        l, recon, sino_back, shifted_sino = calc_loss(sino2d, angles, shift , return_data=True)
+        
+        losses.append(l)
         if debug:    
             sino2d = remove_stripe_ti(sino2d[:, None, :])
             sino2d = np.squeeze(sino2d)
-            l, recon, sino_back, tmp_sino = calc_loss(sino2d, angles, shift , return_data=True)
+            l, recon, sino_back, shifted_sino = calc_loss(sino2d, angles, shift , return_data=True)
             plt.figure(figsize=(10,10))
             plt.title(optim['x'])
             plt.imshow(recon, vmin = np.percentile(recon,10), vmax = np.percentile(recon,99.9))
             #         plt.colorbar()
             plt.axis('tight')
             plt.show()
+            plt.figure(figsize=(12,6))
+            plt.subplot(121)
+            plt.imshow(shifted_sino)
+            plt.axis('tight')
+            plt.colorbar()
+            plt.subplot(122)
+            plt.imshow(sino_back-shifted_sino, cmap=plt.cm.seismic)
+            plt.axis('tight')
+            plt.colorbar()
+            plt.show()
+            
+            
     
     #calculate shift and roteation angle
     shift_points = np.asarray(shift_points)
@@ -309,13 +305,12 @@ def axis_search2(sinogram_mem, uniq_angles_mem, debug=False):
     
     #ransac
     data = np.column_stack([xdata, ydata])
-#     print(data)
     model = LineModelND()
     model.estimate(data)
 
     # robustly fit line only using inlier data with RANSAC algorithm
-    model_robust, inliers = ransac(data, LineModelND, min_samples=2,
-                                   residual_threshold=0.1, max_trials=1000)
+    model_robust, inliers = ransac(data, LineModelND, min_samples=4,
+                                   residual_threshold=0.1, max_trials=10000)
     
     params = model_robust.params[1][1], model_robust.predict_y([0,])[0]
     
@@ -330,9 +325,16 @@ def axis_search2(sinogram_mem, uniq_angles_mem, debug=False):
         plt.grid()
         plt.legend()
         plt.show()
-           
-    angle = -np.rad2deg(np.arctan(params[0]))
-    shift_x = params[1]
+        
+                       
+    angle = np.mean([-np.rad2deg(np.arctan(params[0])), -np.rad2deg(np.arctan(popt[0]))])
+    shift_x = np.mean([params[1], popt[1]])
+
+#     angle = -np.rad2deg(np.arctan(popt[0]))
+#     shift_x = popt[1]
+    
+#     angle = -np.rad2deg(np.arctan(params[0]))
+#     shift_x = params[1]
     
     return angle, shift_x
 
@@ -341,9 +343,9 @@ def preview_axis_correction(sinogram_mem, uniq_angles_mem):
     start_slice = sinogram_mem.shape[2]//n_slices
     for slice_idx in tqdm(range(1, n_slices)):
         slice_numb = start_slice*slice_idx
-        sino2d = np.sum(sinogram_mem[:, :, slice_numb:slice_numb+1], axis=-1)
+        sino2d = np.mean(sinogram_mem[:, :, slice_numb:slice_numb+1], axis=-1)
         angles = uniq_angles_mem
-        sino2d = ndi.median_filter(sino2d, 3)
+#         sino2d = ndi.median_filter(sino2d, 3)
         sino2d = remove_stripe_ti(sino2d[:, None, :])
         sino2d = np.squeeze(sino2d)
         l, recon, sino_back, tmp_sino = calc_loss(sino2d, angles, 0 , return_data=True)
@@ -351,17 +353,23 @@ def preview_axis_correction(sinogram_mem, uniq_angles_mem):
         plt.imshow(recon, vmin = np.percentile(recon,10), vmax = np.percentile(recon,99.9))
         plt.axis('tight')
         plt.show()
+        
+    plt.figure(figsize=(10,10))
+    plt.imshow((sinogram_mem[0]-np.flipud(sinogram_mem[np.argmax(uniq_angles_mem)])).T,
+              cmap=plt.cm.seismic)
+    plt.axis('tight')
+    plt.colorbar()
 
 
 # %%
 sinogram_mem, _ = persistent_array(os.path.join(tmp_dir, 'sinogram_fixed.tmp'),
-                                     shape=(np.sum(uniq_angles<180), sinogram.shape[1],sinogram.shape[2]),
+                                     shape=(np.sum(uniq_angles<=180), sinogram.shape[1],sinogram.shape[2]),
                                    dtype='float32', force_create=True)
 
-for iid, i in enumerate(np.argwhere(uniq_angles<180)):
+for iid, i in enumerate(np.argwhere(uniq_angles<=180)):
     sinogram_mem[iid] = sinogram[i]
     
-uniq_angles_mem = uniq_angles[uniq_angles<180]
+uniq_angles_mem = uniq_angles[uniq_angles<=180]
 
 res_angle = 0
 res_shift_x = 0
@@ -369,30 +377,30 @@ res_shift_x = 0
 for i in tqdm(range(5)):
     angle, shift_x = axis_search2(sinogram_mem, uniq_angles_mem, debug=True)
     res_angle += angle
-    res_shift_x +=shift_x
+    res_shift_x += shift_x
     
     print(res_angle, res_shift_x)
       
-    for iid, i in enumerate(np.argwhere(uniq_angles<180)):
+    for iid, i in enumerate(np.argwhere(uniq_angles<=180)):
         sinogram_mem[iid] = sinogram[i]
 
     for i in tqdm(range(sinogram_mem.shape[0])):
         sinogram_mem[i] = transfrom_image(sinogram_mem[i], res_shift_x, res_angle)
+        
+    plt.figure(figsize=(10,10))
+    plt.imshow((sinogram_mem[0]-np.flipud(sinogram_mem[np.argmax(uniq_angles_mem)])).T,
+          cmap=plt.cm.seismic)
+    plt.axis('tight')
+    plt.colorbar()
+    plt.show()
 
 preview_axis_correction(sinogram_mem, uniq_angles_mem)
-
-# %%
-plt.figure(figsize=(10,10))
-plt.imshow((sinogram_mem[0]-np.flipud(sinogram_mem[np.argmax(uniq_angles_mem)])).T,
-          cmap=plt.cm.seismic)
-plt.axis('tight')
-plt.colorbar()
 
 # %%
 # remove rings
 for i in tqdm(range(sinogram_mem.shape[0])):
     t = sinogram_mem[i].copy()
-    t = ndi.median_filter(t, 3)
+#     t = ndi.median_filter(t, 3)
     t = np.squeeze(remove_stripe_ti(t[:, None, :]))
     sinogram_mem[i] = t
 
@@ -635,6 +643,8 @@ mkdir_p(os.path.join(storage_dir, experiment_id))
 
 # %% [markdown]
 # # Changelog:
+# * 2.6.1 (2023.01.31)
+#  - new axis search more stable
 # * 2.6 (2023.01.12)
 #  - new axis search based on reprojection
 # * 2.5.1 (2021.04.12)
