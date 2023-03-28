@@ -161,8 +161,9 @@ empty_beam_crop = empty_beam[x_min:x_max, y_min:y_max]
 
 # %%
 # don't check non unique files
-# uniq_data_images, uniq_angles = group_data(data_images_crop, data_angles, tmp_dir)
-uniq_data_images, uniq_angles = data_images_crop, data_angles[()]
+from tomotools import group_data
+uniq_data_images, uniq_angles = group_data(data_images_crop, data_angles, tmp_dir)
+# uniq_data_images, uniq_angles = data_images_crop, data_angles[()]
 
 # %%
 sinogram, _ = persistent_array(os.path.join(tmp_dir, 'sinogram.tmp'), shape=uniq_data_images.shape,
@@ -181,6 +182,14 @@ for di in tqdm(range(uniq_data_images.shape[0])):
 
 
 # ne.evaluate('-log(uniq_data_images)', out=sinogram);
+
+# %%
+cxy = [ndi.center_of_mass(sinogram[i]) for i in range(sinogram.shape[0])]
+cxy = np.asarray(cxy)
+plt.figure(figsize=(6,6))
+plt.plot(uniq_angles, cxy[:,1], 'o')
+plt.grid()
+plt.show()
 
 # %%
 from tomotools import astra_utils
@@ -257,8 +266,12 @@ def axis_search2(sinogram_mem, uniq_angles_mem, debug=False):
     ds = sinogram_mem.shape[2]//n_slices//2
     for slice_idx in tqdm(range(1, n_slices)):
         slice_numb = sinogram_mem.shape[2]*slice_idx//n_slices
+        
         sino2d = np.mean(sinogram_mem[:, :, slice_numb-ds:slice_numb+ds+1], axis=-1)
         angles = uniq_angles_mem
+        indexes = np.argsort(angles)
+        angles = angles[indexes]
+        sino2d = sino2d[indexes,:]
 
         l_calc_loss = lambda shift: calc_loss(sino2d, angles, shift, return_data=False)
         optim = minimize_scalar(l_calc_loss, method='brent',
@@ -283,6 +296,7 @@ def axis_search2(sinogram_mem, uniq_angles_mem, debug=False):
             plt.figure(figsize=(12,6))
             plt.subplot(121)
             plt.imshow(shifted_sino)
+            plt.yticks(range(shifted_sino.shape[0])[::50], angles[::50])
             plt.axis('tight')
             plt.colorbar()
             plt.subplot(122)
