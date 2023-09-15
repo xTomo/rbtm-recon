@@ -406,7 +406,6 @@ def show_frames_with_border(data_images, empty_beam, data_angles, image_id, x_mi
     plt.imshow(d[y_min:y_max, x_min:x_max], cmap=plt.cm.gray,
                vmin=np.percentile(d[y_min:y_max, x_min:x_max].flat, 1),
                vmax=np.percentile(d[y_min:y_max, x_min:x_max].flat, 99.9))
-    plt.axis('auto')
     plt.show()
     print("x_min, x_max, y_min, y_max = {}, {}, {}, {}".format(x_min, x_max, y_min, y_max))
 
@@ -514,7 +513,7 @@ def find_roi(data_images, empty_beam, data_angles):
 
     return x_min, x_max, y_min, y_max
 
-## For BH with 2 gaussans approximation
+# # For BH with 2 gaussans approximation
 
 # from scipy.optimize import curve_fit
 # from scipy.signal import medfilt

@@ -171,23 +171,27 @@ sinogram, _ = persistent_array(os.path.join(tmp_dir, 'sinogram.tmp'), shape=uniq
 te = np.asarray(empty_beam_crop)
 te[te < 1] = 1
 log_te = np.log(te)
-for di in tqdm(range(uniq_data_images.shape[0])):
+# for di in tqdm(range(uniq_data_images.shape[0])):
+for idd, di in tqdm(list(enumerate(np.argsort(uniq_angles)))):
     td = uniq_data_images[di]
     td[td < 1] = 1
 
     d = log_te - np.log(td)
     d = safe_median(d)
     d[d < 0] = 0
-    sinogram[di] = d
+    sinogram[idd] = d
 
-
+uniq_angles = np.sort(uniq_angles)
 # ne.evaluate('-log(uniq_data_images)', out=sinogram);
+
+# %% [markdown]
+# # Find center of the mass
 
 # %%
 cxy = [ndi.center_of_mass(sinogram[i]) for i in range(sinogram.shape[0])]
 cxy = np.asarray(cxy)
 plt.figure(figsize=(6,6))
-plt.plot(uniq_angles, cxy[:,1], 'o')
+plt.plot(cxy[:,1], 'o')
 plt.grid()
 plt.show()
 
@@ -196,15 +200,19 @@ from tomotools import astra_utils
 from tomopy.prep.stripe import remove_stripe_ti
 from scipy.optimize import minimize_scalar, minimize, curve_fit
 from skimage.measure import LineModelND, ransac
+from sklearn.linear_model import LinearRegression
 import cupy as cp
 import cupyx.scipy.ndimage as cndi
 
 def transfrom_image(im, shift_x, angle):
     imcu = cp.asarray(im)
-    imcu = cndi.rotate(imcu, angle, order=2, reshape=False, mode='nearest')
     imcu = cndi.shift(imcu, [shift_x, 0], order=2, mode='nearest')
+    imcu = cndi.rotate(imcu, angle, order=2, reshape=False, mode='nearest')
     return imcu.get()
 
+
+# %% [markdown]
+# # Автоматический поиск смещения
 
 # %%
 def create_circular_mask(h, w, center=None, radius=None):
@@ -212,7 +220,7 @@ def create_circular_mask(h, w, center=None, radius=None):
     if center is None: # use the middle of the image
         center = (int(w/2), int(h/2))
     if radius is None: # use the smallest distance between the center and image walls
-        radius = min(center[0], center[1], w-center[0], h-center[1]) - 50
+        radius = min(center[0], center[1], w-center[0], h-center[1]) - 10
 
     Y, X = np.ogrid[:h, :w]
     dist_from_center = np.sqrt((X - center[0])**2 + (Y-center[1])**2)
@@ -230,7 +238,8 @@ def fp_2d_parallel(sample, angles):
     return rec
 
 def shift_sino(sino2d, shift):
-    tmp_sino = scipy.ndimage.shift(sino2d, [0,shift], order=2, mode='constant')
+    tmp_sino = scipy.ndimage.shift(sino2d, [0,shift], order=2, mode='nearest')
+    
     return tmp_sino
 
 def calc_loss(sino2d, angles, shift, return_data=True):
@@ -248,7 +257,7 @@ def calc_loss(sino2d, angles, shift, return_data=True):
     
     mask = create_circular_mask(sino2d.shape[1],sino2d.shape[1])
     sino_back = fp_2d_parallel(recon*mask, angles)
-    loss = np.mean((sino_back-shifted_sino)**4)
+    loss = np.linalg.norm((sino_back-shifted_sino).flat, 8) #np.mean((sino_back-shifted_sino)**8)
     
     if return_data:
         return loss, recon, sino_back, shifted_sino
@@ -263,17 +272,23 @@ def axis_search2(sinogram_mem, uniq_angles_mem, debug=False):
     shift_points = []
     losses = []
     shift_0 = 0
-    ds = sinogram_mem.shape[2]//n_slices//2
-    for slice_idx in tqdm(range(1, n_slices)):
+    ds = 10#sinogram_mem.shape[2]//n_slices//2
+    for slice_idx in tqdm(range(2, n_slices-1)):
         slice_numb = sinogram_mem.shape[2]*slice_idx//n_slices
         
         sino2d = np.mean(sinogram_mem[:, :, slice_numb-ds:slice_numb+ds+1], axis=-1)
+        
+        sino2d = remove_stripe_ti(sino2d[:, None, :])
+        sino2d = np.squeeze(sino2d)
+        sino2d = ndi.median_filter(sino2d, (3,3))
+        
         angles = uniq_angles_mem
         indexes = np.argsort(angles)
         angles = angles[indexes]
         sino2d = sino2d[indexes,:]
 
         l_calc_loss = lambda shift: calc_loss(sino2d, angles, shift, return_data=False)
+        
         optim = minimize_scalar(l_calc_loss, method='brent',
 #                                 bounds=(sino2d.shape[1]//4, sino2d.shape[1]//4*3),
                                 options = {'xtol':0.1})
@@ -284,29 +299,29 @@ def axis_search2(sinogram_mem, uniq_angles_mem, debug=False):
         
         losses.append(l)
         if debug:    
-            sino2d = remove_stripe_ti(sino2d[:, None, :])
-            sino2d = np.squeeze(sino2d)
+#             sino2d = remove_stripe_ti(sino2d[:, None, :])
+#             sino2d = np.squeeze(sino2d)
             l, recon, sino_back, shifted_sino = calc_loss(sino2d, angles, shift , return_data=True)
             plt.figure(figsize=(10,10))
             plt.title(optim['x'])
             plt.imshow(recon, vmin = np.percentile(recon,10), vmax = np.percentile(recon,99.9))
             #         plt.colorbar()
-            plt.axis('tight')
             plt.show()
-            plt.figure(figsize=(12,6))
-            plt.subplot(121)
-            plt.imshow(shifted_sino)
-            plt.yticks(range(shifted_sino.shape[0])[::50], angles[::50])
-            plt.axis('tight')
-            plt.colorbar()
-            plt.subplot(122)
-            plt.imshow(sino_back-shifted_sino, cmap=plt.cm.seismic)
-            plt.axis('tight')
-            plt.colorbar()
-            plt.show()
+#             plt.figure(figsize=(12,6))
+#             plt.subplot(121)
+#             plt.imshow(shifted_sino)
+#             plt.yticks(range(shifted_sino.shape[0])[::50], angles[::50])
+#             plt.axis('tight')
+#             plt.colorbar()
+#             plt.subplot(122)
+#             plt.imshow(sino_back-shifted_sino, cmap=plt.cm.seismic)
+#             plt.axis('tight')
+#             plt.colorbar()
+#             plt.show()
             
             
     
+    losses = np.asarray(losses)
     #calculate shift and roteation angle
     shift_points = np.asarray(shift_points)
     
@@ -321,10 +336,21 @@ def axis_search2(sinogram_mem, uniq_angles_mem, debug=False):
     data = np.column_stack([xdata, ydata])
     model = LineModelND()
     model.estimate(data)
+    
+    #взвешанный fit
+
+    regr = LinearRegression()
+    sample_weight = len(xdata)/2. - np.abs((np.arange(len(xdata)) - len(xdata)/2.)+0.5)
+    
+#     print(xdata)
+#     print(ydata)
+#     print(sample_weight)
+    
+    regr.fit(xdata.reshape(-1, 1), ydata.reshape(-1, 1), sample_weight)
 
     # robustly fit line only using inlier data with RANSAC algorithm
-    model_robust, inliers = ransac(data, LineModelND, min_samples=4,
-                                   residual_threshold=0.1, max_trials=10000)
+    model_robust, inliers = ransac(data, LineModelND, min_samples=3,
+                                   residual_threshold=0.5, max_trials=10000)
     
     params = model_robust.params[1][1], model_robust.predict_y([0,])[0]
     
@@ -336,20 +362,29 @@ def axis_search2(sinogram_mem, uniq_angles_mem, debug=False):
 
         plt.plot(xdata, linear_func(xdata, *popt), '--',
                  label='fit: a=%5.3f, b=%5.3f' % tuple(popt))
+        
+        plt.plot(xdata, regr.predict(xdata.reshape(-1, 1)), 'g--',
+                 label='W fit')
         plt.grid()
         plt.legend()
         plt.show()
         
                        
-    angle = np.mean([-np.rad2deg(np.arctan(params[0])), -np.rad2deg(np.arctan(popt[0]))])
-    shift_x = np.mean([params[1], popt[1]])
+#     angle = np.mean([-np.rad2deg(np.arctan(params[0])), -np.rad2deg(np.arctan(popt[0]))])
+#     shift_x = np.mean([params[1], popt[1]])
 
-#     angle = -np.rad2deg(np.arctan(popt[0]))
-#     shift_x = popt[1]
+    angle_lin = -np.rad2deg(np.arctan(popt[0]))
+    shift_x_lin = popt[1]
+
+
+    angle_rans = -np.rad2deg(np.arctan(params[0]))
+    shift_x_rans = params[1]
     
-#     angle = -np.rad2deg(np.arctan(params[0]))
-#     shift_x = params[1]
-    
+    if np.abs(angle_lin)<np.abs(angle_rans):
+        angle, shift_x = angle_lin, shift_x_lin
+    else:
+        angle, shift_x = angle_rans, shift_x_rans
+        
     return angle, shift_x
 
 def preview_axis_correction(sinogram_mem, uniq_angles_mem):
@@ -365,13 +400,11 @@ def preview_axis_correction(sinogram_mem, uniq_angles_mem):
         l, recon, sino_back, tmp_sino = calc_loss(sino2d, angles, 0 , return_data=True)
         plt.figure(figsize=(10,10))
         plt.imshow(recon, vmin = np.percentile(recon,10), vmax = np.percentile(recon,99.9))
-        plt.axis('tight')
         plt.show()
         
     plt.figure(figsize=(10,10))
     plt.imshow((sinogram_mem[0]-np.flipud(sinogram_mem[np.argmax(uniq_angles_mem)])).T,
               cmap=plt.cm.seismic)
-    plt.axis('tight')
     plt.colorbar()
 
 
@@ -391,11 +424,13 @@ res_shift_x = 0
 for i in tqdm(range(5)):
     angle, shift_x = axis_search2(sinogram_mem, uniq_angles_mem, debug=True)
     res_angle += angle
+#     if np.abs(res_angle) > 1:
+#         res_angle = 0
     res_shift_x += shift_x
     
     print(res_angle, res_shift_x)
       
-    for iid, i in enumerate(np.argwhere(uniq_angles<=180)):
+    for iid, i in enumerate(np.argwhere(uniq_angles_mem<=180)):
         sinogram_mem[iid] = sinogram[i]
 
     for i in tqdm(range(sinogram_mem.shape[0])):
@@ -404,10 +439,47 @@ for i in tqdm(range(5)):
     plt.figure(figsize=(10,10))
     plt.imshow((sinogram_mem[0]-np.flipud(sinogram_mem[np.argmax(uniq_angles_mem)])).T,
           cmap=plt.cm.seismic)
-    plt.axis('tight')
+    plt.axis('equal')
     plt.colorbar()
     plt.show()
 
+preview_axis_correction(sinogram_mem, uniq_angles_mem)
+
+# %% [markdown]
+# # Ручной поиск смещения и поворота
+
+# %%
+p_0 = get_angles_at_180_deg(uniq_angles_mem)[0][0]
+p_180 = get_angles_at_180_deg(uniq_angles_mem)[1][0]
+ang_0, ang_180 = uniq_angles_mem[p_0], uniq_angles_mem[p_180]
+ang_0, ang_180
+im_0, im_180 = sinogram[p_0],sinogram[p_180]
+
+
+# %%
+def find_shift_angle(shift, angle):
+    t_im_0 = transfrom_image(im_0, shift, angle)
+    t_im_180 = transfrom_image(im_180, shift, angle)
+    plt.figure(figsize = (8,8))
+    plt.imshow(t_im_0.T-np.fliplr(t_im_180.T), cmap=plt.cm.seismic)
+    plt.colorbar(orientation='horizontal')
+    plt.show()
+
+ff = ipywidgets.interact_manual(find_shift_angle, 
+                                shift=ipywidgets.IntSlider(min=-200, max=200, step=1, value=res_shift_x),
+                                angle=ipywidgets.FloatSlider(min=-1., max=1, step=0.05, value=res_angle),
+                                )
+
+# %% [markdown]
+# # Предпросмотр реконструкции
+
+# %%
+res_shift_x, res_angle = ff.widget.kwargs['shift'], ff.widget.kwargs['angle']
+for iid, i in enumerate(np.argwhere(uniq_angles_mem<=180)):
+    sinogram_mem[iid] = sinogram[i]
+
+for i in tqdm(range(sinogram_mem.shape[0])):
+    sinogram_mem[i] = transfrom_image(sinogram_mem[i], res_shift_x, res_angle)
 preview_axis_correction(sinogram_mem, uniq_angles_mem)
 
 # %%
