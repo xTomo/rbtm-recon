@@ -12,7 +12,7 @@ from tomo_queue import get_rec_queue_next_obj, set_object_status
 
 logging.basicConfig(level=logging.INFO)
 
-NOTEBOOK_NAME = 'reconstructor.ipynb'
+NOTEBOOK_NAME = 'reconstructor-axis_search3a.py'
 
 
 def _notebook_auto_run(notebook):
@@ -83,6 +83,8 @@ def copy_python_files(obj_id, storage_dir):
     copy(NOTEBOOK_NAME[:-5] + 'py', out_dir)
     copy('tomotools.py', out_dir)
     copy('reconstructor-axis_search2.py', out_dir)
+    # copy('reconstructor-axis_search3a.py', out_dir)
+    copy('tomotools2.py', out_dir)
     tomotools.mkdir_p(os.path.join(out_dir, 'tomo', 'recon'))  # TODO : reaplace in copytree in python 3.8
     copy(os.path.join('tomo', 'recon', 'astra_utils.py'), os.path.join(out_dir, 'tomo', 'recon'))
     return out_dir

@@ -34,3 +34,4 @@ dependencies:
     - pymongo==3
     - imreg_dft
     - pyvista
+    - line_profiler
