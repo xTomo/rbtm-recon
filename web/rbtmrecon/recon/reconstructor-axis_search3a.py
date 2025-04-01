@@ -315,8 +315,8 @@ for subarr in tqdm(np.array_split(indexes, num_subrrays)):
 # preview_axis_correction(sinogram_fixed, data_angles)
 
 # %%
-raw_file_name = tomo_info['specimen'] + '.1'
-rec_vol, _ = persistent_array(os.path.join(tmp_dir, raw_file_name + '.raw'),
+raw_file_name = f"{tomo_info['specimen']}.{sinogram_fixed.shape[0]}_{sinogram_fixed.shape[2]}_{sinogram_fixed.shape[2]}.1.raw"
+rec_vol, _ = persistent_array(os.path.join(tmp_dir, raw_file_name),
                               dtype=np.float32, force_create=False,
                               shape=(sinogram_fixed.shape[0], sinogram_fixed.shape[2], sinogram_fixed.shape[2]))
 
