@@ -34,26 +34,18 @@ logger.setLevel(logging.WARN)
 import time
 import os
 import configparser
-from glob import glob
 
 import pylab as plt
 import numpy as np
 
-import h5py
-
-import scipy.optimize
-import scipy.ndimage
 import scipy.ndimage as ndi
 
 # import imreg_dft as ird
-import my_imreg_dft as ird
-from tomopy.prep.stripe import remove_all_stripe
-from tomopy.recon.rotation import find_center_vo
+# import my_imreg_dft as ird
 
 from tomotools2 import (STORAGE_SERVER, safe_median, recon_2d_parallel, get_tomoobject_info, get_experiment_hdf5,
-                       mkdir_p, show_exp_data, load_tomo_data, tqdm, find_roi,
-                       persistent_array, get_angles_at_180_deg, test_rec, save_amira, show_frames_with_border,
-                       recursively_save_dict_contents_to_group, recon_2d_parallel_nonorm, preview_axis_correction)
+                       mkdir_p, show_exp_data, load_tomo_data, tqdm, persistent_array, get_angles_at_180_deg, save_amira, show_frames_with_border,
+                       preview_axis_correction)
 
 import ipywidgets
 
@@ -188,11 +180,7 @@ plt.show()
 # # Автоматический поиск смещения
 
 # %%
-from tomotools import astra_utils
 from tomopy.prep.stripe import remove_stripe_ti
-from scipy.optimize import minimize_scalar, minimize, curve_fit
-from skimage.measure import LineModelND, ransac
-from sklearn.linear_model import LinearRegression
 import cupy as cp
 import cupyx.scipy.ndimage as cndi
 
@@ -338,7 +326,7 @@ t0 = time.time()
 print(sinogram_fixed.shape)
 t_angles = (data_angles - data_angles.min()) < 180  # remove angles >180
 for i in tqdm(range(0, sinogram_fixed.shape[0])):
-    sino = [i]
+    sino = sinogram_fixed[i]
     # sino[sino < 0] = 0
     # sino = np.power(sino, bh_corr)  # BH!
     t = recon_2d_parallel(sino[t_angles], data_angles[t_angles])
@@ -349,9 +337,6 @@ print(time.time() - t0)
 
 # %%
 # %xdel sinogram_fixed 
-
-# %%
-# %whos ndarray           
 
 # %%
 for j in range(2):
@@ -414,31 +399,6 @@ plot.lighting = 2
 plot.display()
 
 # %%
-resize = int(np.power(np.prod(rec_vol.shape) / 1e6, 1. / 3))
-print(resize)
-small_rec = reshape_volume(rec_vol, resize)
-volume = k3d.volume(
-    small_rec.astype(np.float32),
-    #     alpha_coef=1000,
-    #     shadow='dynamic',
-    #     samples=600,
-    #     shadow_res=128,
-    #     shadow_delay=50,
-    color_range=[np.percentile(small_rec, 10), np.percentile(small_rec, 99.9)],
-    color_map=(np.array(k3d.colormaps.matplotlib_color_maps.jet).reshape(-1, 4)).astype(np.float32),
-    compression_level=4
-)
-size = small_rec.shape
-volume.transform.bounds = [-size[2] / 2, size[2] / 2,
-                           -size[1] / 2, size[1] / 2,
-                           -size[0] / 2, size[0] / 2]
-
-plot = k3d.plot(camera_auto_fit=True)
-plot += volume
-plot.lighting = 2
-plot.display()
-
-# %%
 plot.fetch_snapshot()
 with open('./tomo_3d.html', 'w') as fp:
     fp.write(plot.snapshot)
@@ -476,13 +436,16 @@ mkdir_p(os.path.join(storage_dir, experiment_id))
 # # !cp 'tomo.ini'  {os.path.join(storage_dir, experiment_id)}
 
 # %%
-# !cp -r {tmp_dir} {storage_dir}
+# !rm -rf {tmp_dir}/*.size
+
+# %%
+# !unset LD_LIBRARY_PATH; cp -r {tmp_dir} {os.path.join(storage_dir, experiment_id, 'reconstruction')}
 
 # %%
 # !rm -rf {tmp_dir}
 
 # %%
-# !mv {os.path.join(data_dir, experiment_id+'.h5')} {storage_dir}
+# !unset LD_LIBRARY_PATH; mv {os.path.join(data_dir, experiment_id+'.h5')} {storage_dir}
 
 # %%
 # !ls -lha {storage_dir+'/'+experiment_id}

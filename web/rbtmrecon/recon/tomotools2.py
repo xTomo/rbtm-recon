@@ -173,8 +173,8 @@ def recon_2d_parallel_nonorm(sino, angles):  # used for axis search
 def preview_axis_correction(sinogram_mem, angles, remove_rings=True):
     from tomopy.prep.stripe import remove_stripe_ti
     if sinogram_mem.ndim >2:
-        n_slices = np.min([10, sinogram_mem.shape[2]])
-        start_slice = sinogram_mem.shape[2]//n_slices
+        n_slices = np.min([10, sinogram_mem.shape[0]])
+        start_slice = sinogram_mem.shape[0]//n_slices
     else: #for single sliced sinogram
         n_slices = 1
         start_slice = 0
