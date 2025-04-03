@@ -254,8 +254,8 @@ tr_dict = {"scale": 1, "angle": alfa, "tvec": (0, shift_x)}
 
 recon_config['axis_corr'] = {'shift_x': shift_x,
                              'alfa': alfa,
-                             'angle_180': data_angles[position_180],
-                             'angle_0': data_angles[position_0]
+                            #  'angle_180': data_angles[position_180],
+                            #  'angle_0': data_angles[position_0]
                              }
 
 sinogram_fixed = np.zeros((data_images_crop.shape[1], 
@@ -445,9 +445,10 @@ with open('./tomo_3d.html', 'w') as fp:
 
 # %%
 cfg = configparser.ConfigParser()
-cfg['roi'] = recon_config['roi']
-cfg['corr'] = recon_config['corr']
-cfg['axis_corr'] = recon_config['axis_corr']
+for key in ['roi', 'corr','axis_corr']:
+    if key in recon_config:
+        cfg[key] = recon_config[key]
+
 with open(os.path.join(tmp_dir, 'rec_config.ini'), 'w') as configfile:
     cfg.write(configfile)
 
