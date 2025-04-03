@@ -1,4 +1,4 @@
-FROM nvidia/cuda:10.1-runtime
+FROM nvidia/cuda:11.2.2-runtime-ubuntu18.04
 
 MAINTAINER Alexey Buzmakov <buzmakov@gmail.com>
 

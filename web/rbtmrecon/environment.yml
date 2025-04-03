@@ -8,7 +8,7 @@ dependencies:
   - py-opencv
   - numpy
   - matplotlib
-  - astra-toolbox
+  - astra-toolbox==2.1.2
   - tomopy
   - scikit-image
   - h5py
@@ -30,6 +30,7 @@ dependencies:
   - cupy
   - pillow
   - k3d
+  - scikit-learn
   - pip:
     - pymongo==3
     - imreg_dft
