@@ -2,7 +2,7 @@ version: '2.4'  # work with docker-compose 1.25.4
 services:
   test:
     runtime: nvidia
-    image: "nvidia/cuda:10.1-runtime"
+    image: "nvidia/cuda:12.1.0-devel-ubuntu18.04"
     command: "nvidia-smi"
   reconstructor:
     runtime: nvidia

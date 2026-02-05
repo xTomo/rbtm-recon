@@ -2,37 +2,43 @@ name: xrecon
 channels:
   - conda-forge
   - astra-toolbox
-  - defaults
+  - nvidia
+  - https://software.repos.intel.com/python/conda
+  - ccpi
+  - httomo 
 dependencies:
+  - python=3.11
+  - cudatoolkit=11.8
   - scipy
   - py-opencv
   - numpy
   - matplotlib
-  - astra-toolbox==2.1.2
+  - astra-toolbox=*=cuda*
+  - cil=25.0.0
+  - ipp=2021.12
+  - ccpi-regulariser
+  - tigre
   - tomopy
   - scikit-image
   - h5py
   - requests
-#  - ipyvolume
   - jupyter
   - ipython
   - nbformat
-  - python=3.9
   - pyqt
   - tqdm
   - autopep8
   - pylint
   - ipywidgets
   - jupytext
-  - pip
-  #  - zarr
   - dask
-  - cupy
   - pillow
   - k3d
   - scikit-learn
+  - pip
   - pip:
-    - pymongo==3
-    - imreg_dft
+    - pymongo==4
+    - git+https://github.com/matejak/imreg_dft.git
     - pyvista
     - line_profiler
+    - cupy-cuda12x

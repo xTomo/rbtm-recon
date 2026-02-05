@@ -1,4 +1,4 @@
-FROM ubuntu:bionic
+FROM ubuntu:24.04
 
 MAINTAINER Alexey Buzmakov <buzmakov@gmail.com>
 
@@ -16,7 +16,7 @@ RUN DEBIAN_FRONTEND=noninteractive  apt-get update --fix-missing && apt-get inst
 
 WORKDIR /webrbtm
 
-RUN wget --quiet https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/anaconda.sh && \
+RUN wget --quiet https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh  -O ~/anaconda.sh && \
     /bin/bash ~/anaconda.sh -b -p /opt/conda && \
     rm ~/anaconda.sh && \
     ln -s /opt/conda/etc/profile.d/conda.sh /etc/profile.d/conda.sh && \

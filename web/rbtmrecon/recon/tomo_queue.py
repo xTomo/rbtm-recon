@@ -27,7 +27,7 @@ def get_object(obj_id):
 
 
 def set_object_status(obj_id, status):
-    to.insert({'obj_id': obj_id,
+    to.insert_one({'obj_id': obj_id,
                'status': status,
                'date': datetime.now()}
               )

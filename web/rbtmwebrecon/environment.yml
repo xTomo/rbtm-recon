@@ -8,6 +8,6 @@ dependencies:
   - gunicorn
   - requests
   - pip
-  - python=3.9
+  - python=3.11
   - pip:
-    - pymongo==3
+    - pymongo==4
