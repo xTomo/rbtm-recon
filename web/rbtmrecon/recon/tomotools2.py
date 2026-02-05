@@ -13,6 +13,8 @@ import requests
 import scipy.ndimage
 import scipy.optimize
 from tqdm.notebook import tqdm  # noqa
+import cupy as cp
+from cupyx.scipy.ndimage import median_filter
 
 
 import tomo.recon.astra_utils as astra_utils  # noqa
@@ -150,26 +152,34 @@ def get_frame_group(data_file, group_name, mmap_file_dir):
     return images, angles
 
 
+# def safe_median(data):
+#     m_data = cv2.medianBlur(data, 3)
+#     mask = np.abs(m_data - data) > 0.1 * np.abs(data)
+#     res = data.copy()
+#     res[mask] = m_data[mask]
+#     return res
+
+
 def safe_median(data):
-    m_data = cv2.medianBlur(data, 3)
-    mask = np.abs(m_data - data) > 0.1 * np.abs(data)
-    res = data.copy()
+    data_gpu = cp.asarray(data)
+    m_data = median_filter(data_gpu, size=3)
+    mask = cp.abs(m_data - data_gpu) > 0.1 * cp.abs(data_gpu)
+    res = data_gpu.copy()
     res[mask] = m_data[mask]
-    return res
+    
+    return cp.asnumpy(res)  # Конвертируем обратно в numpy
 
-
-def recon_2d_parallel(sino, angles):
+def recon_2d_parallel(sino, angles, pixel_size=9e-3):
     rec = astra_utils.astra_recon_2d_parallel(sino, angles, 
                                               ['FBP_CUDA', 
                                               ['CGLS_CUDA', 10]])
-    pixel_size = 9e-3
     return rec / pixel_size
 
 
 def recon_2d_parallel_nonorm(sino, angles):  # used for axis search
     rec = astra_utils.astra_recon_2d_parallel(sino[angles<180], angles[angles<180], ['FBP_CUDA'])
     return rec
-    
+
 def preview_axis_correction(sinogram_mem, angles, remove_rings=True):
     from tomopy.prep.stripe import remove_stripe_ti
     if sinogram_mem.ndim >2:
