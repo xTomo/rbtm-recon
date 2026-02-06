@@ -45,7 +45,7 @@ import scipy.ndimage as ndi
 
 from tomotools2 import (STORAGE_SERVER, safe_median, recon_2d_parallel, get_tomoobject_info, get_experiment_hdf5,
                        mkdir_p, show_exp_data, load_tomo_data, tqdm, persistent_array, get_angles_at_180_deg, save_amira, show_frames_with_border,
-                       preview_axis_correction)
+                       preview_axis_correction, reshape_volume)
 
 import ipywidgets
 
@@ -67,7 +67,7 @@ tomo_info = get_tomoobject_info(experiment_id, STORAGE_SERVER)
 tomo_info
 
 # %%
-pixel_size = 4.25e-3 # pixel size in mm
+pixel_size = 9.0e-3 # pixel size in mm
 
 # %%
 if os.path.exists("rec_config.ini"): # in current dir
@@ -185,7 +185,7 @@ plt.show()
 # # Автоматический поиск смещения
 
 # %%
-from tomo.remove_stripe import remove_stripe_ti
+from tomo.remove_stripe import remove_stripe_ti, remove_all_stripe
 import cupy as cp
 import cupyx.scipy.ndimage as cndi
 
@@ -259,7 +259,7 @@ sinogram_fixed = np.zeros((data_images_crop.shape[1],
 for i in tqdm(range(data_images_crop.shape[0])):
     sinogram_fixed[:,i,:] = transfrom_image(data_images_crop[i], shift_x, alfa)
 
-preview_axis_correction(sinogram_fixed, data_angles)
+preview_axis_correction(sinogram_fixed, data_angles, remove_rings=True)
 
 
 # %% [markdown]
@@ -292,10 +292,53 @@ def find_shift_angle(shift, angle):
     
     preview_axis_correction(sinogram_fixed, data_angles)
 
-ff = ipywidgets.interact_manual(find_shift_angle, 
-                                shift=ipywidgets.FloatSlider(min=-200, max=200, step=0.05, value=shift_x, readout_format='.2f',),
-                                angle=ipywidgets.FloatSlider(min=-3., max=3, step=0.001, value=alfa, readout_format='.3f',),
-                                )
+# ff = ipywidgets.interact_manual(find_shift_angle, 
+#                                 shift=ipywidgets.FloatSlider(min=-200, max=200, step=0.05, value=shift_x, readout_format='.2f',),
+#                                 angle=ipywidgets.FloatSlider(min=-3., max=3, step=0.001, value=alfa, readout_format='.3f',),
+#                                 )
+
+import ipywidgets as widgets
+from IPython.display import display
+# Создаем виджеты
+shift_slider = widgets.FloatSlider(
+    min=-200, max=200, step=0.05, value=shift_x, 
+    description='Shift:', layout=widgets.Layout(width='400px')
+)
+shift_text = widgets.FloatText(
+    value=shift_x, step=0.05, 
+    layout=widgets.Layout(width='100px')
+)
+
+angle_slider = widgets.FloatSlider(
+    min=-3., max=3, step=0.001, value=alfa, 
+    description='Angle:', layout=widgets.Layout(width='400px')
+)
+angle_text = widgets.FloatText(
+    value=alfa, step=0.001,
+    layout=widgets.Layout(width='100px')
+)
+
+# Синхронизация слайдера и текстового поля
+widgets.jslink((shift_slider, 'value'), (shift_text, 'value'))
+widgets.jslink((angle_slider, 'value'), (angle_text, 'value'))
+
+# Кнопка
+button = widgets.Button(description='Применить', button_style='primary')
+output = widgets.Output()
+
+def on_button_click(b):
+    with output:
+        output.clear_output(wait=True)
+        find_shift_angle(shift_slider.value, angle_slider.value)
+
+button.on_click(on_button_click)
+
+# Компоновка
+shift_box = widgets.HBox([shift_slider, shift_text])
+angle_box = widgets.HBox([angle_slider, angle_text])
+ui = widgets.VBox([shift_box, angle_box, button, output])
+
+display(ui)
 
 # %%
 if 'shift' in ff.widget.kwargs:
@@ -319,10 +362,10 @@ num_subrrays = len(indexes) // 48 + 1
 
 for subarr in tqdm(np.array_split(indexes, num_subrrays)):
     t = sinogram_fixed[subarr]
-    t = remove_stripe_ti(t.swapaxes(0,1), ).swapaxes(0,1)
+    t = remove_all_stripe(cp.asanyarray(t.swapaxes(0,1))).get().swapaxes(0,1)
     sinogram_fixed[subarr] = t
 
-# preview_axis_correction(sinogram_fixed, data_angles)
+preview_axis_correction(sinogram_fixed, data_angles, remove_rings=False)
 
 # %%
 raw_file_name = f"{tomo_info['specimen']}.{sinogram_fixed.shape[0]}_{sinogram_fixed.shape[2]}_{sinogram_fixed.shape[2]}.1.raw"
@@ -379,8 +422,6 @@ recon_config
 
 # %%
 import k3d
-from tomotools import reshape_volume
-
 # %%
 resize = int(np.power(np.prod(rec_vol.shape) / 1e7, 1. / 3))
 print(resize)

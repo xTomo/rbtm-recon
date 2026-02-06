@@ -87,6 +87,7 @@ def copy_python_files(obj_id, storage_dir):
     copy('tomotools2.py', out_dir)
     tomotools.mkdir_p(os.path.join(out_dir, 'tomo', 'recon'))  # TODO : reaplace in copytree in python 3.8
     copy(os.path.join('tomo', 'recon', 'astra_utils.py'), os.path.join(out_dir, 'tomo', 'recon'))
+    copy(os.path.join('tomo', 'remove_stripe.py'), os.path.join(out_dir, 'tomo', 'remove_stripe.py'))
     return out_dir
 
 

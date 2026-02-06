@@ -180,8 +180,12 @@ def recon_2d_parallel_nonorm(sino, angles):  # used for axis search
     rec = astra_utils.astra_recon_2d_parallel(sino[angles<180], angles[angles<180], ['FBP_CUDA'])
     return rec
 
-def preview_axis_correction(sinogram_mem, angles, remove_rings=True):
-    from tomopy.prep.stripe import remove_stripe_ti
+def preview_axis_correction(sinogram_mem, angles, remove_rings=False):
+    # from tomopy.prep.stripe import remove_stripe_ti
+    from tomo.remove_stripe import remove_stripe_ti, remove_all_stripe
+    import cupy as cp
+    import cupyx.scipy.ndimage as cndi
+    
     if sinogram_mem.ndim >2:
         n_slices = np.min([10, sinogram_mem.shape[0]])
         start_slice = sinogram_mem.shape[0]//n_slices
@@ -196,7 +200,7 @@ def preview_axis_correction(sinogram_mem, angles, remove_rings=True):
         sino2d = sinogram_mem[slice_numb]
         print(sino2d.shape)
         if remove_rings:
-            sino2d = remove_stripe_ti(sino2d[:, None, :])
+            sino2d = remove_all_stripe(cp.asanyarray(sino2d[:, None, :])).get()
             sino2d = np.squeeze(sino2d)
         recon = recon_2d_parallel_nonorm(sino2d, angles)
         plt.figure(figsize=(10,10))
