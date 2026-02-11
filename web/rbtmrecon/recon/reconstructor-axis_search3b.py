@@ -15,8 +15,8 @@
 # ---
 
 # %%
-# %load_ext autoreload
-# %autoreload 2
+# # %load_ext autoreload
+# # %autoreload 2
 
 # %%
 # #jupytext --to notebook reconstructor.py
@@ -260,12 +260,14 @@ for i in tqdm(range(data_images_crop.shape[0])):
     sinogram_fixed[:,i,:] = transfrom_image(data_images_crop[i], shift_x, alfa)
 
 preview_axis_correction(sinogram_fixed, data_angles, remove_rings=True)
+manual_axis_search = False
 
 
 # %% [markdown]
 # # Ручной поиск смещения и поворота
 
 # %%
+manual_axis_search = True
 p_0 = get_angles_at_180_deg(data_angles)[0][0]
 p_180 = get_angles_at_180_deg(data_angles)[1][0]
 ang_0, ang_180 = data_angles[p_0], data_angles[p_180]
@@ -290,7 +292,7 @@ def find_shift_angle(shift, angle):
     for i in tqdm(range(data_images_crop.shape[0])):
         sinogram_fixed[:,i,:] = transfrom_image(data_images_crop[i], shift, angle)
     
-    preview_axis_correction(sinogram_fixed, data_angles)
+    preview_axis_correction(sinogram_fixed, data_angles, remove_rings=True)
 
 # ff = ipywidgets.interact_manual(find_shift_angle, 
 #                                 shift=ipywidgets.FloatSlider(min=-200, max=200, step=0.05, value=shift_x, readout_format='.2f',),
@@ -341,9 +343,9 @@ ui = widgets.VBox([shift_box, angle_box, button, output])
 display(ui)
 
 # %%
-if 'shift' in ff.widget.kwargs:
-    shift_x, alfa = ff.widget.kwargs['shift'], ff.widget.kwargs['angle']
-    
+if manual_axis_search:
+    shift_x, alfa = shift_text.value, angle_text.value
+
     for i in tqdm(range(data_images_crop.shape[0])):
         sinogram_fixed[:,i,:] = transfrom_image(data_images_crop[i], shift_x, alfa)
     preview_axis_correction(sinogram_fixed, data_angles)
