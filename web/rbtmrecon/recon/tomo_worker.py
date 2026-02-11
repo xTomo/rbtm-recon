@@ -56,12 +56,12 @@ def reconstruct(obj):
 def copyfiles(obj):
     storage_dir = '/storage'
     obj_id = obj['obj_id']
-    set_object_status(obj_id, 'coping')
-    logging.info('Start coping files: {}'.format(obj_id))
+    set_object_status(obj_id, 'copying')
+    logging.info('Start copying files: {}'.format(obj_id))
 
     out_dir = copy_python_files(obj_id, storage_dir)
 
-    logging.info('Finish coping: {}'.format(obj_id))
+    logging.info('Finish copying: {}'.format(obj_id))
     set_object_status(obj_id, 'done')
 
 

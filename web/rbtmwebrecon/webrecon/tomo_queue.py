@@ -43,7 +43,12 @@ def get_object_status(obj_id):
 
 def get_rec_queue_next_obj():
     for obj in to.find({'status': 'waiting'}):
-        if 'action' in obj and get_object_status(obj['obj_id']) == 'waiting':
+        if 'action' not in obj:
+            continue
+        # Получаем последнюю запись для этого obj_id
+        latest_obj = get_object(obj['obj_id'])
+        # Проверяем, что текущая запись является последней И имеет статус 'waiting'
+        if latest_obj and latest_obj['_id'] == obj['_id']:
             return obj
     return None
 
