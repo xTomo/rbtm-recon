@@ -1,10 +1,14 @@
+import logging
 import pprint
+import time
 
 from flask import Flask, render_template, request, redirect
 from flask_restful import Resource, Api
 
 import storage_utils
 import tomo_queue
+
+logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
 api = Api(app)
@@ -40,7 +44,10 @@ api.add_resource(TomoObject, '/tomo_object/<to_id>')
 @app.route('/')
 @app.route('/view/tomo_objects')
 def view_tomo_objects():
+    t0 = time.time()
     tomo_objects = storage_utils.get_tomoobjects_full_info()
+    t1 = time.time()
+    logging.info(f'[PROFILE] get_tomoobjects_full_info в view: {t1 - t0:.3f}s')
     tomo_objects.sort(key=lambda x: x['timestamp'], reverse=True)
 
     total = len(tomo_objects)
@@ -57,6 +64,8 @@ def view_tomo_objects():
     for i, obj in enumerate(page_objects):
         obj['number'] = total - (start + i)
 
+    t2 = time.time()
+    logging.info(f'[PROFILE] ИТОГО view_tomo_objects: {t2 - t0:.3f}s')
     return render_template('tomo_objects.html',
                            tomo_objects=page_objects,
                            page=page,

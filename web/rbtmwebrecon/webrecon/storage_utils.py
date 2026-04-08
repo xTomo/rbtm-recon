@@ -1,4 +1,6 @@
 import json
+import logging
+import time
 import requests
 import tomo_queue
 import glob
@@ -58,10 +60,27 @@ def get_tomoobjects_list():
 
 
 def get_tomoobjects_full_info():
+    t0 = time.time()
+
     exp_info = json.dumps({})
     experiment = requests.post(STORAGE_SERVER + 'storage/experiments/get',
                                exp_info, timeout=1000)
+    t1 = time.time()
+    logging.info(f'[PROFILE] HTTP запрос к storage: {t1 - t0:.3f}s')
+
     experiments = json.loads(experiment.content)
-    for exp in experiments:
+    t2 = time.time()
+    logging.info(f'[PROFILE] JSON парсинг ({len(experiments)} объектов): {t2 - t1:.3f}s')
+
+    for i, exp in enumerate(experiments):
+        ts = time.time()
         exp['tomo_status'] = tomo_queue.get_object_status(exp['_id'])
+        te = time.time()
+        if te - ts > 0.1:
+            logging.info(f'[PROFILE] get_object_status({exp["_id"]}): {te - ts:.3f}s (медленно!)')
+
+    t3 = time.time()
+    logging.info(f'[PROFILE] Все статусы MongoDB: {t3 - t2:.3f}s')
+    logging.info(f'[PROFILE] ИТОГО get_tomoobjects_full_info: {t3 - t0:.3f}s')
+
     return experiments
