@@ -1,62 +1,105 @@
 {% extends "base.html" %}
 {% block content %}
-    <h1>Tomo object</h1>
-    <div>
-        <h2>Object info</h2>
-        <pre>
-{{ tomo_object_str }}
-        </pre>
-    </div>
+<div class="container-fluid py-4">
 
-    <div>
-        <ul>
-    {% if 'tomo_reports' in tomo_object['files']%}
-        
-        {% for tr in tomo_object['files']['tomo_reports'] %}
-        <li><a href="{{ tr }}">Reconstruction report: {{tr.split('/')[-1]}}</a></li>    
-        {% endfor %}
-        
-    {% endif %}
-
-    {% if 'amira_hx' in tomo_object['files']%}
-        <li><a href="{{ tomo_object['files']['amira_hx'] }}">Amira HX file</a></li>    
-    {% endif %}
-
-            {% if 'amira_raw' in tomo_object['files'] %}
-                <li><a href="{{ tomo_object['files']['amira_raw'] }}">Amira RAW file</a></li>
-            {% endif %}
-
-            {% if 'tomo_rec' in tomo_object['files'] %}
-                <li><a href="{{ tomo_object['files']['tomo_rec'] }}">HDF5 file with full reconstruction</a></li>
-            {% endif %}
-        </ul>
-    </div>
-    <div>
-        <form action='http://10.0.7.153:5550/copyfiles/{{ tomo_object["_id"] }}' method="GET">
-            <button type='submit'>Copy files</button>
-        </form>
-    </div>
-    <div>
-        <a href="http://10.0.7.153:5551/tree/{{ tomo_object['_id'] }}">
-            Manual reconstruction
+    <div class="d-flex align-items-center mb-3">
+        <a href="{{ url_for('view_tomo_objects') }}" class="btn btn-outline-secondary btn-sm mr-3">
+            &laquo; Назад к списку
         </a>
+        <h2 class="mb-0">🔬 {{ tomo_object['specimen'] }}</h2>
+        <small class="text-muted ml-3">{{ tomo_object['timestamp'] | datetimeformat }}</small>
     </div>
-    {#    {% if 'tomo_preview' in tomo_object['files']%}#}
-    {#    <div>#}
-    {#        <embed src="{{ tomo_object['files']['tomo_preview'] }}" width=1000 height=800/>#}
-    {#    </div>#}
-    {#    {% endif %}#}
-    <div>
-        <h2> Reconstruction status</h2>
-        {% if not tomo_object['tomo_status'] in ['reconstructing'] %}
-        <form action='/reconstruct/{{ tomo_object["_id"] }}' method="GET">
-            <button type='submit' name='rec_button'>Reconstruct it</button>
-        </form>
-        {% else %}
-        Reconstruction in process...
-        <form action='/reset/{{ tomo_object["_id"] }}' method="GET">
-            <button type='submit' name='reset_button'>Reset status</button>
-        </form>
-        {% endif %}
+
+    <div class="row">
+
+        {# Статус и действия #}
+        <div class="col-md-4 mb-3">
+            <div class="card shadow-sm h-100">
+                <div class="card-header thead-dark text-white"><strong>Статус и действия</strong></div>
+                <div class="card-body">
+                    <p>
+                        <strong>Статус: </strong>
+                        {% set status = tomo_object['tomo_status'] %}
+                        {% if 'done' in status or 'finish' in status %}
+                            <span class="badge badge-success">{{ status }}</span>
+                        {% elif 'reconstruct' in status or 'waiting' in status or 'copy' in status %}
+                            <span class="badge badge-warning text-dark">{{ status }}</span>
+                        {% elif 'cancel' in status or 'error' in status or 'not found' in status %}
+                            <span class="badge badge-danger">{{ status }}</span>
+                        {% else %}
+                            <span class="badge badge-secondary">{{ status }}</span>
+                        {% endif %}
+                    </p>
+                    <div class="d-flex flex-column" style="gap: 8px;">
+                        {% if tomo_object['tomo_status'] != 'reconstructing' %}
+                        <form action='/reconstruct/{{ tomo_object["_id"] }}' method="GET">
+                            <button type='submit' class="btn btn-primary btn-sm btn-block">
+                                🔄 Reconstruct it
+                            </button>
+                        </form>
+                        {% else %}
+                        <div class="alert alert-warning py-1 px-2 small">⏳ Реконструкция в процессе...</div>
+                        {% endif %}
+                        <form action='/reset/{{ tomo_object["_id"] }}' method="GET">
+                            <button type='submit' class="btn btn-outline-secondary btn-sm btn-block">
+                                ↺ Reset status
+                            </button>
+                        </form>
+                        <form action='http://10.0.7.153:5550/copyfiles/{{ tomo_object["_id"] }}' method="GET">
+                            <button type='submit' class="btn btn-outline-primary btn-sm btn-block">
+                                🚀 Send to reconstruction
+                            </button>
+                        </form>
+                        <a href="http://10.0.7.153:5551/tree/{{ tomo_object['_id'] }}"
+                           class="btn btn-outline-success btn-sm btn-block">
+                            ⚙ Manual reconstruction
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        {# Файлы #}
+        <div class="col-md-4 mb-3">
+            <div class="card shadow-sm h-100">
+                <div class="card-header thead-dark text-white"><strong>Файлы</strong></div>
+                <div class="card-body">
+                    {% if tomo_object['files'] %}
+                    <ul class="list-unstyled mb-0">
+                        {% if 'tomo_reports' in tomo_object['files'] %}
+                            {% for tr in tomo_object['files']['tomo_reports'] %}
+                            <li class="mb-1">
+                                <a href="{{ tr }}">📊 Reconstruction report: {{ tr.split('/')[-1] }}</a>
+                            </li>
+                            {% endfor %}
+                        {% endif %}
+                        {% if 'amira_hx' in tomo_object['files'] %}
+                        <li class="mb-1"><a href="{{ tomo_object['files']['amira_hx'] }}">📄 Amira HX file</a></li>
+                        {% endif %}
+                        {% if 'amira_raw' in tomo_object['files'] %}
+                        <li class="mb-1"><a href="{{ tomo_object['files']['amira_raw'] }}">📦 Amira RAW file</a></li>
+                        {% endif %}
+                        {% if 'tomo_rec' in tomo_object['files'] %}
+                        <li class="mb-1"><a href="{{ tomo_object['files']['tomo_rec'] }}">💾 HDF5 full reconstruction</a></li>
+                        {% endif %}
+                    </ul>
+                    {% else %}
+                    <p class="text-muted small">Файлы не найдены</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        {# Полная информация об объекте #}
+        <div class="col-md-4 mb-3">
+            <div class="card shadow-sm h-100">
+                <div class="card-header thead-dark text-white"><strong>Полная информация</strong></div>
+                <div class="card-body p-0">
+                    <pre class="m-0 p-3" style="font-size: 0.75em; max-height: 400px; overflow-y: auto;">{{ tomo_object_str }}</pre>
+                </div>
+            </div>
+        </div>
+
     </div>
+</div>
 {% endblock %}
