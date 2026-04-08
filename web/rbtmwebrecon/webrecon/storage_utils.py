@@ -17,7 +17,7 @@ def get_reconstructed_files_list(experiment_id, is_local_ip):
         return res
     
     url_prefx = '' if is_local_ip else '.'
-    print(is_local_ip)
+    logging.debug(f'get_reconstructed_files_list: is_local_ip={is_local_ip}')
     if os.path.exists(os.path.join(app_tomo_data,'tomo.html')):
         res['tomo_preview'] =  url_prefx+'/static/tomo_data/' + experiment_id +'/tomo.html'
     
@@ -39,14 +39,19 @@ def get_reconstructed_files_list(experiment_id, is_local_ip):
 
 
 def get_tomoobject_info(experiment_id, is_local_ip):
-    exp_info = json.dumps(({"_id": experiment_id}))
-    experiment = requests.post(STORAGE_SERVER + 'storage/experiments/get',
-                               exp_info, timeout=1000)
-    experiment_info = json.loads(experiment.content)[0]
+    exp_info = json.dumps({"_id": experiment_id})
+    try:
+        experiment = requests.post(STORAGE_SERVER + 'storage/experiments/get',
+                                   exp_info, timeout=1000)
+        experiment_info = json.loads(experiment.content)[0]
+    except Exception as e:
+        logging.error(f'Ошибка при обращении к storage серверу для {experiment_id}: {e}')
+        return {'_id': experiment_id, 'specimen': '???', 'timestamp': 0,
+                'tomo_status': 'storage error', 'files': {}}
     tomo_status = tomo_queue.get_object_status(experiment_id)
     experiment_info['tomo_status'] = tomo_status
     experiment_info['files'] = get_reconstructed_files_list(experiment_id, is_local_ip)
-    return  experiment_info
+    return experiment_info
 
 def get_tomoobjects_list():
     # exp_info = json.dumps({'finished': True})
@@ -68,12 +73,16 @@ def get_tomoobjects_full_info():
 
     exp_info = json.dumps({})
     # [ДОБАВЛЕНО] Один HTTP-запрос вместо N — получаем все эксперименты сразу
-    experiment = requests.post(STORAGE_SERVER + 'storage/experiments/get',
-                               exp_info, timeout=1000)
+    try:
+        experiment = requests.post(STORAGE_SERVER + 'storage/experiments/get',
+                                   exp_info, timeout=1000)
+        experiments = json.loads(experiment.content)
+    except Exception as e:
+        logging.error(f'Ошибка при обращении к storage серверу: {e}')
+        return []
     t1 = time.time()
     logging.info(f'[PROFILE] HTTP запрос к storage: {t1 - t0:.3f}s')
 
-    experiments = json.loads(experiment.content)
     t2 = time.time()
     logging.info(f'[PROFILE] JSON парсинг ({len(experiments)} объектов): {t2 - t1:.3f}s')
 

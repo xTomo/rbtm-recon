@@ -32,7 +32,7 @@
                     </p>
                     <div class="d-flex flex-column" style="gap: 8px;">
                         {% if tomo_object['tomo_status'] != 'reconstructing' %}
-                        <form action='/reconstruct/{{ tomo_object["_id"] }}' method="GET">
+                        <form action='{{ url_for("reconstruct", to_id=tomo_object["_id"]) }}' method="GET">
                             <button type='submit' class="btn btn-primary btn-sm btn-block">
                                 🔄 Reconstruct it
                             </button>
@@ -40,17 +40,17 @@
                         {% else %}
                         <div class="alert alert-warning py-1 px-2 small">⏳ Реконструкция в процессе...</div>
                         {% endif %}
-                        <form action='/reset/{{ tomo_object["_id"] }}' method="GET">
+                        <form action='{{ url_for("reset", to_id=tomo_object["_id"]) }}' method="GET">
                             <button type='submit' class="btn btn-outline-secondary btn-sm btn-block">
                                 ↺ Reset status
                             </button>
                         </form>
-                        <form action='http://10.0.7.153:5550/copyfiles/{{ tomo_object["_id"] }}' method="GET">
+                        <form action='{{ url_for("copyfiles", to_id=tomo_object["_id"]) }}' method="GET">
                             <button type='submit' class="btn btn-outline-primary btn-sm btn-block">
                                 🚀 Send to reconstruction
                             </button>
                         </form>
-                        <a href="http://10.0.7.153:5551/tree/{{ tomo_object['_id'] }}"
+                        <a href="{{ jupyter_server }}/tree/{{ tomo_object['_id'] }}"
                            class="btn btn-outline-success btn-sm btn-block">
                             ⚙ Manual reconstruction
                         </a>

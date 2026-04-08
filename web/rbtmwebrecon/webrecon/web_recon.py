@@ -5,6 +5,7 @@ import time
 from flask import Flask, render_template, request, redirect
 from flask_restful import Resource, Api
 
+import conf
 import storage_utils
 import tomo_queue
 
@@ -15,12 +16,19 @@ logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 api = Api(app)
 
+
+@app.context_processor
+def inject_config():
+    """Передаёт переменные конфигурации во все шаблоны."""
+    return {'jupyter_server': conf.JUPYTER_SERVER}
+
+
 # [ДОБАВЛЕНО] Фильтр для перевода Unix timestamp в читаемую дату
 @app.template_filter('datetimeformat')
 def datetimeformat(value):
     try:
         return datetime.fromtimestamp(float(value)).strftime('%Y-%m-%d %H:%M')
-    except:
+    except Exception:
         return value
 
 
@@ -77,8 +85,7 @@ def view_tomo_objects():
 
 @app.route('/view/tomo_object/<to_id>')
 def view_tomo_object(to_id):
-    to = TomoObject()
-    tomo_object = to.get(to_id)
+    tomo_object = storage_utils.get_tomoobject_info(to_id, is_local_ip(request.remote_addr))
     return render_template('tomo_object.html',
                            tomo_object_str=pprint.pformat(tomo_object),
                            tomo_object=tomo_object)

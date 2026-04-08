@@ -51,17 +51,17 @@
                         <td>
                             {# [ДОБАВЛЕНО] Кнопки действий в виде btn-group #}
                             <div class="btn-group btn-group-sm" role="group">
-                                <form action='/reset/{{ tomo_object["_id"] }}' method="GET" class="d-inline">
+                                <form action='{{ url_for("reset", to_id=tomo_object["_id"]) }}' method="GET" class="d-inline">
                                     <button type='submit' class="btn btn-outline-secondary btn-sm" title="Сбросить статус">
                                         ↺ Reset
                                     </button>
                                 </form>
-                                <form action='/copyfiles/{{ tomo_object["_id"] }}' method="GET" class="d-inline ml-1">
+                                <form action='{{ url_for("copyfiles", to_id=tomo_object["_id"]) }}' method="GET" class="d-inline ml-1">
                                     <button type='submit' class="btn btn-outline-primary btn-sm" title="Отправить на реконструкцию">
                                         🚀 Send to reconstruction
                                     </button>
                                 </form>
-                                <a href="http://10.0.7.153:5551/tree/{{ tomo_object['_id'] }}"
+                                <a href="{{ jupyter_server }}/tree/{{ tomo_object['_id'] }}"
                                    class="btn btn-outline-success btn-sm ml-1" title="Ручная реконструкция">
                                     ⚙ Manual
                                 </a>
