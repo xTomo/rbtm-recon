@@ -8,10 +8,20 @@ from flask_restful import Resource, Api
 import storage_utils
 import tomo_queue
 
+from datetime import datetime
+
 logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
 api = Api(app)
+
+# [ДОБАВЛЕНО] Фильтр для перевода Unix timestamp в читаемую дату
+@app.template_filter('datetimeformat')
+def datetimeformat(value):
+    try:
+        return datetime.fromtimestamp(float(value)).strftime('%Y-%m-%d %H:%M')
+    except:
+        return value
 
 
 def is_local_ip(ip):
