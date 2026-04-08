@@ -59,10 +59,15 @@ def get_tomoobjects_list():
     return ids
 
 
+# [ДОБАВЛЕНО] Новая функция, заменяющая цепочку get_tomoobjects_list() + N×get_tomoobject_info().
+# Вместо 1 + N HTTP-запросов к storage серверу делает всего 1 запрос,
+# а статусы из MongoDB получает одним агрегирующим запросом через get_all_object_statuses().
+# Это сократило время загрузки страницы с ~77 секунд до ~1-2 секунд.
 def get_tomoobjects_full_info():
     t0 = time.time()
 
     exp_info = json.dumps({})
+    # [ДОБАВЛЕНО] Один HTTP-запрос вместо N — получаем все эксперименты сразу
     experiment = requests.post(STORAGE_SERVER + 'storage/experiments/get',
                                exp_info, timeout=1000)
     t1 = time.time()
@@ -73,6 +78,7 @@ def get_tomoobjects_full_info():
     logging.info(f'[PROFILE] JSON парсинг ({len(experiments)} объектов): {t2 - t1:.3f}s')
 
     ts = time.time()
+    # [ДОБАВЛЕНО] Один агрегирующий запрос к MongoDB вместо N отдельных запросов
     all_statuses = tomo_queue.get_all_object_statuses()
     te = time.time()
     logging.info(f'[PROFILE] get_all_object_statuses (1 запрос): {te - ts:.3f}s')

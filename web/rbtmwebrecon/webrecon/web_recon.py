@@ -45,12 +45,15 @@ api.add_resource(TomoObject, '/tomo_object/<to_id>')
 @app.route('/view/tomo_objects')
 def view_tomo_objects():
     t0 = time.time()
+    # [ДОБАВЛЕНО] Используем оптимизированную функцию: 1 HTTP-запрос + 1 запрос MongoDB
+    # вместо прежних 1 + N HTTP-запросов
     tomo_objects = storage_utils.get_tomoobjects_full_info()
     t1 = time.time()
     logging.info(f'[PROFILE] get_tomoobjects_full_info в view: {t1 - t0:.3f}s')
     tomo_objects.sort(key=lambda x: x['timestamp'], reverse=True)
 
     total = len(tomo_objects)
+    # [ДОБАВЛЕНО] Пагинация: показываем по 20 объектов на странице
     per_page = 20
     page = request.args.get('page', 1, type=int)
     total_pages = max(1, (total + per_page - 1) // per_page)
@@ -60,7 +63,7 @@ def view_tomo_objects():
     end = start + per_page
     page_objects = tomo_objects[start:end]
 
-    # Старейший объект = №1, новейший = №total
+    # [ДОБАВЛЕНО] Нумерация: старейший объект = №1, новейший = №total
     for i, obj in enumerate(page_objects):
         obj['number'] = total - (start + i)
 
