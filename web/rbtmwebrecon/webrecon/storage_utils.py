@@ -57,7 +57,7 @@ def get_tomoobjects_list():
     return ids
 
 
-def get_tomoobjects_full_info(is_local_ip):
+def get_tomoobjects_full_info():
     exp_info = json.dumps({})
     experiment = requests.post(STORAGE_SERVER + 'storage/experiments/get',
                                exp_info, timeout=1000)
