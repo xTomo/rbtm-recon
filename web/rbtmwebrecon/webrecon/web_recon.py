@@ -42,8 +42,26 @@ api.add_resource(TomoObject, '/tomo_object/<to_id>')
 def view_tomo_objects():
     tomo_objects = storage_utils.get_tomoobjects_full_info()
     tomo_objects.sort(key=lambda x: x['timestamp'], reverse=True)
+
+    total = len(tomo_objects)
+    per_page = 20
+    page = request.args.get('page', 1, type=int)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
+
+    start = (page - 1) * per_page
+    end = start + per_page
+    page_objects = tomo_objects[start:end]
+
+    # Старейший объект = №1, новейший = №total
+    for i, obj in enumerate(page_objects):
+        obj['number'] = total - (start + i)
+
     return render_template('tomo_objects.html',
-                           tomo_objects=tomo_objects)
+                           tomo_objects=page_objects,
+                           page=page,
+                           total_pages=total_pages,
+                           total=total)
 
 
 @app.route('/view/tomo_object/<to_id>')

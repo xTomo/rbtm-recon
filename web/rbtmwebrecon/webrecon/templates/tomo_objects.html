@@ -1,10 +1,12 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Tomo objects list</h1>
+<p>Всего объектов: {{ total }}</p>
 <div>
     <table class="table">
         {% for tomo_object in tomo_objects %}
             <tr>
+                <td>{{ tomo_object['number'] }}</td>
                 <td>
                     <a href="{{ url_for('view_tomo_object',to_id=tomo_object['_id']) }}">
                         {{ tomo_object['specimen'] }}
@@ -38,5 +40,21 @@
         </tr>
         {% endfor %}
     </table>
+
+    <nav>
+        <ul class="pagination">
+            <li class="page-item {% if page == 1 %}disabled{% endif %}">
+                <a class="page-link" href="{{ url_for('view_tomo_objects', page=page-1) }}">Назад</a>
+            </li>
+            {% for p in range(1, total_pages + 1) %}
+            <li class="page-item {% if p == page %}active{% endif %}">
+                <a class="page-link" href="{{ url_for('view_tomo_objects', page=p) }}">{{ p }}</a>
+            </li>
+            {% endfor %}
+            <li class="page-item {% if page == total_pages %}disabled{% endif %}">
+                <a class="page-link" href="{{ url_for('view_tomo_objects', page=page+1) }}">Вперёд</a>
+            </li>
+        </ul>
+    </nav>
 </div>
 {% endblock %}
