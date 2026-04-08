@@ -62,6 +62,16 @@ def get_logs(obj_id):
     return res
 
 
+def get_all_object_statuses():
+    """Возвращает словарь {obj_id: status} одним запросом к MongoDB."""
+    pipeline = [
+        {"$sort": {"date": DESCENDING}},
+        {"$group": {"_id": "$obj_id", "status": {"$first": "$status"}}}
+    ]
+    result = to.aggregate(pipeline)
+    return {doc['_id']: doc['status'] for doc in result}
+
+
 def get_last_n(n):
     objs = to.find().sort('date', DESCENDING).limit(n)
     return list(objs)

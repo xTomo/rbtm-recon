@@ -72,12 +72,13 @@ def get_tomoobjects_full_info():
     t2 = time.time()
     logging.info(f'[PROFILE] JSON парсинг ({len(experiments)} объектов): {t2 - t1:.3f}s')
 
-    for i, exp in enumerate(experiments):
-        ts = time.time()
-        exp['tomo_status'] = tomo_queue.get_object_status(exp['_id'])
-        te = time.time()
-        if te - ts > 0.1:
-            logging.info(f'[PROFILE] get_object_status({exp["_id"]}): {te - ts:.3f}s (медленно!)')
+    ts = time.time()
+    all_statuses = tomo_queue.get_all_object_statuses()
+    te = time.time()
+    logging.info(f'[PROFILE] get_all_object_statuses (1 запрос): {te - ts:.3f}s')
+
+    for exp in experiments:
+        exp['tomo_status'] = all_statuses.get(exp['_id'], 'hm... reconstruction not found...')
 
     t3 = time.time()
     logging.info(f'[PROFILE] Все статусы MongoDB: {t3 - t2:.3f}s')
