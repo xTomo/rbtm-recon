@@ -40,9 +40,7 @@ api.add_resource(TomoObject, '/tomo_object/<to_id>')
 @app.route('/')
 @app.route('/view/tomo_objects')
 def view_tomo_objects():
-    to_ids = TomoObjects()
-    to = TomoObject()
-    tomo_objects = [to.get(to_id) for to_id in to_ids.get()]
+    tomo_objects = storage_utils.get_tomoobjects_full_info()
     tomo_objects.sort(key=lambda x: x['timestamp'], reverse=True)
     return render_template('tomo_objects.html',
                            tomo_objects=tomo_objects)

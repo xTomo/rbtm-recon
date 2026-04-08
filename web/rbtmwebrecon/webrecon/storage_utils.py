@@ -54,4 +54,14 @@ def get_tomoobjects_list():
                                exp_info, timeout=1000)
     experiment_info = json.loads(experiment.content)
     ids = [x['_id'] for x in experiment_info]
-    return  ids
+    return ids
+
+
+def get_tomoobjects_full_info(is_local_ip):
+    exp_info = json.dumps({})
+    experiment = requests.post(STORAGE_SERVER + 'storage/experiments/get',
+                               exp_info, timeout=1000)
+    experiments = json.loads(experiment.content)
+    for exp in experiments:
+        exp['tomo_status'] = tomo_queue.get_object_status(exp['_id'])
+    return experiments
