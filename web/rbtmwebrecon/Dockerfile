@@ -28,7 +28,8 @@ COPY environment.yml /webrbtm/
 RUN /opt/conda/bin/conda env create -f environment.yml && /opt/conda/bin/conda clean -y --all 
 
 COPY . /webrbtm
-RUN echo "MONGODB_URI = 'mongodb://web_database_1:27017'" > /webrbtm/webrecon/conf.py
+RUN echo "MONGODB_URI = 'mongodb://web_database_1:27017'" > /webrbtm/webrecon/conf.py && \
+    echo "JUPYTER_SERVER = 'http://10.0.7.153:5551'" >> /webrbtm/webrecon/conf.py
 
 CMD bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xweb && \
            cd /webrbtm/webrecon/ && gunicorn  -t 600 -w 8 -b 0.0.0.0:5550 web_recon:app"

@@ -20,7 +20,8 @@ api = Api(app)
 @app.context_processor
 def inject_config():
     """Передаёт переменные конфигурации во все шаблоны."""
-    return {'jupyter_server': conf.JUPYTER_SERVER}
+    jupyter_server = getattr(conf, 'JUPYTER_SERVER', 'http://10.0.7.153:5551')
+    return {'jupyter_server': jupyter_server}
 
 
 # [ДОБАВЛЕНО] Фильтр для перевода Unix timestamp в читаемую дату
