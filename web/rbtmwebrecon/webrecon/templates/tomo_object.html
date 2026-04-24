@@ -45,11 +45,11 @@
                                 ↺ Reset status
                             </button>
                         </form>
-                        <form action='{{ url_for("copyfiles", to_id=tomo_object["_id"]) }}' method="GET">
+                        {# <form action='{{ url_for("copyfiles", to_id=tomo_object["_id"]) }}' method="GET">
                             <button type='submit' class="btn btn-outline-primary btn-sm btn-block">
                                 🚀 Send to reconstruction
                             </button>
-                        </form>
+                        </form> #}
                         <a href="{{ jupyter_server }}/tree/{{ tomo_object['_id'] }}"
                            class="btn btn-outline-success btn-sm btn-block">
                             ⚙ Manual reconstruction

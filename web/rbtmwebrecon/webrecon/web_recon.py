@@ -115,17 +115,11 @@ def reset(to_id):
 @app.route('/queue')
 def view_queue():
     queue = tomo_queue.get_waiting_queue()
-    # Подтягиваем имена объектов из storage
+    # Получаем все объекты одним запросом и строим словарь {id: specimen}
+    all_objects = storage_utils.get_tomoobjects_full_info()
+    specimen_map = {obj['_id']: obj.get('specimen', '???') for obj in all_objects}
     for item in queue:
-        try:
-            exp_info = json.dumps({"_id": item['obj_id']})
-            import requests as _requests
-            r = _requests.post(storage_utils.STORAGE_SERVER + 'storage/experiments/get',
-                               exp_info, timeout=5)
-            data = json.loads(r.content)
-            item['specimen'] = data[0].get('specimen', '???') if data else '???'
-        except Exception:
-            item['specimen'] = '???'
+        item['specimen'] = specimen_map.get(item['obj_id'], '???')
     return render_template('queue.html', queue=queue)
 
 
