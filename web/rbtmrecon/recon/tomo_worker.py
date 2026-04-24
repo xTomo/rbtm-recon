@@ -17,20 +17,25 @@ NOTEBOOK_NAME = 'reconstructor-axis_search3b.py'
 
 def _notebook_auto_run(notebook):
     """Execute a notebook via nbconvert and collect output.
+       Сначала конвертирует .py (jupytext) -> .ipynb, затем выполняет через nbconvert.
        :returns (parsed nb object, execution errors)
     """
+    # Шаг 1: конвертируем .py (jupytext-формат) в .ipynb
+    notebook_ipynb = notebook.replace('.py', '.ipynb')
+    args_jupytext = ["jupytext", "--to", "notebook", notebook, "--output", notebook_ipynb]
+    subprocess.check_call(args_jupytext)
 
-    path = notebook
+    # Шаг 2: выполняем .ipynb через nbconvert
     args = ["jupyter", "nbconvert", "--execute", "--allow-errors",
             "--ExecutePreprocessor.timeout=-1", "--NotebookApp.iopub_data_rate_limit=1.0e10",
-            "--to", "notebook", '--output', notebook, path]
+            "--to", "notebook", '--output', notebook_ipynb, notebook_ipynb]
     subprocess.check_call(args)
 
-    args = ["jupyter", "nbconvert", "--to", "html",
-            notebook]
+    # Шаг 3: конвертируем выполненный ноутбук в HTML
+    args = ["jupyter", "nbconvert", "--to", "html", notebook_ipynb]
     subprocess.check_call(args)
 
-    nb = nbformat.read(path, nbformat.current_nbformat)
+    nb = nbformat.read(notebook_ipynb, nbformat.current_nbformat)
     errors = [output for cell in nb.cells if "outputs" in cell
               for output in cell["outputs"]
               if output.output_type == "error"]
