@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container-fluid py-4">
+
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2 class="mb-0">📋 Очередь заданий
+            <span class="badge badge-warning text-dark ml-2" style="font-size:0.6em; vertical-align: middle;">
+                {{ queue|length }}
+            </span>
+        </h2>
+        {% if queue %}
+        <form action="{{ url_for('queue_cancel_all') }}" method="GET"
+              onsubmit="return confirm('Отменить все задания в очереди?');">
+            <button type="submit" class="btn btn-danger btn-sm">
+                🗑 Отменить все задания
+            </button>
+        </form>
+        {% endif %}
+    </div>
+
+    {% if queue %}
+    <div class="card shadow-sm">
+        <div class="card-body p-0">
+            <table class="table table-striped table-hover table-sm mb-0">
+                <thead class="thead-dark">
+                    <tr>
+                        <th style="width:40px">#</th>
+                        <th>Название</th>
+                        <th>ID объекта</th>
+                        <th>Действие</th>
+                        <th>Дата постановки</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for item in queue %}
+                <tr>
+                    <td class="text-muted">{{ loop.index }}</td>
+                    <td>
+                        <a href="{{ url_for('view_tomo_object', to_id=item['obj_id']) }}" class="font-weight-bold">
+                            {{ item['specimen'] }}
+                        </a>
+                    </td>
+                    <td><small class="text-muted">{{ item['obj_id'] }}</small></td>
+                    <td>
+                        <span class="badge badge-info">{{ item.get('action', '—') }}</span>
+                    </td>
+                    <td class="text-muted small">{{ item['date'] | datetimeformat }}</td>
+                    <td>
+                        <form action="{{ url_for('reset', to_id=item['obj_id']) }}" method="GET" class="d-inline">
+                            <button type="submit" class="btn btn-outline-danger btn-sm">✖ Отменить</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% else %}
+    <div class="alert alert-success">✅ Очередь пуста — нет заданий в статусе <strong>waiting</strong>.</div>
+    {% endif %}
+
+</div>
+{% endblock %}

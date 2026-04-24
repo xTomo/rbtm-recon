@@ -28,6 +28,8 @@ def inject_config():
 @app.template_filter('datetimeformat')
 def datetimeformat(value):
     try:
+        if isinstance(value, datetime):
+            return value.strftime('%Y-%m-%d %H:%M')
         return datetime.fromtimestamp(float(value)).strftime('%Y-%m-%d %H:%M')
     except Exception:
         return value
@@ -108,6 +110,29 @@ def copyfiles(to_id):
 def reset(to_id):
     tomo_queue.set_object_status(to_id, 'canceled')
     return redirect('/view/tomo_object/' + to_id)
+
+
+@app.route('/queue')
+def view_queue():
+    queue = tomo_queue.get_waiting_queue()
+    # Подтягиваем имена объектов из storage
+    for item in queue:
+        try:
+            exp_info = json.dumps({"_id": item['obj_id']})
+            import requests as _requests
+            r = _requests.post(storage_utils.STORAGE_SERVER + 'storage/experiments/get',
+                               exp_info, timeout=5)
+            data = json.loads(r.content)
+            item['specimen'] = data[0].get('specimen', '???') if data else '???'
+        except Exception:
+            item['specimen'] = '???'
+    return render_template('queue.html', queue=queue)
+
+
+@app.route('/queue/cancel_all')
+def queue_cancel_all():
+    tomo_queue.cancel_all_waiting()
+    return redirect('/queue')
 
 
 @app.route('/status/<int:n>')

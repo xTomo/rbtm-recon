@@ -75,6 +75,30 @@ def get_all_object_statuses():
     return {doc['_id']: doc['status'] for doc in result}
 
 
+def get_waiting_queue():
+    """Возвращает все задания со статусом 'waiting', отсортированные по дате (старые первые)."""
+    result = []
+    for obj in to.find({'status': 'waiting'}).sort('date', 1):
+        if 'action' not in obj:
+            continue
+        latest = get_object(obj['obj_id'])
+        if latest and latest['_id'] == obj['_id']:
+            result.append(obj)
+    return result
+
+
+def cancel_all_waiting():
+    """Отменяет все задания в очереди с статусом 'waiting'."""
+    waiting = get_waiting_queue()
+    for obj in waiting:
+        to.insert_one({
+            'obj_id': obj['obj_id'],
+            'status': 'canceled',
+            'date': __import__('datetime').datetime.now()
+        })
+    return len(waiting)
+
+
 def get_last_n(n):
     objs = to.find().sort('date', DESCENDING).limit(n)
     return list(objs)
