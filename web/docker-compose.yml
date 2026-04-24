@@ -40,6 +40,8 @@ services:
     container_name: web_reconstructor_jupyter_1
   web:
     build: rbtmwebrecon/
+    depends_on:
+      - database
     volumes:
       - /diskmnt/a/makov/robotom/:/webrbtm/webrecon/static/tomo_data
 #    restart: unless-stopped
