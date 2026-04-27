@@ -26,7 +26,9 @@ def put_object_rec_queue(obj_id, action='reconstruct'):
 
 def get_object(obj_id):
     try:
-        obj = to.find({'obj_id': obj_id}).sort('date', DESCENDING).limit(1)[0]
+        # Сортируем по _id (ObjectId, генерируется MongoDB) вместо date (datetime.now() клиента),
+        # чтобы избежать проблем с расхождением часов между контейнерами
+        obj = to.find({'obj_id': obj_id}).sort('_id', DESCENDING).limit(1)[0]
         return obj
     except:
         return None
