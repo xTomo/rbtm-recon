@@ -11,11 +11,17 @@ to = db['tomoobjects']
 
 
 def put_object_rec_queue(obj_id, action='reconstruct'):
+    # Защита от дублей: не добавляем задание, если объект уже в активном статусе
+    current_status = get_object_status(obj_id)
+    active_statuses = ('waiting', 'copying', 'reconstructing')
+    if any(s in current_status for s in active_statuses):
+        return False
     to.insert_one({'obj_id': obj_id,
                    'action': action,
                    'status': 'waiting',
                    'date': datetime.now()}
                   )
+    return True
 
 
 def get_object(obj_id):
