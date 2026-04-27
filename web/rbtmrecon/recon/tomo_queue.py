@@ -69,7 +69,7 @@ def get_rec_queue_next_obj():
 
 
 def get_logs(obj_id):
-    objs = to.find({'obj_id': obj_id}).sort('date', DESCENDING)
+    objs = to.find({'obj_id': obj_id}).sort('_id', DESCENDING)
     if objs is None:
         raise ValueError('Object not found: {}'.format(obj_id))
 
@@ -78,5 +78,5 @@ def get_logs(obj_id):
 
 
 def get_last_n(n):
-    objs = to.find().sort('date', DESCENDING).limit(n)
+    objs = to.find().sort('_id', DESCENDING).limit(n)
     return list(objs)

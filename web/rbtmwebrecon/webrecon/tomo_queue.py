@@ -76,7 +76,8 @@ def get_logs(obj_id):
 def get_all_object_statuses():
     """Возвращает словарь {obj_id: status} одним запросом к MongoDB."""
     pipeline = [
-        {"$sort": {"date": DESCENDING}},
+        # Сортируем по _id (ObjectId), а не по date — защита от расхождения часов контейнеров
+        {"$sort": {"_id": DESCENDING}},
         {"$group": {"_id": "$obj_id", "status": {"$first": "$status"}}}
     ]
     result = to.aggregate(pipeline)
@@ -86,7 +87,7 @@ def get_all_object_statuses():
 def get_waiting_queue():
     """Возвращает все задания со статусом 'waiting', отсортированные по дате (старые первые)."""
     result = []
-    for obj in to.find({'status': 'waiting'}).sort('date', 1):
+    for obj in to.find({'status': 'waiting'}).sort('_id', 1):
         if 'action' not in obj:
             continue
         latest = get_object(obj['obj_id'])
