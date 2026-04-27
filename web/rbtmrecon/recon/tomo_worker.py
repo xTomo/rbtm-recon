@@ -48,14 +48,16 @@ def reconstruct(obj):
     set_object_status(obj_id, 'reconstructing')
     logging.info('Start reconstructing: {}'.format(obj_id))
 
-    out_dir = copy_python_files(obj_id, storage_dir)
-
-    nb, errors = _notebook_auto_run(os.path.join(out_dir, NOTEBOOK_NAME))
-    for e in errors:
-        logging.info(e)
-
-    logging.info('Finish reconstructing: {}'.format(obj_id))
-    set_object_status(obj_id, 'done')
+    try:
+        out_dir = copy_python_files(obj_id, storage_dir)
+        nb, errors = _notebook_auto_run(os.path.join(out_dir, NOTEBOOK_NAME))
+        for e in errors:
+            logging.info(e)
+        logging.info('Finish reconstructing: {}'.format(obj_id))
+        set_object_status(obj_id, 'done')
+    except Exception as e:
+        logging.error('Error reconstructing {}: {}'.format(obj_id, e), exc_info=True)
+        set_object_status(obj_id, 'error: {}'.format(str(e)[:200]))
 
 
 def copyfiles(obj):
@@ -64,10 +66,13 @@ def copyfiles(obj):
     set_object_status(obj_id, 'copying')
     logging.info('Start copying files: {}'.format(obj_id))
 
-    out_dir = copy_python_files(obj_id, storage_dir)
-
-    logging.info('Finish copying: {}'.format(obj_id))
-    set_object_status(obj_id, 'done')
+    try:
+        out_dir = copy_python_files(obj_id, storage_dir)
+        logging.info('Finish copying: {}'.format(obj_id))
+        set_object_status(obj_id, 'done')
+    except Exception as e:
+        logging.error('Error copying files for {}: {}'.format(obj_id, e), exc_info=True)
+        set_object_status(obj_id, 'error: {}'.format(str(e)[:200]))
 
 
 def copy_python_files(obj_id, storage_dir):
