@@ -130,14 +130,14 @@ ff = ipywidgets.interact_manual(show_frames_with_border, data_images=ipywidgets.
                                 )
 
 # %%
-try: 
+try:
     if 'x_min' in ff.widget.kwargs:
         x_min = ff.widget.kwargs['x_min']
         x_max = ff.widget.kwargs['x_max']
         y_min = ff.widget.kwargs['y_min']
         y_max = ff.widget.kwargs['y_max']
-except:
-    pass
+except AttributeError:
+    pass  # ff.widget.kwargs недоступен — используем значения по умолчанию
     
 x_min = int(x_min); x_max = int(x_max); y_min = int(y_min); y_max = int(y_max); 
 
@@ -189,7 +189,7 @@ from tomo.remove_stripe import remove_stripe_ti, remove_all_stripe
 import cupy as cp
 import cupyx.scipy.ndimage as cndi
 
-def transfrom_image(im, shift_x, angle):
+def transform_image(im, shift_x, angle):
     imcu = cp.asarray(im)
     imcu = cndi.shift(imcu, [0, shift_x], order=3, mode='nearest')
     imcu = cndi.rotate(imcu, angle, order=3, reshape=False, mode='nearest')
@@ -212,7 +212,7 @@ def loss(im):
 
 def objective_function(shift_angle, img0, img1):
     shift, angle = shift_angle
-    tmp_im = transfrom_image(im0, shift, angle) - transfrom_image(im1, -shift, -angle)
+    tmp_im = transform_image(img0, shift, angle) - transform_image(img1, -shift, -angle)
     return loss(tmp_im)
     
 
@@ -233,7 +233,7 @@ shift_x, angle = result.x
 
 print(shift_x,  angle)
 
-tmp_im = transfrom_image(im0, shift_x, angle) - transfrom_image(im1, -shift_x, -angle)
+tmp_im = transform_image(im0, shift_x, angle) - transform_image(im1, -shift_x, -angle)
 
 plt.figure()
 plt.imshow(tmp_im, cmap=plt.cm.seismic)
@@ -257,7 +257,7 @@ sinogram_fixed = np.zeros((data_images_crop.shape[1],
                          dtype='float32')
 
 for i in tqdm(range(data_images_crop.shape[0])):
-    sinogram_fixed[:,i,:] = transfrom_image(data_images_crop[i], shift_x, alfa)
+    sinogram_fixed[:,i,:] = transform_image(data_images_crop[i], shift_x, alfa)
 
 preview_axis_correction(sinogram_fixed, data_angles, remove_rings=True)
 manual_axis_search = False
@@ -274,8 +274,8 @@ ang_0, ang_180 = data_angles[p_0], data_angles[p_180]
 im_0, im_180 = data_images_crop[p_0],data_images_crop[p_180]
 
 def find_shift_angle(shift, angle):
-    t_im_0 = transfrom_image(im_0, shift, angle)
-    t_im_180 = transfrom_image(im_180, shift, angle)
+    t_im_0 = transform_image(im_0, shift, angle)
+    t_im_180 = transform_image(im_180, shift, angle)
 
     # t_im_0 = fix_porj(t_im_0)
     # t_im_180 = fix_porj(t_im_180)
@@ -290,7 +290,7 @@ def find_shift_angle(shift, angle):
     plt.show()
  
     for i in tqdm(range(data_images_crop.shape[0])):
-        sinogram_fixed[:,i,:] = transfrom_image(data_images_crop[i], shift, angle)
+        sinogram_fixed[:,i,:] = transform_image(data_images_crop[i], shift, angle)
     
     preview_axis_correction(sinogram_fixed, data_angles, remove_rings=True)
 
@@ -347,7 +347,7 @@ if manual_axis_search:
     shift_x, alfa = shift_text.value, angle_text.value
 
     for i in tqdm(range(data_images_crop.shape[0])):
-        sinogram_fixed[:,i,:] = transfrom_image(data_images_crop[i], shift_x, alfa)
+        sinogram_fixed[:,i,:] = transform_image(data_images_crop[i], shift_x, alfa)
     preview_axis_correction(sinogram_fixed, data_angles)
 
 recon_config['axis_corr'] = {'shift_x': shift_x,
@@ -422,48 +422,48 @@ recon_config
 #                        compression='lzf')
 #     recursively_save_dict_contents_to_group(h5f, '/recon_config/', recon_config)
 
-# %%
-import k3d
-# %%
-resize = int(np.power(np.prod(rec_vol.shape) / 1e7, 1. / 3))
-print(resize)
-small_rec = reshape_volume(rec_vol, 10)
+# # %%
+# import k3d
+# # %%
+# resize = int(np.power(np.prod(rec_vol.shape) / 1e7, 1. / 3))
+# print(resize)
+# small_rec = reshape_volume(rec_vol, 10)
 
-# %%
-volume = k3d.volume(
-    small_rec.astype(np.float32),
-    #     alpha_coef=1000,
-    #     shadow='dynamic',
-    #     samples=600,
-    #     shadow_res=128,
-    #     shadow_delay=50,
-    color_range=[np.percentile(small_rec, 10), np.percentile(small_rec, 99.9)],
-    color_map=(np.array(k3d.colormaps.matplotlib_color_maps.jet).reshape(-1, 4)).astype(np.float32),
-    compression_level=4
-)
-size = small_rec.shape
-volume.transform.bounds = [-size[2] / 2, size[2] / 2,
-                           -size[1] / 2, size[1] / 2,
-                           -size[0] / 2, size[0] / 2]
+# # %%
+# volume = k3d.volume(
+#     small_rec.astype(np.float32),
+#     #     alpha_coef=1000,
+#     #     shadow='dynamic',
+#     #     samples=600,
+#     #     shadow_res=128,
+#     #     shadow_delay=50,
+#     color_range=[np.percentile(small_rec, 10), np.percentile(small_rec, 99.9)],
+#     color_map=(np.array(k3d.colormaps.matplotlib_color_maps.jet).reshape(-1, 4)).astype(np.float32),
+#     compression_level=4
+# )
+# size = small_rec.shape
+# volume.transform.bounds = [-size[2] / 2, size[2] / 2,
+#                            -size[1] / 2, size[1] / 2,
+#                            -size[0] / 2, size[0] / 2]
 
-plot = k3d.plot(camera_auto_fit=True)
-plot += volume
-plot.lighting = 2
-plot.display()
+# plot = k3d.plot(camera_auto_fit=True)
+# plot += volume
+# plot.lighting = 2
+# plot.display()
 
-# %%
-plot.fetch_snapshot()
-with open('./tomo_3d.html', 'w') as fp:
-    fp.write(plot.snapshot)
+# # %%
+# plot.fetch_snapshot()
+# with open('./tomo_3d.html', 'w') as fp:
+#     fp.write(plot.snapshot)
 
-# %%
-cfg = configparser.ConfigParser()
-for key in ['roi', 'corr','axis_corr']:
-    if key in recon_config:
-        cfg[key] = recon_config[key]
+# # %%
+# cfg = configparser.ConfigParser()
+# for key in ['roi', 'corr','axis_corr']:
+#     if key in recon_config:
+#         cfg[key] = recon_config[key]
 
-with open(os.path.join(tmp_dir, 'rec_config.ini'), 'w') as configfile:
-    cfg.write(configfile)
+# with open(os.path.join(tmp_dir, 'rec_config.ini'), 'w') as configfile:
+#     cfg.write(configfile)
 
 # %%
 # os.path.join(tmp_dir, 'rec_config.ini')

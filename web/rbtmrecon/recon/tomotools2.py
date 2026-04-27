@@ -53,6 +53,7 @@ def get_experiment_hdf5(experiment_id, output_dir, experiment_files_dir=None, st
         logging.info('Downloading file: {}'.format(hdf5_url))
 
         remaining_download_tries = 5
+        last_exception = None
 
         while remaining_download_tries > 0:
             try:
@@ -60,12 +61,17 @@ def get_experiment_hdf5(experiment_id, output_dir, experiment_files_dir=None, st
                 logging.info('Successfully downloaded: {}'.format(hdf5_url))
                 time.sleep(0.1)
             except Exception as e:
+                last_exception = e
                 logging.warning("error downloading {}  on trial no {}: {}".format(
                     hdf5_url, 6 - remaining_download_tries, e))
                 remaining_download_tries = remaining_download_tries - 1
                 continue
             else:
                 break
+        else:
+            raise RuntimeError(
+                'Failed to download {} after 5 attempts'.format(hdf5_url)
+            ) from last_exception
     else:
         # copy local file
         src_file = os.path.join(experiment_files_dir, experiment_id + '.h5')
@@ -103,12 +109,14 @@ def persistent_array(data_file, shape, dtype, force_create=True):
             res = np.memmap(data_file, dtype=dtype, mode='r+', shape=mm_shape)
             logging.info('Loading existing file: {}'.format(data_file))
             return res, True
-        elif (np.array(shape) == mm_shape).all():
+        elif (mm_shape is not None) and (shape is not None) and \
+                (len(shape) == len(mm_shape)) and \
+                all(int(a) == int(b) for a, b in zip(shape, mm_shape)):
             res = np.memmap(data_file, dtype=dtype, mode='r+', shape=shape)
             logging.info('Loading existing file: {}'.format(data_file))
             return res, True
         else:
-            logging.info('Shape missmatch.')
+            logging.info('Shape mismatch: expected {}, found {}'.format(shape, mm_shape))
 
     logging.info('Creating new file: {}'.format(data_file))
     res = np.memmap(data_file, dtype=dtype, mode='w+', shape=shape)
@@ -132,23 +140,68 @@ def persistent_array(data_file, shape, dtype, force_create=True):
 #         return res, True
 
 
-def get_frame_group(data_file, group_name, mmap_file_dir):
-    with h5py.File(data_file, 'r') as h5f:
-        images_count = len(h5f[group_name])
-        images = None
-        file_number = 0
-        angles = None
-        for k, v in tqdm(h5f[group_name].items()):
-            if images is None:
-                images = np.zeros((images_count, v.shape[0], v.shape[1]), dtype='float32')
-            if angles is None:
-                angles = np.zeros((images_count, ), dtype='float32')
+def get_frame_group(data_file, group_name, mmap_file_dir, num_workers=8,
+                    hdf5_cache_mb=512):
+    """Загружает группу кадров из HDF5-файла.
 
-            attributes = json.loads(v.attrs[list(v.attrs)[0]])[0]
-            angles[file_number] = attributes['frame']['object']['angle position']
-            # tmp_image = np.rot90(v[()])
-            images[file_number] = v[()]
-            file_number = file_number + 1
+    Параметры
+    ----------
+    data_file : str
+        Путь к HDF5-файлу.
+    group_name : str
+        Имя группы ('empty', 'dark', 'data' и т.д.).
+    mmap_file_dir : str
+        Каталог для временных mmap-файлов (не используется, сохранён для совместимости).
+    num_workers : int
+        Количество потоков для параллельного чтения (0 — без параллелизма).
+    hdf5_cache_mb : int
+        Размер chunk-кэша HDF5 в мегабайтах.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    rdcc_nbytes = hdf5_cache_mb * 1024 * 1024
+
+    # --- Первый проход: метаданные (быстро, один файловый дескриптор) ---
+    with h5py.File(data_file, 'r', rdcc_nbytes=rdcc_nbytes) as h5f:
+        group = h5f[group_name]
+        keys = list(group.keys())          # стабильный порядок, один вызов
+        images_count = len(keys)
+
+        first_ds = group[keys[0]]
+        frame_h, frame_w = first_ds.shape
+        attr_key = list(first_ds.attrs)[0]  # имя атрибута — одинаково для всей группы
+
+        # Pre-allocate: np.empty быстрее np.zeros (не обнуляет память)
+        angles = np.empty((images_count,), dtype='float32')
+
+        for i, k in enumerate(keys):
+            ds = group[k]
+            attributes = json.loads(ds.attrs[attr_key])[0]
+            angles[i] = attributes['frame']['object']['angle position']
+
+    images = np.empty((images_count, frame_h, frame_w), dtype='float32')
+
+    # --- Второй проход: параллельное чтение пикселей ---
+    def _read_one(args):
+        idx, key = args
+        # Каждый поток открывает свой дескриптор — безопасно для HDF5 в режиме 'r'
+        with h5py.File(data_file, 'r', rdcc_nbytes=rdcc_nbytes) as f:
+            images[idx] = f[group_name][key][()]
+
+    if num_workers > 1:
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            list(tqdm(
+                pool.map(_read_one, enumerate(keys)),
+                total=images_count,
+                desc=group_name,
+            ))
+    else:
+        # Однопоточный fallback (один открытый файл — меньше overhead)
+        with h5py.File(data_file, 'r', rdcc_nbytes=rdcc_nbytes) as h5f:
+            group = h5f[group_name]
+            for i, k in enumerate(tqdm(keys, desc=group_name)):
+                images[i] = group[k][()]
+
     return images, angles
 
 
@@ -291,7 +344,7 @@ def group_data(data_images, data_angles, mmap_file_dir):
 def correct_rings(sino0, level):
     def get_my_b(level):
         t = np.mean(sino0, axis=0)
-        gt = scipy.ndimage.filters.gaussian_filter1d(t, level / 2.)
+        gt = scipy.ndimage.gaussian_filter1d(t, level / 2.)
         return gt - t
 
     def get_my_a(level):
@@ -414,6 +467,8 @@ def save_amira(in_array, out_path, name, reshape=3, pixel_size=9.0e-3):
         file_shape = in_array.shape
         shape_str = f'{file_shape[0]}_{file_shape[1]}_{file_shape[2]}'
         out_name = f'{name}.{shape_str}.{reshape}.raw'
+        # with open(os.path.join(data_path, out_name), 'wb') as amira_file:
+        #     in_array.tofile(amira_file)
             
     with open(os.path.join(data_path, f'tomo.{name}.{reshape}.hx'), 'w') as af:
         af.write('# Amira Script\n')
@@ -493,9 +548,9 @@ def recursively_load_dict_contents_from_group(h5file, path):
     """
     ans = {}
     for key, item in h5file[path].items():
-        if isinstance(item, h5py._hl.dataset.Dataset):
-            ans[key] = item.value
-        elif isinstance(item, h5py._hl.group.Group):
+        if isinstance(item, h5py.Dataset):
+            ans[key] = item[()]
+        elif isinstance(item, h5py.Group):
             ans[key] = recursively_load_dict_contents_from_group(h5file, path + key + '/')
     return ans
 
@@ -506,7 +561,7 @@ def find_roi(data_images, empty_beam, data_angles):
     x_mins = []
     x_maxs = []
     y_mins = []
-    y_maxs = [te.shape[1]]
+    y_maxs = []
     for ia in tqdm(np.argsort(data_angles)[::len(data_angles) // 8]):
         td = np.asarray(data_images[ia])
         td[td < 1] = 1
