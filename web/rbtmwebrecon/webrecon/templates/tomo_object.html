@@ -29,7 +29,7 @@
         {# Статус и действия #}
         <div class="col-md-4 mb-3">
             <div class="card shadow-sm h-100">
-                <div class="card-header thead-dark text-white"><strong>Статус и действия</strong></div>
+                <div class="card-header bg-dark text-white"><strong>Статус и действия</strong></div>
                 <div class="card-body">
                     <p>
                         <strong>Статус: </strong>
@@ -67,7 +67,7 @@
         {# Файлы #}
         <div class="col-md-4 mb-3">
             <div class="card shadow-sm h-100">
-                <div class="card-header thead-dark text-white"><strong>Файлы</strong></div>
+                <div class="card-header bg-dark text-white"><strong>Файлы</strong></div>
                 <div class="card-body" style="overflow-y: auto; max-height: 400px;">
                     {% if files_tree %}
                         {{ render_tree(files_tree) }}
@@ -81,7 +81,7 @@
         {# Полная информация об объекте #}
         <div class="col-md-4 mb-3">
             <div class="card shadow-sm h-100">
-                <div class="card-header thead-dark text-white"><strong>Полная информация</strong></div>
+                <div class="card-header bg-dark text-white"><strong>Полная информация</strong></div>
                 <div class="card-body p-0">
                     <pre class="m-0 p-3" style="font-size: 0.75em; max-height: 400px; overflow-y: auto;">{{ tomo_object_str }}</pre>
                 </div>
