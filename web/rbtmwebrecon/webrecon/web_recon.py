@@ -88,10 +88,13 @@ def view_tomo_objects():
 
 @app.route('/view/tomo_object/<to_id>')
 def view_tomo_object(to_id):
-    tomo_object = storage_utils.get_tomoobject_info(to_id, is_local_ip(request.remote_addr))
+    local = is_local_ip(request.remote_addr)
+    tomo_object = storage_utils.get_tomoobject_info(to_id, local)
+    files_tree = storage_utils.get_files_tree(to_id, local)
     return render_template('tomo_object.html',
                            tomo_object_str=pprint.pformat(tomo_object),
-                           tomo_object=tomo_object)
+                           tomo_object=tomo_object,
+                           files_tree=files_tree)
 
 
 @app.route('/reconstruct/<to_id>')

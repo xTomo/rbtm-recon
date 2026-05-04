@@ -1,4 +1,18 @@
 {% extends "base.html" %}
+{% macro render_tree(nodes) %}
+<ul class="list-unstyled mb-0 pl-3">
+    {% for node in nodes %}
+    <li>
+        {% if node.type == 'dir' %}
+            <span class="text-secondary">📁 {{ node.name }}/</span>
+            {{ render_tree(node.children) }}
+        {% else %}
+            <a href="{{ node.url }}">📄 {{ node.name }}</a>
+        {% endif %}
+    </li>
+    {% endfor %}
+</ul>
+{% endmacro %}
 {% block content %}
 <div class="container-fluid py-4">
 
@@ -36,15 +50,15 @@
                                 📋 Copy files to reconstruction
                             </button>
                         </form>
+                        <a href="{{ jupyter_server }}/tree/{{ tomo_object['_id'] }}"
+                           class="btn btn-outline-success btn-sm btn-block">
+                            ⚙ Manual reconstruction
+                        </a>
                         <form action='{{ url_for("reset", to_id=tomo_object["_id"]) }}' method="GET">
                             <button type='submit' class="btn btn-outline-secondary btn-sm btn-block">
                                 ↺ Reset status
                             </button>
                         </form>
-                        <a href="{{ jupyter_server }}/tree/{{ tomo_object['_id'] }}"
-                           class="btn btn-outline-success btn-sm btn-block">
-                            ⚙ Manual reconstruction
-                        </a>
                     </div>
                 </div>
             </div>
@@ -54,26 +68,9 @@
         <div class="col-md-4 mb-3">
             <div class="card shadow-sm h-100">
                 <div class="card-header thead-dark text-white"><strong>Файлы</strong></div>
-                <div class="card-body">
-                    {% if tomo_object['files'] %}
-                    <ul class="list-unstyled mb-0">
-                        {% if 'tomo_reports' in tomo_object['files'] %}
-                            {% for tr in tomo_object['files']['tomo_reports'] %}
-                            <li class="mb-1">
-                                <a href="{{ tr }}">📊 Reconstruction report: {{ tr.split('/')[-1] }}</a>
-                            </li>
-                            {% endfor %}
-                        {% endif %}
-                        {% if 'amira_hx' in tomo_object['files'] %}
-                        <li class="mb-1"><a href="{{ tomo_object['files']['amira_hx'] }}">📄 Amira HX file</a></li>
-                        {% endif %}
-                        {% if 'amira_raw' in tomo_object['files'] %}
-                        <li class="mb-1"><a href="{{ tomo_object['files']['amira_raw'] }}">📦 Amira RAW file</a></li>
-                        {% endif %}
-                        {% if 'tomo_rec' in tomo_object['files'] %}
-                        <li class="mb-1"><a href="{{ tomo_object['files']['tomo_rec'] }}">💾 HDF5 full reconstruction</a></li>
-                        {% endif %}
-                    </ul>
+                <div class="card-body" style="overflow-y: auto; max-height: 400px;">
+                    {% if files_tree %}
+                        {{ render_tree(files_tree) }}
                     {% else %}
                     <p class="text-muted small">Файлы не найдены</p>
                     {% endif %}

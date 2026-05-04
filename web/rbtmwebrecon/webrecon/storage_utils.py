@@ -38,6 +38,35 @@ def get_reconstructed_files_list(experiment_id, is_local_ip):
     return res
 
 
+def get_files_tree(experiment_id, is_local_ip):
+    """Рекурсивно обходит директорию эксперимента и возвращает дерево файлов."""
+    app_root = os.path.dirname(os.path.abspath(__file__))
+    base_dir = os.path.join(app_root, 'static', 'tomo_data', experiment_id)
+    url_prefix = '' if is_local_ip else '.'
+
+    if not os.path.isdir(base_dir):
+        return None
+
+    def build_tree(path, rel_path=''):
+        entries = []
+        try:
+            items = sorted(os.listdir(path))
+        except PermissionError:
+            return entries
+        for item in items:
+            item_path = os.path.join(path, item)
+            item_rel = (rel_path + '/' + item) if rel_path else item
+            if os.path.isdir(item_path):
+                children = build_tree(item_path, item_rel)
+                entries.append({'name': item, 'type': 'dir', 'children': children})
+            else:
+                url = url_prefix + '/static/tomo_data/' + experiment_id + '/' + item_rel
+                entries.append({'name': item, 'type': 'file', 'url': url})
+        return entries
+
+    return build_tree(base_dir)
+
+
 def get_tomoobject_info(experiment_id, is_local_ip):
     exp_info = json.dumps({"_id": experiment_id})
     try:
