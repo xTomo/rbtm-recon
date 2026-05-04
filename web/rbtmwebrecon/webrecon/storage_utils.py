@@ -38,11 +38,16 @@ def get_reconstructed_files_list(experiment_id, is_local_ip):
     return res
 
 
+EXCLUDED_NAMES = {'__pycache__', '.git', '.ipynb_checkpoints'}
+
+
 def get_files_tree(experiment_id, is_local_ip):
     """Рекурсивно обходит директорию эксперимента и возвращает дерево файлов."""
     app_root = os.path.dirname(os.path.abspath(__file__))
     base_dir = os.path.join(app_root, 'static', 'tomo_data', experiment_id)
     url_prefix = '' if is_local_ip else '.'
+
+    logging.info(f'[FILES_TREE] base_dir={base_dir} exists={os.path.isdir(base_dir)}')
 
     if not os.path.isdir(base_dir):
         return None
@@ -54,6 +59,8 @@ def get_files_tree(experiment_id, is_local_ip):
         except PermissionError:
             return entries
         for item in items:
+            if item in EXCLUDED_NAMES:
+                continue
             item_path = os.path.join(path, item)
             item_rel = (rel_path + '/' + item) if rel_path else item
             if os.path.isdir(item_path):
@@ -64,7 +71,9 @@ def get_files_tree(experiment_id, is_local_ip):
                 entries.append({'name': item, 'type': 'file', 'url': url})
         return entries
 
-    return build_tree(base_dir)
+    tree = build_tree(base_dir)
+    logging.info(f'[FILES_TREE] result entries count={len(tree)}')
+    return tree if tree else None
 
 
 def get_tomoobject_info(experiment_id, is_local_ip):
