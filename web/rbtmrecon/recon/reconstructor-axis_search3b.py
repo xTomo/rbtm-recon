@@ -34,14 +34,20 @@ display(HTML("""
 .jp-Cell.jp-mod-outputsScrolled .jp-Cell-outputWrapper {
     max-height: none !important;
     overflow: visible !important;
+    box-shadow: none !important;
 }
 .jp-Cell-outputWrapper {
     max-height: none !important;
     overflow: visible !important;
+    box-shadow: none !important;
 }
 .jp-OutputArea {
     max-height: none !important;
     overflow: visible !important;
+}
+.widget-output {
+    border: none !important;
+    box-shadow: none !important;
 }
 </style>
 """))
