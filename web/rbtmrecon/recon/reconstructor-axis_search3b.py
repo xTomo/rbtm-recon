@@ -31,8 +31,18 @@
 from IPython.display import display, HTML
 display(HTML("""
 <style>
-.jp-OutputArea-output { max-height: none !important; }
-.jp-OutputArea { overflow: visible !important; }
+.jp-Cell.jp-mod-outputsScrolled .jp-Cell-outputWrapper {
+    max-height: none !important;
+    overflow: visible !important;
+}
+.jp-Cell-outputWrapper {
+    max-height: none !important;
+    overflow: visible !important;
+}
+.jp-OutputArea {
+    max-height: none !important;
+    overflow: visible !important;
+}
 </style>
 """))
 
