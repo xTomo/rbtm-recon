@@ -278,11 +278,7 @@ def show_alignment(shift, angle):
     t_im_0 = transform_image(im_0, shift, angle)
     t_im_180 = transform_image(im_180, shift, angle)
 
-    h, w = t_im_0.shape
-    dpi = 100
-    fig_w = max(12, 2 * w / dpi + 2)
-    fig_h = max(6, h / dpi + 1)
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(fig_w, fig_h))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 8))
 
     im1 = ax1.imshow(t_im_0 - np.fliplr(t_im_180), cmap=plt.cm.seismic)
     fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
@@ -339,8 +335,7 @@ btn_apply = widgets.Button(
     description='Применить + реконструкция', button_style='primary',
     layout=widgets.Layout(width='250px')
 )
-# min_height предотвращает схлопывание области при вычислении
-output = widgets.Output(layout=widgets.Layout(min_height='500px'))
+output = widgets.Output()
 
 
 def on_show_click(b):
