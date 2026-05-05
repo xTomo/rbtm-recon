@@ -28,28 +28,30 @@
 
 # %%
 # Отключаем сворачивание вывода при большом количестве изображений
-from IPython.display import display, HTML
-display(HTML("""
-<style>
-.jp-Cell.jp-mod-outputsScrolled .jp-Cell-outputWrapper {
-    max-height: none !important;
-    overflow: visible !important;
-    box-shadow: none !important;
-}
-.jp-Cell-outputWrapper {
-    max-height: none !important;
-    overflow: visible !important;
-    box-shadow: none !important;
-}
-.jp-OutputArea {
-    max-height: none !important;
-    overflow: visible !important;
-}
-.widget-output {
-    border: none !important;
-    box-shadow: none !important;
-}
-</style>
+from IPython.display import display, Javascript
+display(Javascript("""
+    // Инжектируем CSS в <head> страницы (работает глобально, не только в output-area)
+    var style = document.createElement('style');
+    style.id = 'disable-output-scroll';
+    style.textContent = [
+        '.jp-Cell.jp-mod-outputsScrolled .jp-Cell-outputWrapper {',
+        '    max-height: none !important;',
+        '    overflow: visible !important;',
+        '    box-shadow: none !important;',
+        '}',
+        '.jp-mod-outputsScrolled .jp-OutputArea {',
+        '    max-height: none !important;',
+        '    overflow: visible !important;',
+        '}'
+    ].join('\\n');
+    var existing = document.getElementById('disable-output-scroll');
+    if (existing) existing.remove();
+    document.head.appendChild(style);
+
+    // Убираем класс у всех уже свёрнутых ячеек
+    document.querySelectorAll('.jp-Cell.jp-mod-outputsScrolled').forEach(function(el) {
+        el.classList.remove('jp-mod-outputsScrolled');
+    });
 """))
 
 # %%
