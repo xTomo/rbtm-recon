@@ -273,46 +273,44 @@ p_180 = get_angles_at_180_deg(data_angles)[1][0]
 ang_0, ang_180 = data_angles[p_0], data_angles[p_180]
 im_0, im_180 = data_images_crop[p_0],data_images_crop[p_180]
 
-def find_shift_angle(shift, angle):
+def show_alignment(shift, angle):
+    """Быстрый просмотр совмещения: только 2 кадра (0° и 180°)."""
     t_im_0 = transform_image(im_0, shift, angle)
     t_im_180 = transform_image(im_180, shift, angle)
 
-    # t_im_0 = fix_porj(t_im_0)
-    # t_im_180 = fix_porj(t_im_180)
-    
-    plt.figure(figsize = (12,8))
+    plt.figure(figsize=(12, 8))
     plt.subplot(121)
-    plt.imshow(t_im_0-np.fliplr(t_im_180), cmap=plt.cm.seismic)
+    plt.imshow(t_im_0 - np.fliplr(t_im_180), cmap=plt.cm.seismic)
     plt.colorbar(orientation='vertical')
     plt.subplot(122)
     plt.imshow(t_im_0, cmap=plt.cm.viridis)
     plt.colorbar(orientation='vertical')
     plt.show()
- 
+
+
+def apply_and_reconstruct(shift, angle):
+    """Медленная часть: заполнение всего синограма и предпросмотр реконструкции."""
     for i in tqdm(range(data_images_crop.shape[0])):
-        sinogram_fixed[:,i,:] = transform_image(data_images_crop[i], shift, angle)
-    
+        sinogram_fixed[:, i, :] = transform_image(data_images_crop[i], shift, angle)
+
     preview_axis_correction(sinogram_fixed, data_angles, remove_rings=True)
 
-# ff = ipywidgets.interact_manual(find_shift_angle, 
-#                                 shift=ipywidgets.FloatSlider(min=-200, max=200, step=0.05, value=shift_x, readout_format='.2f',),
-#                                 angle=ipywidgets.FloatSlider(min=-3., max=3, step=0.001, value=alfa, readout_format='.3f',),
-#                                 )
 
 import ipywidgets as widgets
 from IPython.display import display
+
 # Создаем виджеты
 shift_slider = widgets.FloatSlider(
-    min=-200, max=200, step=0.05, value=shift_x, 
+    min=-200, max=200, step=0.05, value=shift_x,
     description='Shift:', layout=widgets.Layout(width='400px')
 )
 shift_text = widgets.FloatText(
-    value=shift_x, step=0.05, 
+    value=shift_x, step=0.05,
     layout=widgets.Layout(width='100px')
 )
 
 angle_slider = widgets.FloatSlider(
-    min=-3., max=3, step=0.001, value=alfa, 
+    min=-3., max=3, step=0.001, value=alfa,
     description='Angle:', layout=widgets.Layout(width='400px')
 )
 angle_text = widgets.FloatText(
@@ -324,21 +322,32 @@ angle_text = widgets.FloatText(
 widgets.jslink((shift_slider, 'value'), (shift_text, 'value'))
 widgets.jslink((angle_slider, 'value'), (angle_text, 'value'))
 
-# Кнопка
-button = widgets.Button(description='Применить', button_style='primary')
+# Две кнопки
+btn_show = widgets.Button(description='Показать совмещение', button_style='info')
+btn_apply = widgets.Button(description='Применить + реконструкция', button_style='primary')
 output = widgets.Output()
 
-def on_button_click(b):
+
+def on_show_click(b):
     with output:
         output.clear_output(wait=True)
-        find_shift_angle(shift_slider.value, angle_slider.value)
+        show_alignment(shift_slider.value, angle_slider.value)
 
-button.on_click(on_button_click)
+
+def on_apply_click(b):
+    with output:
+        output.clear_output(wait=True)
+        apply_and_reconstruct(shift_slider.value, angle_slider.value)
+
+
+btn_show.on_click(on_show_click)
+btn_apply.on_click(on_apply_click)
 
 # Компоновка
 shift_box = widgets.HBox([shift_slider, shift_text])
 angle_box = widgets.HBox([angle_slider, angle_text])
-ui = widgets.VBox([shift_box, angle_box, button, output])
+buttons_box = widgets.HBox([btn_show, btn_apply])
+ui = widgets.VBox([shift_box, angle_box, buttons_box, output])
 
 display(ui)
 
