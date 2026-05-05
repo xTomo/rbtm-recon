@@ -27,6 +27,16 @@
 # %matplotlib inline
 
 # %%
+# Отключаем сворачивание вывода при большом количестве изображений
+from IPython.display import display, HTML
+display(HTML("""
+<style>
+.jp-OutputArea-output { max-height: none !important; }
+.jp-OutputArea { overflow: visible !important; }
+</style>
+"""))
+
+# %%
 import logging
 
 logger = logging.getLogger()
