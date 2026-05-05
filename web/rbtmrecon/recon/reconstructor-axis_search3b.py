@@ -30,27 +30,28 @@
 # Отключаем сворачивание вывода при большом количестве изображений
 from IPython.display import display, Javascript
 display(Javascript("""
-    // Инжектируем CSS в <head> страницы (работает глобально, не только в output-area)
-    var style = document.createElement('style');
-    style.id = 'disable-output-scroll';
-    style.textContent = [
-        '.jp-Cell.jp-mod-outputsScrolled .jp-Cell-outputWrapper {',
-        '    max-height: none !important;',
-        '    overflow: visible !important;',
-        '    box-shadow: none !important;',
-        '}',
-        '.jp-mod-outputsScrolled .jp-OutputArea {',
-        '    max-height: none !important;',
-        '    overflow: visible !important;',
-        '}'
-    ].join('\\n');
-    var existing = document.getElementById('disable-output-scroll');
-    if (existing) existing.remove();
-    document.head.appendChild(style);
-
     // Убираем класс у всех уже свёрнутых ячеек
     document.querySelectorAll('.jp-Cell.jp-mod-outputsScrolled').forEach(function(el) {
         el.classList.remove('jp-mod-outputsScrolled');
+    });
+
+    // MutationObserver: следим за всеми ячейками и снимаем класс,
+    // как только JupyterLab пытается его добавить
+    if (window._noScrollObserver) {
+        window._noScrollObserver.disconnect();
+    }
+    window._noScrollObserver = new MutationObserver(function(mutations) {
+        mutations.forEach(function(mutation) {
+            if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+                var el = mutation.target;
+                if (el.classList.contains('jp-mod-outputsScrolled')) {
+                    el.classList.remove('jp-mod-outputsScrolled');
+                }
+            }
+        });
+    });
+    document.querySelectorAll('.jp-Cell').forEach(function(cell) {
+        window._noScrollObserver.observe(cell, { attributes: true, attributeFilter: ['class'] });
     });
 """))
 
