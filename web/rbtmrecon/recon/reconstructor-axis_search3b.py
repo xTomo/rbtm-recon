@@ -278,13 +278,21 @@ def show_alignment(shift, angle):
     t_im_0 = transform_image(im_0, shift, angle)
     t_im_180 = transform_image(im_180, shift, angle)
 
-    plt.figure(figsize=(12, 8))
-    plt.subplot(121)
-    plt.imshow(t_im_0 - np.fliplr(t_im_180), cmap=plt.cm.seismic)
-    plt.colorbar(orientation='vertical')
-    plt.subplot(122)
-    plt.imshow(t_im_0, cmap=plt.cm.viridis)
-    plt.colorbar(orientation='vertical')
+    h, w = t_im_0.shape
+    dpi = 100
+    fig_w = max(12, 2 * w / dpi + 2)
+    fig_h = max(6, h / dpi + 1)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(fig_w, fig_h))
+
+    im1 = ax1.imshow(t_im_0 - np.fliplr(t_im_180), cmap=plt.cm.seismic)
+    fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+    ax1.set_title('Разность (0° − flip(180°))')
+
+    im2 = ax2.imshow(t_im_0, cmap=plt.cm.viridis)
+    fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+    ax2.set_title('Кадр 0°')
+
+    plt.tight_layout()
     plt.show()
 
 
@@ -323,9 +331,16 @@ widgets.jslink((shift_slider, 'value'), (shift_text, 'value'))
 widgets.jslink((angle_slider, 'value'), (angle_text, 'value'))
 
 # Две кнопки
-btn_show = widgets.Button(description='Показать совмещение', button_style='info')
-btn_apply = widgets.Button(description='Применить + реконструкция', button_style='primary')
-output = widgets.Output()
+btn_show = widgets.Button(
+    description='Показать совмещение', button_style='info',
+    layout=widgets.Layout(width='220px')
+)
+btn_apply = widgets.Button(
+    description='Применить + реконструкция', button_style='primary',
+    layout=widgets.Layout(width='250px')
+)
+# min_height предотвращает схлопывание области при вычислении
+output = widgets.Output(layout=widgets.Layout(min_height='500px'))
 
 
 def on_show_click(b):
