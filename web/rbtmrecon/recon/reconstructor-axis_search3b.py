@@ -461,45 +461,6 @@ save_amira(rec_vol, tmp_dir, tomo_info['specimen'], 4, pixel_size)
 # %%
 recon_config
 
-# %%
-# with h5py.File(os.path.join(tmp_dir, 'tomo_rec.' + tomo_info['specimen'] + '.h5'), 'w') as h5f:
-#     h5f.create_dataset('Reconstruction', data=rec_vol, chunks=True,
-#                        compression='lzf')
-#     recursively_save_dict_contents_to_group(h5f, '/recon_config/', recon_config)
-
-# # %%
-# import k3d
-# # %%
-# resize = int(np.power(np.prod(rec_vol.shape) / 1e7, 1. / 3))
-# print(resize)
-# small_rec = reshape_volume(rec_vol, 10)
-
-# # %%
-# volume = k3d.volume(
-#     small_rec.astype(np.float32),
-#     #     alpha_coef=1000,
-#     #     shadow='dynamic',
-#     #     samples=600,
-#     #     shadow_res=128,
-#     #     shadow_delay=50,
-#     color_range=[np.percentile(small_rec, 10), np.percentile(small_rec, 99.9)],
-#     color_map=(np.array(k3d.colormaps.matplotlib_color_maps.jet).reshape(-1, 4)).astype(np.float32),
-#     compression_level=4
-# )
-# size = small_rec.shape
-# volume.transform.bounds = [-size[2] / 2, size[2] / 2,
-#                            -size[1] / 2, size[1] / 2,
-#                            -size[0] / 2, size[0] / 2]
-
-# plot = k3d.plot(camera_auto_fit=True)
-# plot += volume
-# plot.lighting = 2
-# plot.display()
-
-# # %%
-# plot.fetch_snapshot()
-# with open('./tomo_3d.html', 'w') as fp:
-#     fp.write(plot.snapshot)
 
 # %%
 cfg = configparser.ConfigParser()
