@@ -355,7 +355,7 @@ btn_apply = widgets.Button(
     description='Применить + реконструкция', button_style='primary',
     layout=widgets.Layout(width='250px')
 )
-output = widgets.Output()
+output = widgets.Output(layout=widgets.Layout(border='none'))
 
 
 def on_show_click(b):
