@@ -280,25 +280,52 @@ def _make_shepp_logan_3d(size: int) -> np.ndarray:
 
     Совместима с NumPy 2.0 (не использует np.lib.index_tricks).
     Возвращает float32 массив.
+
+    Оптимизации по памяти и скорости
+    ---------------------------------
+    * Послойный обход по Z: единовременно создаются только два 2D-массива
+      yy и xx размером size×size×4 байт = ~8 MB при size=1000.
+      Полные 3D meshgrid потребовали бы 3 × 1000³ × 8 байт ≈ 24 GB.
+    * Результат накапливается сразу в float32.
+    * Early-exit per ellipsoid: если zr² > 1, данный эллипсоид
+      пропускается без создания 2D-маски.
+    * Предвычисляются sin/cos и параметры для каждого эллипсоида.
     """
     half = (size - 1) / 2.0
-    coords = (np.arange(size) - half) / half      # [-1, 1]
-    z, y, x = np.meshgrid(coords, coords, coords, indexing='ij')
+    coords = (np.arange(size, dtype='float32') - half) / half   # [-1, 1]
 
-    phantom = np.zeros((size, size, size), dtype='float64')
+    # 2D сетки y и x — создаются один раз, переиспользуются для всех z-срезов
+    yy, xx = np.meshgrid(coords, coords, indexing='ij')          # (size, size) float32
 
+    # Предвычисляем параметры эллипсоидов один раз
+    ellipsoids = []
     for row in _SHEPP_LOGAN_PARAMS:
-        rho, a, b, c, x0, y0, z0, phi_deg = row
-        phi = np.deg2rad(phi_deg)
-        cos_p, sin_p = np.cos(phi), np.sin(phi)
-        # Поворот вокруг оси Z
-        xr = cos_p * (x - x0) + sin_p * (y - y0)
-        yr = -sin_p * (x - x0) + cos_p * (y - y0)
-        zr = z - z0
-        mask = (xr / a) ** 2 + (yr / b) ** 2 + (zr / c) ** 2 <= 1.0
-        phantom[mask] += rho
+        rho          = float(row[0])
+        a, b, c      = float(row[1]), float(row[2]), float(row[3])
+        x0, y0, z0   = float(row[4]), float(row[5]), float(row[6])
+        phi          = np.deg2rad(float(row[7]))
+        cos_p, sin_p = float(np.cos(phi)), float(np.sin(phi))
+        ellipsoids.append((rho, a, b, c, x0, y0, z0, cos_p, sin_p))
 
-    return phantom.clip(0, None).astype('float32')
+    phantom   = np.zeros((size, size, size), dtype='float32')
+    slice_buf = np.empty((size, size), dtype='float32')
+
+    for zi, zval in enumerate(coords):
+        slice_buf[:] = 0.0
+        for rho, a, b, c, x0, y0, z0, cos_p, sin_p in ellipsoids:
+            zr2 = ((float(zval) - z0) / c) ** 2
+            if zr2 > 1.0:              # z вне эллипсоида — пропускаем
+                continue
+            dx = xx - x0
+            dy = yy - y0
+            xr = (cos_p * dx + sin_p * dy) / a
+            yr = (-sin_p * dx + cos_p * dy) / b
+            mask = xr * xr + yr * yr <= (1.0 - zr2)
+            slice_buf[mask] += rho
+        np.clip(slice_buf, 0, None, out=slice_buf)
+        phantom[zi] = slice_buf
+
+    return phantom
 
 
 def run_benchmark(size: int = 256,
