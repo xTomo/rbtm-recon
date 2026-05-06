@@ -435,34 +435,38 @@ def _recon_worker_shmem(args: dict) -> None:
 
     Параметры в словаре args
     ------------------------
-    shm_sino_name  : str   — имя SharedMemory синограммы
-    shm_out_name   : str   — имя SharedMemory выходного объёма
-    sino_shape     : tuple — (H, N_angles, W)
-    out_shape      : tuple — (H, W, W)
-    dtype_sino     : str   — dtype синограммы ('float32')
-    dtype_out      : str   — dtype выходного объёма ('float32')
-    slice_indices  : list  — список индексов срезов для обработки
-    angles         : bytes — np.ndarray углов, сериализованный через tobytes()
-    angles_shape   : tuple — форма массива углов
-    pixel_size     : float
-    gpu_id         : int
+    shm_sino_name     : str   — имя SharedMemory синограммы
+    shm_out_name      : str   — имя SharedMemory выходного объёма
+    sino_shape        : tuple — (H, N_angles, W)
+    out_shape         : tuple — (H, W, W)
+    dtype_sino        : str   — dtype синограммы ('float32')
+    dtype_out         : str   — dtype выходного объёма ('float32')
+    slice_indices     : list  — список индексов срезов для обработки
+    angles            : bytes — np.ndarray углов, сериализованный через tobytes()
+    angles_shape      : tuple — форма массива углов
+    pixel_size        : float
+    gpu_id            : int
+    norm_thresh_factor: float — срез считается пустым если L2-норма < max*factor
+                                (0 — не проверять, всегда FBP+CGLS)
     """
     import multiprocessing.shared_memory as shm_mod
     import astra  # noqa: импорт внутри процесса (spawn)
     import cupy as cp  # noqa
+    import tomo.recon.astra_utils as astra_utils  # noqa
 
     # Распаковываем аргументы
-    shm_sino_name  = args['shm_sino_name']
-    shm_out_name   = args['shm_out_name']
-    sino_shape     = args['sino_shape']
-    out_shape      = args['out_shape']
-    dtype_sino     = args['dtype_sino']
-    dtype_out      = args['dtype_out']
-    slice_indices  = args['slice_indices']
-    angles_bytes   = args['angles']
-    angles_shape   = args['angles_shape']
-    pixel_size     = args['pixel_size']
-    gpu_id         = args['gpu_id']
+    shm_sino_name      = args['shm_sino_name']
+    shm_out_name       = args['shm_out_name']
+    sino_shape         = args['sino_shape']
+    out_shape          = args['out_shape']
+    dtype_sino         = args['dtype_sino']
+    dtype_out          = args['dtype_out']
+    slice_indices      = args['slice_indices']
+    angles_bytes       = args['angles']
+    angles_shape       = args['angles_shape']
+    pixel_size         = args['pixel_size']
+    gpu_id             = args['gpu_id']
+    norm_thresh_factor = args.get('norm_thresh_factor', 0.0)
 
     # Восстанавливаем массив углов
     angles = np.frombuffer(angles_bytes, dtype='float32').reshape(angles_shape)
@@ -474,10 +478,31 @@ def _recon_worker_shmem(args: dict) -> None:
     sino_arr = np.ndarray(sino_shape, dtype=dtype_sino, buffer=shm_sino.buf)
     out_arr  = np.ndarray(out_shape,  dtype=dtype_out,  buffer=shm_out.buf)
 
+    # Предвычисляем порог для пустых срезов один раз на воркер
+    if norm_thresh_factor > 0:
+        # Используем только свои срезы для оценки max нормы
+        local_sino = sino_arr[slice_indices]
+        norms_local = np.linalg.norm(local_sino.reshape(len(slice_indices), -1), axis=1)
+        norm_thresh = norms_local.max() * norm_thresh_factor
+    else:
+        norm_thresh = -1.0  # отключить проверку
+
+    method_full = [['FBP_CUDA'], ['CGLS_CUDA', 10]]
+    method_fbp  = [['FBP_CUDA']]
+
     # Устанавливаем GPU для этого процесса
     with cp.cuda.Device(gpu_id):
-        for i in slice_indices:
-            out_arr[i] = recon_2d_parallel(sino_arr[i], angles, pixel_size, gpu_id=gpu_id)
+        for idx, i in enumerate(slice_indices):
+            sino_i = sino_arr[i]
+            if norm_thresh >= 0:
+                norm_i = float(np.linalg.norm(sino_i))
+                method = method_fbp if norm_i <= norm_thresh else method_full
+            else:
+                method = method_full
+            rec = astra_utils.astra_recon_2d_parallel(
+                sino_i, angles, method, gpu_id=gpu_id
+            )
+            out_arr[i] = rec / pixel_size
 
     shm_sino.close()
     shm_out.close()
@@ -487,7 +512,8 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
                             data_angles: np.ndarray,
                             pixel_size: float,
                             rec_vol: np.ndarray,
-                            num_gpus: int = 2) -> None:
+                            num_gpus: int = 2,
+                            norm_thresh_factor: float = 1e-6) -> None:
     """Реконструкция всего объёма с разбивкой срезов по нескольким GPU.
 
     Данные передаются в дочерние процессы через ``multiprocessing.shared_memory``
@@ -496,16 +522,20 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
 
     Параметры
     ----------
-    sinogram_fixed : np.ndarray, shape (H, N_angles, W)
+    sinogram_fixed      : np.ndarray, shape (H, N_angles, W)
         Синограмма после коррекции оси и удаления колец.
-    data_angles    : np.ndarray, shape (N_angles,)
+    data_angles         : np.ndarray, shape (N_angles,)
         Углы проекций в градусах.
-    pixel_size     : float
+    pixel_size          : float
         Размер пикселя в мм.
-    rec_vol        : np.ndarray, shape (H, W, W)
+    rec_vol             : np.ndarray, shape (H, W, W)
         Выходной массив (memmap или обычный ndarray) для записи результата.
-    num_gpus       : int
+    num_gpus            : int
         Количество GPU для параллельной реконструкции.
+    norm_thresh_factor  : float
+        Срез считается пустым (только FBP, без CGLS), если L2-норма его
+        синограммы < max_norm * norm_thresh_factor. Предотвращает NaN/Inf
+        в CGLS на нулевых/почти нулевых срезах. 0 — отключить проверку.
     """
     import multiprocessing
     import multiprocessing.shared_memory as shm_mod
@@ -539,17 +569,18 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
         angles_f32 = data_angles.astype('float32', copy=False)
         worker_args = [
             {
-                'shm_sino_name': shm_sino.name,
-                'shm_out_name':  shm_out.name,
-                'sino_shape':    sino_shape,
-                'out_shape':     out_shape,
-                'dtype_sino':    dtype_sino,
-                'dtype_out':     dtype_out,
-                'slice_indices': chunk,
-                'angles':        angles_f32.tobytes(),
-                'angles_shape':  angles_f32.shape,
-                'pixel_size':    pixel_size,
-                'gpu_id':        gpu_id,
+                'shm_sino_name':      shm_sino.name,
+                'shm_out_name':       shm_out.name,
+                'sino_shape':         sino_shape,
+                'out_shape':          out_shape,
+                'dtype_sino':         dtype_sino,
+                'dtype_out':          dtype_out,
+                'slice_indices':      chunk,
+                'angles':             angles_f32.tobytes(),
+                'angles_shape':       angles_f32.shape,
+                'pixel_size':         pixel_size,
+                'gpu_id':             gpu_id,
+                'norm_thresh_factor': norm_thresh_factor,
             }
             for gpu_id, chunk in enumerate(chunks)
         ]

@@ -77,24 +77,37 @@ def _recon_single_gpu(sinogram: np.ndarray, angles_deg: np.ndarray,
     """Однопроцессорная реконструкция на одном GPU.
 
     Возвращает (rec_vol, elapsed_seconds).
+
+    Пустые срезы (норма синограммы < порога) реконструируются только через FBP,
+    чтобы избежать NaN в CGLS при нулевом правом векторе.
     """
     import tomo.recon.astra_utils as astra_utils
 
     H, N, W = sinogram.shape
-    rec_vol = np.empty((H, W, W), dtype='float32')
+    rec_vol = np.zeros((H, W, W), dtype='float32')
 
-    method = [['FBP_CUDA'], ['CGLS_CUDA', 10]] if use_cgls else [['FBP_CUDA']]
+    method_full = [['FBP_CUDA'], ['CGLS_CUDA', 10]] if use_cgls else [['FBP_CUDA']]
+    method_fbp  = [['FBP_CUDA']]
+
+    # Порог: срез считается пустым, если L2-норма синограммы < 1e-6 от максимума
+    sino_norms  = np.linalg.norm(sinogram.reshape(H, -1), axis=1)  # (H,)
+    norm_thresh = sino_norms.max() * 1e-6
 
     print(f"  Однопроцессорная реконструкция {H} срезов на GPU {gpu_id}…")
+    print(f"  Порог пустого среза: {norm_thresh:.4g}, "
+          f"пустых: {int((sino_norms <= norm_thresh).sum())}/{H}")
     t0 = time.perf_counter()
     for i in range(H):
+        method = method_fbp if sino_norms[i] <= norm_thresh else method_full
         rec = astra_utils.astra_recon_2d_parallel(
             sinogram[i], angles_deg, method, gpu_id=gpu_id
         )
         rec_vol[i] = rec / pixel_size
         if i % max(1, H // 10) == 0:
             pct = 100 * i / H
-            print(f"    срез {i}/{H} ({pct:.0f}%)")
+            print(f"    срез {i}/{H} ({pct:.0f}%), "
+                  f"sino_norm={sino_norms[i]:.3g}, "
+                  f"rec min={rec_vol[i].min():.3g} max={rec_vol[i].max():.3g}")
     elapsed = time.perf_counter() - t0
 
     nan_count = int(np.isnan(rec_vol).sum())
