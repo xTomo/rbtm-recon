@@ -96,6 +96,13 @@ def _recon_single_gpu(sinogram: np.ndarray, angles_deg: np.ndarray,
             pct = 100 * i / H
             print(f"    срез {i}/{H} ({pct:.0f}%)")
     elapsed = time.perf_counter() - t0
+
+    nan_count = int(np.isnan(rec_vol).sum())
+    inf_count = int(np.isinf(rec_vol).sum())
+    if nan_count or inf_count:
+        warnings.warn(f"Single-GPU: {nan_count} NaN, {inf_count} Inf — заменены нулями")
+        np.nan_to_num(rec_vol, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+
     print(f"  Однопроцессорная реконструкция завершена за {elapsed:.1f} с")
     return rec_vol, elapsed
 
@@ -116,6 +123,13 @@ def _recon_multi_gpu(sinogram: np.ndarray, angles_deg: np.ndarray,
     t0 = time.perf_counter()
     recon_volume_multi_gpu(sinogram, angles_deg, pixel_size, rec_vol, num_gpus=num_gpus)
     elapsed = time.perf_counter() - t0
+
+    nan_count = int(np.isnan(rec_vol).sum())
+    inf_count = int(np.isinf(rec_vol).sum())
+    if nan_count or inf_count:
+        warnings.warn(f"Multi-GPU: {nan_count} NaN, {inf_count} Inf — заменены нулями")
+        np.nan_to_num(rec_vol, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+
     print(f"  Multi-GPU реконструкция завершена за {elapsed:.1f} с")
     return rec_vol, elapsed
 
@@ -125,9 +139,17 @@ def _recon_multi_gpu(sinogram: np.ndarray, angles_deg: np.ndarray,
 # ---------------------------------------------------------------------------
 
 def compute_rmse(rec: np.ndarray, ref: np.ndarray) -> float:
-    """Корень среднеквадратической ошибки по всему объёму."""
+    """Нормализованная RMSE по всему объёму.
+
+    NRMSE = RMSE / (max(ref) - min(ref)), что позволяет сравнивать объёмы
+    с разными масштабами (напр., когда pixel_size != 1).
+    """
     diff = rec.astype('float64') - ref.astype('float64')
-    return float(np.sqrt(np.mean(diff ** 2)))
+    rmse = float(np.sqrt(np.mean(diff ** 2)))
+    signal_range = float(ref.max()) - float(ref.min())
+    if signal_range < 1e-12:
+        return float('nan')
+    return rmse / signal_range
 
 
 def compute_ssim_slice(rec_slice: np.ndarray, ref_slice: np.ndarray) -> float:
@@ -284,7 +306,11 @@ def run_benchmark(size: int = 256,
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    pixel_size = 9e-3  # мм
+    # Для синтетического бенчмарка используем pixel_size=1.0:
+    # ASTRA astra_fp/FBP работает в безразмерных единицах пикселей,
+    # деление на реальный pixel_size (9e-3 мм) даёт значения ~100x больше фантома
+    # и может приводить к расходимости CGLS и NaN в метриках.
+    pixel_size = 1.0
 
     print("=" * 60)
     print(f"BENCHMARK: size={size}, angles={n_angles}, num_gpus={num_gpus}")
