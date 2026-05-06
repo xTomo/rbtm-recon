@@ -53,5 +53,4 @@ c.ServerApp.root_dir = '/storage'" >> ~/.jupyter/jupyter_server_config.py
 CMD bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && \
             umask 0002 && \
             cd /rbtm/recon/ && \
-            python tomo_worker.py &\
-            jupyter lab"
+            python tomo_worker.py"
