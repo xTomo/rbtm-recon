@@ -416,72 +416,79 @@ def run_benchmark(size: int = 256,
         speedup_mp = t_single / t_multi if t_multi > 0 else float('inf')
 
     # ------------------------------------------------------------------
-    # 5. Нативный ASTRA 3D multi-GPU (astra.set_gpu_index)
+    # 5. CIL + TIGRE multi-GPU FBP (нативный multi-GPU с ramp-фильтром)
     # ------------------------------------------------------------------
-    print(f"\n[5/6] Нативный ASTRA 3D multi-GPU (gpu_indices={list(range(num_gpus))})…")
-    from tomotools2 import recon_volume_astra3d
-    rec_astra3d = np.empty_like(rec_single)
     gpu_indices = list(range(num_gpus))
-    # FBP3D_CUDA: единственный 3D-алгоритм ASTRA пригодный для чанковой
-    # обработки (каждый срез независим). use_cgls игнорируется для 3D.
-    t0_a3d = time.perf_counter()
-    recon_volume_astra3d(sinogram, angles_deg, pixel_size, rec_astra3d,
+    print(f"\n[5/6] CIL/TIGRE FBP multi-GPU (gpu_indices={gpu_indices})…")
+    from tomotools2 import recon_volume_cil
+    rec_cil = np.empty_like(rec_single)
+    t0_cil = time.perf_counter()
+    try:
+        recon_volume_cil(sinogram, angles_deg, pixel_size, rec_cil,
                           gpu_indices=gpu_indices)
-    t_astra3d = time.perf_counter() - t0_a3d
-    speedup_a3d = t_single / t_astra3d if t_astra3d > 0 else float('inf')
-    nan_a3d = int(np.isnan(rec_astra3d).sum())
-    if nan_a3d:
-        warnings.warn(f"ASTRA3D: {nan_a3d} NaN — заменены нулями")
-        np.nan_to_num(rec_astra3d, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-    print(f"  ASTRA3D реконструкция завершена за {t_astra3d:.1f} с")
+        t_cil = time.perf_counter() - t0_cil
+        nan_cil = int(np.isnan(rec_cil).sum())
+        if nan_cil:
+            warnings.warn(f"CIL/TIGRE: {nan_cil} NaN — заменены нулями")
+            np.nan_to_num(rec_cil, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        cil_ok = True
+    except Exception as e:
+        warnings.warn(f"CIL/TIGRE недоступен: {e}")
+        rec_cil = rec_single.copy()
+        t_cil = t_single
+        cil_ok = False
+    speedup_cil = t_single / t_cil if t_cil > 0 else float('inf')
+    print(f"  CIL/TIGRE реконструкция завершена за {t_cil:.1f} с")
 
     # ------------------------------------------------------------------
     # 6. Метрики качества
     # ------------------------------------------------------------------
     print("\n[6/6] Вычисление метрик качества…")
 
-    rmse_single  = compute_rmse(rec_single,  phantom)
-    rmse_multi   = compute_rmse(rec_multi,   phantom)
-    rmse_astra3d = compute_rmse(rec_astra3d, phantom)
-    ssim_single  = compute_ssim_volume(rec_single,  phantom)
-    ssim_multi   = compute_ssim_volume(rec_multi,   phantom)
-    ssim_astra3d = compute_ssim_volume(rec_astra3d, phantom)
+    rmse_single = compute_rmse(rec_single, phantom)
+    rmse_multi  = compute_rmse(rec_multi,  phantom)
+    rmse_cil    = compute_rmse(rec_cil,    phantom)
+    ssim_single = compute_ssim_volume(rec_single, phantom)
+    ssim_multi  = compute_ssim_volume(rec_multi,  phantom)
+    ssim_cil    = compute_ssim_volume(rec_cil,    phantom)
 
-    print("\n" + "=" * 68)
+    cil_label = 'CIL/TIGRE' if cil_ok else 'CIL/TIGRE(err)'
+
+    print("\n" + "=" * 72)
     print("РЕЗУЛЬТАТЫ")
-    print("=" * 68)
-    print(f"  {'Параметр':<30} {'Single-GPU':>12} {'MP multi-GPU':>13} {'ASTRA3D nGPU':>13}")
-    print(f"  {'-'*68}")
-    print(f"  {'Время реконструкции, с':<30} {t_single:>12.1f} {t_multi:>13.1f} {t_astra3d:>13.1f}")
-    print(f"  {'Ускорение':<30} {'—':>12} {speedup_mp:>12.2f}x {speedup_a3d:>12.2f}x")
-    print(f"  {'RMSE':<30} {rmse_single:>12.6f} {rmse_multi:>13.6f} {rmse_astra3d:>13.6f}")
-    print(f"  {'SSIM (среднее 3 срезов)':<30} {ssim_single:>12.4f} {ssim_multi:>13.4f} {ssim_astra3d:>13.4f}")
-    print("=" * 68)
+    print("=" * 72)
+    print(f"  {'Параметр':<30} {'Single-GPU':>12} {'MP multi-GPU':>13} {cil_label:>16}")
+    print(f"  {'-'*71}")
+    print(f"  {'Время реконструкции, с':<30} {t_single:>12.1f} {t_multi:>13.1f} {t_cil:>16.1f}")
+    print(f"  {'Ускорение':<30} {'—':>12} {speedup_mp:>12.2f}x {speedup_cil:>15.2f}x")
+    print(f"  {'RMSE (нормир.)':<30} {rmse_single:>12.6f} {rmse_multi:>13.6f} {rmse_cil:>16.6f}")
+    print(f"  {'SSIM (среднее 3 срезов)':<30} {ssim_single:>12.4f} {ssim_multi:>13.4f} {ssim_cil:>16.4f}")
+    print("=" * 72)
 
     # ------------------------------------------------------------------
     # Сохранение артефактов
     # ------------------------------------------------------------------
     results = {
-        'size':              size,
-        'n_angles':          n_angles,
-        'num_gpus':          num_gpus,
-        'use_cgls':          use_cgls,
-        't_single_s':        round(t_single,   3),
-        't_multi_mp_s':      round(t_multi,    3),
-        't_astra3d_s':       round(t_astra3d,  3),
-        'speedup_mp':        round(speedup_mp,  3),
-        'speedup_astra3d':   round(speedup_a3d, 3),
-        'rmse_single':       round(rmse_single,  8),
-        'rmse_multi_mp':     round(rmse_multi,   8),
-        'rmse_astra3d':      round(rmse_astra3d, 8),
-        'ssim_single':       round(ssim_single,  6),
-        'ssim_multi_mp':     round(ssim_multi,   6),
-        'ssim_astra3d':      round(ssim_astra3d, 6),
+        'size':           size,
+        'n_angles':       n_angles,
+        'num_gpus':       num_gpus,
+        'use_cgls':       use_cgls,
+        't_single_s':     round(t_single,    3),
+        't_multi_mp_s':   round(t_multi,     3),
+        't_cil_s':        round(t_cil,       3),
+        'speedup_mp':     round(speedup_mp,   3),
+        'speedup_cil':    round(speedup_cil,  3),
+        'rmse_single':    round(rmse_single,  8),
+        'rmse_multi_mp':  round(rmse_multi,   8),
+        'rmse_cil':       round(rmse_cil,     8),
+        'ssim_single':    round(ssim_single,  6),
+        'ssim_multi_mp':  round(ssim_multi,   6),
+        'ssim_cil':       round(ssim_cil,     6),
     }
 
     print()
     save_csv_report(results, out_path)
-    save_slices_png(rec_single, rec_astra3d, phantom, out_path)
+    save_slices_png(rec_single, rec_cil, phantom, out_path)
 
 
 # ---------------------------------------------------------------------------

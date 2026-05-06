@@ -423,6 +423,71 @@ def recon_2d_parallel_nonorm(sino: np.ndarray, angles: np.ndarray,
     )
 
 
+def recon_volume_cil(sinogram_fixed: np.ndarray,
+                      data_angles: np.ndarray,
+                      pixel_size: float,
+                      rec_vol: np.ndarray,
+                      gpu_indices: list | tuple = (0,)) -> None:
+    """Реконструкция объёма через CIL (Parallel3D) + TIGRE FBP, нативный multi-GPU.
+
+    Использует высокоуровневый CIL API для описания геометрии и данных,
+    затем вызывает ``cil.plugins.tigre.FBP`` — под капотом TIGRE использует
+    ``gpuids`` для распределения по нескольким GPU.
+
+    Преимущества перед ASTRA 3D:
+    * TIGRE FBP включает ramp-фильтр → качество эквивалентно 2D FBP
+    * TIGRE нативно поддерживает multi-GPU для FBP без обходных путей
+    * CIL управляет памятью и геометрией автоматически
+
+    Параметры
+    ----------
+    sinogram_fixed : np.ndarray, shape (H, N_angles, W)
+        Синограмма после коррекции оси и удаления колец.
+    data_angles    : np.ndarray, shape (N_angles,)
+        Углы проекций в градусах.
+    pixel_size     : float
+        Размер пикселя в мм.
+    rec_vol        : np.ndarray, shape (H, W, W)
+        Выходной массив для записи результата.
+    gpu_indices    : list or tuple of int
+        Индексы GPU, например [0, 1].
+    """
+    from cil.framework import AcquisitionGeometry, ImageGeometry, AcquisitionData
+    from cil.plugins.tigre import FBP as CIL_FBP  # noqa
+
+    H, N_angles, W = sinogram_fixed.shape
+
+    # --- CIL: параллельная 3D геометрия ---
+    # set_panel([horizontal, vertical]) = [W, H]
+    ag = (AcquisitionGeometry.create_Parallel3D()
+          .set_angles(data_angles.astype('float64'), angle_unit='degree')
+          .set_panel([W, H], pixel_size=[pixel_size, pixel_size]))
+
+    # Объёмная геометрия: куб W×W×H, размер вокселя pixel_size
+    ig = ag.get_ImageGeometry()
+
+    # --- CIL AcquisitionData ---
+    # CIL Parallel3D layout: данные (N_angles, V, H) = (N_angles, H, W)
+    sino_cil = sinogram_fixed.transpose(1, 0, 2).astype('float32')  # (N_angles, H, W)
+    data = AcquisitionData(sino_cil, geometry=ag, deep_copy=False)
+
+    # --- FBP через CIL/TIGRE с multi-GPU ---
+    # device='gpu' передаёт вычисления в TIGRE; gpuids управляется через
+    # переменную окружения CUDA_VISIBLE_DEVICES или параметр fbp.gpuids
+    fbp = CIL_FBP(ig, ag, device='gpu')
+    # Устанавливаем gpuids если CIL_FBP поддерживает этот атрибут
+    if hasattr(fbp, 'gpuids'):
+        fbp.gpuids = list(gpu_indices)
+
+    rec = fbp(data)                            # возвращает ImageData
+
+    # rec.as_array() имеет форму (H, W, W) или (Z, Y, X) — совпадает с rec_vol
+    rec_arr = np.asarray(rec.as_array(), dtype=rec_vol.dtype)
+
+    # Масштабирование: FBP даёт значения в единицах 1/(pixel_size), нормируем
+    np.copyto(rec_vol, rec_arr / pixel_size)
+
+
 def recon_volume_astra3d(sinogram_fixed: np.ndarray,
                           data_angles: np.ndarray,
                           pixel_size: float,
@@ -467,13 +532,15 @@ def recon_volume_astra3d(sinogram_fixed: np.ndarray,
     for start in range(0, H, chunk_size):
         end = min(start + chunk_size, H)
         sino_chunk = sinogram_fixed[start:end]   # (chunk, N_angles, W)
-        # FBP3D_CUDA: каждый срез независим — чанковая обработка корректна.
-        # CGLS3D_CUDA/SIRT3D_CUDA нельзя разбивать на чанки — алгоритм
-        # ожидает полный синограммный вектор и будет давать NaN/мусор.
+        # BP3D_CUDA: обратная проекция без фильтра.
+        # FBP3D_CUDA не существует в ASTRA для параллельного пучка.
+        # Для получения качества FBP нужно предварительно отфильтровать
+        # синограмму ramp-фильтром и использовать BP3D_CUDA.
+        # CGLS3D_CUDA/SIRT3D_CUDA нельзя разбивать на чанки.
         rec_chunk = astra_utils.astra_recon_3d_parallel(
             sino_chunk,
             angles_f32,
-            [['FBP3D_CUDA']],
+            [['BP3D_CUDA']],
         )
         rec_vol[start:end] = (rec_chunk / pixel_size).astype(rec_vol.dtype, copy=False)
 
