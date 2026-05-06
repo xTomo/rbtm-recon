@@ -25,7 +25,11 @@ RUN wget --quiet https://github.com/conda-forge/miniforge/releases/latest/downlo
 
 COPY environment.yml /rbtm/
 
-RUN /opt/conda/bin/conda env create -f environment.yml  && /opt/conda/bin/conda clean -y --all 
+# Сообщаем conda-solver, что системный CUDA 12.1 уже доступен,
+# чтобы не устанавливать cudatoolkit из conda ни явно, ни транзитивно.
+ENV CONDA_OVERRIDE_CUDA=12.1
+
+RUN /opt/conda/bin/conda env create -f environment.yml  && /opt/conda/bin/conda clean -y --all
 
 COPY . /rbtm
 
