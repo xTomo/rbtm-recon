@@ -547,6 +547,8 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
     import multiprocessing
     import multiprocessing.shared_memory as shm_mod
     import tempfile
+    import sys
+    import os as _os
 
     n_slices   = sinogram_fixed.shape[0]
     sino_shape = sinogram_fixed.shape          # (H, N_angles, W)
@@ -559,7 +561,15 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
     shm_sino = shm_mod.SharedMemory(create=True, size=nbytes_sino)
 
     # --- Временный memmap для выходного буфера (воркеры пишут напрямую) ---
-    tmp_file = tempfile.NamedTemporaryFile(suffix='.raw', delete=False)
+    # На Linux используем /dev/shm (tmpfs = RAM) вместо /tmp (диск),
+    # чтобы избежать медленной записи 4+ GB на HDD/SSD.
+    # /dev/shm в контейнере настроен на 6 GB через shm_size в docker-compose.yml.
+    if sys.platform.startswith('linux') and _os.path.isdir('/dev/shm'):
+        tmp_dir = '/dev/shm'
+    else:
+        tmp_dir = None  # системный temp (Windows / macOS)
+
+    tmp_file = tempfile.NamedTemporaryFile(suffix='.raw', delete=False, dir=tmp_dir)
     tmp_path = tmp_file.name
     tmp_file.close()
 
@@ -612,8 +622,7 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
         shm_sino.unlink()
         shm_sino.close()
         try:
-            import os
-            os.unlink(tmp_path)
+            _os.unlink(tmp_path)
         except OSError:
             pass
 
