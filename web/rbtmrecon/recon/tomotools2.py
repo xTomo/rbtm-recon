@@ -423,6 +423,52 @@ def recon_2d_parallel_nonorm(sino: np.ndarray, angles: np.ndarray,
     )
 
 
+def recon_volume_astra3d(sinogram_fixed: np.ndarray,
+                          data_angles: np.ndarray,
+                          pixel_size: float,
+                          rec_vol: np.ndarray,
+                          gpu_indices: list | tuple = (0,),
+                          n_cgls_iter: int = 10) -> None:
+    """Реконструкция всего объёма одним вызовом ASTRA 3D с нативным multi-GPU.
+
+    Использует ``astra.set_gpu_index(gpu_indices)`` и ``CGLS3D_CUDA`` —
+    ASTRA самостоятельно распределяет вычисления по указанным GPU без
+    каких-либо дополнительных процессов. Это самый эффективный способ
+    задействовать несколько GPU для томографической реконструкции.
+
+    Требования
+    ----------
+    * Алгоритм ``CGLS3D_CUDA`` поддерживает multi-GPU начиная с ASTRA 1.8.
+    * Для FBP3D_CUDA multi-GPU поддержки нет — функция всегда использует CGLS.
+
+    Параметры
+    ----------
+    sinogram_fixed : np.ndarray, shape (H, N_angles, W)
+        Синограмма после коррекции оси и удаления колец.
+    data_angles    : np.ndarray, shape (N_angles,)
+        Углы проекций в градусах.
+    pixel_size     : float
+        Размер пикселя в мм.
+    rec_vol        : np.ndarray, shape (H, W, W)
+        Выходной массив для записи результата (memmap или обычный ndarray).
+    gpu_indices    : list or tuple of int
+        Индексы GPU для нативного multi-GPU в ASTRA, например [0, 1].
+    n_cgls_iter    : int
+        Количество итераций CGLS3D_CUDA (default: 10).
+    """
+    import astra  # noqa
+
+    astra.set_gpu_index(list(gpu_indices))
+    rec = astra_utils.astra_recon_3d_parallel(
+        sinogram_fixed,
+        data_angles.astype('float32', copy=False),
+        [['CGLS3D_CUDA', n_cgls_iter]],
+        gpu_indices=list(gpu_indices),
+    )
+    # astra_recon_3d_parallel возвращает (H, W, W) — совпадает с rec_vol
+    np.copyto(rec_vol, (rec / pixel_size).astype(rec_vol.dtype, copy=False))
+
+
 # ---------------------------------------------------------------------------
 # Multi-GPU reconstruction via shared memory
 # ---------------------------------------------------------------------------

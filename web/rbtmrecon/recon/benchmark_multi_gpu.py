@@ -394,68 +394,94 @@ def run_benchmark(size: int = 256,
     print(f"  Синограмма: shape={sinogram.shape}, размер={sino_gb:.2f} GB")
 
     # ------------------------------------------------------------------
-    # 3. Single-GPU реконструкция
+    # 3. Single-GPU реконструкция (2D FBP/CGLS срез за срезом)
     # ------------------------------------------------------------------
-    print("\n[3/5] Single-GPU реконструкция…")
+    print("\n[3/6] Single-GPU реконструкция (2D, срез за срезом)…")
     rec_single, t_single = _recon_single_gpu(
         sinogram, angles_deg, pixel_size, use_cgls, gpu_id=0
     )
 
     # ------------------------------------------------------------------
-    # 4. Multi-GPU реконструкция
+    # 4. Multi-GPU реконструкция (spawn + SharedMemory)
     # ------------------------------------------------------------------
-    print(f"\n[4/5] Multi-GPU реконструкция ({num_gpus} GPU)…")
+    print(f"\n[4/6] Multi-GPU spawn-реконструкция ({num_gpus} GPU, SharedMemory)…")
     if num_gpus < 2:
         print("  ПРОПУЩЕНО (num_gpus < 2)")
         rec_multi  = rec_single
         t_multi    = t_single
-        speedup    = 1.0
+        speedup_mp = 1.0
     else:
         rec_multi, t_multi = _recon_multi_gpu(sinogram, angles_deg, pixel_size, num_gpus,
                                                use_cgls=use_cgls)
-        speedup = t_single / t_multi if t_multi > 0 else float('inf')
+        speedup_mp = t_single / t_multi if t_multi > 0 else float('inf')
 
     # ------------------------------------------------------------------
-    # 5. Метрики качества
+    # 5. Нативный ASTRA 3D multi-GPU (astra.set_gpu_index)
     # ------------------------------------------------------------------
-    print("\n[5/5] Вычисление метрик качества…")
+    print(f"\n[5/6] Нативный ASTRA 3D multi-GPU (gpu_indices={list(range(num_gpus))})…")
+    from tomotools2 import recon_volume_astra3d
+    rec_astra3d = np.empty_like(rec_single)
+    gpu_indices = list(range(num_gpus))
+    # CGLS3D_CUDA всегда используется (FBP3D не поддерживает multi-GPU)
+    n_iter = 10 if use_cgls else 1
+    t0_a3d = time.perf_counter()
+    recon_volume_astra3d(sinogram, angles_deg, pixel_size, rec_astra3d,
+                          gpu_indices=gpu_indices, n_cgls_iter=n_iter)
+    t_astra3d = time.perf_counter() - t0_a3d
+    speedup_a3d = t_single / t_astra3d if t_astra3d > 0 else float('inf')
+    nan_a3d = int(np.isnan(rec_astra3d).sum())
+    if nan_a3d:
+        warnings.warn(f"ASTRA3D: {nan_a3d} NaN — заменены нулями")
+        np.nan_to_num(rec_astra3d, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    print(f"  ASTRA3D реконструкция завершена за {t_astra3d:.1f} с")
 
-    rmse_single = compute_rmse(rec_single, phantom)
-    rmse_multi  = compute_rmse(rec_multi,  phantom)
-    ssim_single = compute_ssim_volume(rec_single, phantom)
-    ssim_multi  = compute_ssim_volume(rec_multi,  phantom)
+    # ------------------------------------------------------------------
+    # 6. Метрики качества
+    # ------------------------------------------------------------------
+    print("\n[6/6] Вычисление метрик качества…")
 
-    print("\n" + "=" * 60)
+    rmse_single  = compute_rmse(rec_single,  phantom)
+    rmse_multi   = compute_rmse(rec_multi,   phantom)
+    rmse_astra3d = compute_rmse(rec_astra3d, phantom)
+    ssim_single  = compute_ssim_volume(rec_single,  phantom)
+    ssim_multi   = compute_ssim_volume(rec_multi,   phantom)
+    ssim_astra3d = compute_ssim_volume(rec_astra3d, phantom)
+
+    print("\n" + "=" * 68)
     print("РЕЗУЛЬТАТЫ")
-    print("=" * 60)
-    print(f"  {'Параметр':<30} {'Single-GPU':>12} {'Multi-GPU':>12}")
-    print(f"  {'-'*54}")
-    print(f"  {'Время реконструкции, с':<30} {t_single:>12.1f} {t_multi:>12.1f}")
-    print(f"  {'Ускорение':<30} {'—':>12} {speedup:>12.2f}x")
-    print(f"  {'RMSE':<30} {rmse_single:>12.6f} {rmse_multi:>12.6f}")
-    print(f"  {'SSIM (среднее 3 срезов)':<30} {ssim_single:>12.4f} {ssim_multi:>12.4f}")
-    print("=" * 60)
+    print("=" * 68)
+    print(f"  {'Параметр':<30} {'Single-GPU':>12} {'MP multi-GPU':>13} {'ASTRA3D nGPU':>13}")
+    print(f"  {'-'*68}")
+    print(f"  {'Время реконструкции, с':<30} {t_single:>12.1f} {t_multi:>13.1f} {t_astra3d:>13.1f}")
+    print(f"  {'Ускорение':<30} {'—':>12} {speedup_mp:>12.2f}x {speedup_a3d:>12.2f}x")
+    print(f"  {'RMSE':<30} {rmse_single:>12.6f} {rmse_multi:>13.6f} {rmse_astra3d:>13.6f}")
+    print(f"  {'SSIM (среднее 3 срезов)':<30} {ssim_single:>12.4f} {ssim_multi:>13.4f} {ssim_astra3d:>13.4f}")
+    print("=" * 68)
 
     # ------------------------------------------------------------------
     # Сохранение артефактов
     # ------------------------------------------------------------------
     results = {
-        'size':          size,
-        'n_angles':      n_angles,
-        'num_gpus':      num_gpus,
-        'use_cgls':      use_cgls,
-        't_single_s':    round(t_single, 3),
-        't_multi_s':     round(t_multi,  3),
-        'speedup':       round(speedup,  3),
-        'rmse_single':   round(rmse_single, 8),
-        'rmse_multi':    round(rmse_multi,  8),
-        'ssim_single':   round(ssim_single, 6),
-        'ssim_multi':    round(ssim_multi,  6),
+        'size':              size,
+        'n_angles':          n_angles,
+        'num_gpus':          num_gpus,
+        'use_cgls':          use_cgls,
+        't_single_s':        round(t_single,   3),
+        't_multi_mp_s':      round(t_multi,    3),
+        't_astra3d_s':       round(t_astra3d,  3),
+        'speedup_mp':        round(speedup_mp,  3),
+        'speedup_astra3d':   round(speedup_a3d, 3),
+        'rmse_single':       round(rmse_single,  8),
+        'rmse_multi_mp':     round(rmse_multi,   8),
+        'rmse_astra3d':      round(rmse_astra3d, 8),
+        'ssim_single':       round(ssim_single,  6),
+        'ssim_multi_mp':     round(ssim_multi,   6),
+        'ssim_astra3d':      round(ssim_astra3d, 6),
     }
 
     print()
     save_csv_report(results, out_path)
-    save_slices_png(rec_single, rec_multi, phantom, out_path)
+    save_slices_png(rec_single, rec_astra3d, phantom, out_path)
 
 
 # ---------------------------------------------------------------------------
