@@ -428,13 +428,17 @@ def recon_volume_astra3d(sinogram_fixed: np.ndarray,
                           pixel_size: float,
                           rec_vol: np.ndarray,
                           gpu_indices: list | tuple = (0,),
-                          n_cgls_iter: int = 10) -> None:
-    """Реконструкция всего объёма одним вызовом ASTRA 3D с нативным multi-GPU.
+                          n_cgls_iter: int = 10,
+                          chunk_size: int = 64) -> None:
+    """Реконструкция всего объёма с нативным ASTRA 3D multi-GPU по чанкам.
 
-    Использует ``astra.set_gpu_index(gpu_indices)`` и ``CGLS3D_CUDA`` —
-    ASTRA самостоятельно распределяет вычисления по указанным GPU без
-    каких-либо дополнительных процессов. Это самый эффективный способ
-    задействовать несколько GPU для томографической реконструкции.
+    Полный объём 1000³ × float32 ≈ 4 GB не помещается в VRAM одного GPU.
+    Функция разбивает синограмму на чанки по ``chunk_size`` срезов и
+    вызывает ``CGLS3D_CUDA`` для каждого чанка отдельно.
+
+    Для каждого чанка вызывается ``astra.set_gpu_index(gpu_indices)`` —
+    ASTRA самостоятельно распределяет вычисления чанка по указанным GPU
+    без каких-либо дополнительных процессов.
 
     Требования
     ----------
@@ -455,20 +459,29 @@ def recon_volume_astra3d(sinogram_fixed: np.ndarray,
         Индексы GPU для нативного multi-GPU в ASTRA, например [0, 1].
     n_cgls_iter    : int
         Количество итераций CGLS3D_CUDA (default: 10).
+    chunk_size     : int
+        Количество срезов в одном ASTRA 3D вызове (default: 64).
+        Уменьшите при OOM (напр. 32), увеличьте при большом VRAM (128+).
+        VRAM на чанк ≈ chunk_size × W × W × 4 байт.
+        При W=1000, chunk_size=64: ~256 MB.
     """
     import astra  # noqa
 
-    # astra.set_gpu_index должен быть вызван ДО создания данных ASTRA.
-    # Параметр gpu_indices в astra_recon_3d_parallel не нужен —
-    # глобальная настройка уже применена.
+    H = sinogram_fixed.shape[0]
+    angles_f32 = data_angles.astype('float32', copy=False)
+
+    # Устанавливаем GPU один раз на весь объём
     astra.set_gpu_index(list(gpu_indices))
-    rec = astra_utils.astra_recon_3d_parallel(
-        sinogram_fixed,
-        data_angles.astype('float32', copy=False),
-        [['CGLS3D_CUDA', n_cgls_iter]],
-    )
-    # astra_recon_3d_parallel возвращает (H, W, W) — совпадает с rec_vol
-    np.copyto(rec_vol, (rec / pixel_size).astype(rec_vol.dtype, copy=False))
+
+    for start in range(0, H, chunk_size):
+        end = min(start + chunk_size, H)
+        sino_chunk = sinogram_fixed[start:end]   # (chunk, N_angles, W)
+        rec_chunk = astra_utils.astra_recon_3d_parallel(
+            sino_chunk,
+            angles_f32,
+            [['CGLS3D_CUDA', n_cgls_iter]],
+        )
+        rec_vol[start:end] = (rec_chunk / pixel_size).astype(rec_vol.dtype, copy=False)
 
 
 # ---------------------------------------------------------------------------
