@@ -430,12 +430,13 @@ def recon_2d_parallel_nonorm(sino: np.ndarray, angles: np.ndarray,
 def _recon_worker_shmem(args: dict) -> None:
     """Воркер реконструкции для отдельного процесса.
 
-    Читает синограмму из SharedMemory, пишет результат напрямую в memmap-файл.
+    Читает синограмму из SharedMemory, пишет результат в SharedMemory выхода.
+    Оба буфера размещены в /dev/shm (RAM) — нет дискового I/O.
 
     Параметры в словаре args
     ------------------------
     shm_sino_name     : str   — имя SharedMemory синограммы
-    out_mmap_path     : str   — путь к memmap-файлу для записи результата
+    shm_out_name      : str   — имя SharedMemory выходного объёма
     sino_shape        : tuple — (H, N_angles, W)
     out_shape         : tuple — (H, W, W)
     dtype_sino        : str   — dtype синограммы ('float32')
@@ -456,7 +457,7 @@ def _recon_worker_shmem(args: dict) -> None:
 
     # Распаковываем аргументы
     shm_sino_name      = args['shm_sino_name']
-    out_mmap_path      = args['out_mmap_path']
+    shm_out_name       = args['shm_out_name']
     sino_shape         = args['sino_shape']
     out_shape          = args['out_shape']
     dtype_sino         = args['dtype_sino']
@@ -472,12 +473,11 @@ def _recon_worker_shmem(args: dict) -> None:
     # Восстанавливаем массив углов
     angles = np.frombuffer(angles_bytes, dtype='float32').reshape(angles_shape)
 
-    # Присоединяемся к SharedMemory синограммы (только чтение)
+    # Присоединяемся к SharedMemory (чтение sino, запись out)
     shm_sino = shm_mod.SharedMemory(name=shm_sino_name)
+    shm_out  = shm_mod.SharedMemory(name=shm_out_name)
     sino_arr = np.ndarray(sino_shape, dtype=dtype_sino, buffer=shm_sino.buf)
-
-    # Открываем memmap для записи (уже создан главным процессом)
-    out_arr = np.memmap(out_mmap_path, dtype=dtype_out, mode='r+', shape=out_shape)
+    out_arr  = np.ndarray(out_shape,  dtype=dtype_out,  buffer=shm_out.buf)
 
     # Предвычисляем порог для пустых срезов один раз на воркер
     if norm_thresh_factor > 0:
@@ -504,10 +504,8 @@ def _recon_worker_shmem(args: dict) -> None:
             )
             out_arr[i] = rec / pixel_size
 
-    # flush + закрытие
-    out_arr.flush()
-    del out_arr
     shm_sino.close()
+    shm_out.close()
 
 
 def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
@@ -555,9 +553,6 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
     """
     import multiprocessing
     import multiprocessing.shared_memory as shm_mod
-    import tempfile
-    import sys
-    import os as _os
 
     n_slices   = sinogram_fixed.shape[0]
     sino_shape = sinogram_fixed.shape          # (H, N_angles, W)
@@ -565,33 +560,24 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
     dtype_sino = sinogram_fixed.dtype.str      # '<f4'
     dtype_out  = rec_vol.dtype.str
 
-    # --- SharedMemory только для синограммы (чтение воркерами) ---
+    # --- SharedMemory для синограммы (чтение воркерами) ---
     nbytes_sino = int(np.prod(sino_shape)) * np.dtype(dtype_sino).itemsize
-    shm_sino = shm_mod.SharedMemory(create=True, size=nbytes_sino)
-
-    # --- Временный memmap для выходного буфера (воркеры пишут напрямую) ---
-    # На Linux используем /dev/shm (tmpfs = RAM) вместо /tmp (диск),
-    # чтобы избежать медленной записи 4+ GB на HDD/SSD.
+    # --- SharedMemory для выходного объёма (воркеры пишут напрямую в RAM) ---
+    # Оба буфера размещаются в /dev/shm (tmpfs) — нет дискового I/O.
     # /dev/shm в контейнере настроен на 6 GB через shm_size в docker-compose.yml.
-    if sys.platform.startswith('linux') and _os.path.isdir('/dev/shm'):
-        tmp_dir = '/dev/shm'
-    else:
-        tmp_dir = None  # системный temp (Windows / macOS)
+    nbytes_out  = int(np.prod(out_shape))  * np.dtype(dtype_out).itemsize
 
-    tmp_file = tempfile.NamedTemporaryFile(suffix='.raw', delete=False, dir=tmp_dir)
-    tmp_path = tmp_file.name
-    tmp_file.close()
+    shm_sino = shm_mod.SharedMemory(create=True, size=nbytes_sino)
+    shm_out  = shm_mod.SharedMemory(create=True, size=nbytes_out)
 
     try:
         # Копируем синограмму в SharedMemory
         sino_shared = np.ndarray(sino_shape, dtype=dtype_sino, buffer=shm_sino.buf)
         np.copyto(sino_shared, sinogram_fixed.astype(dtype_sino, copy=False))
 
-        # Создаём выходной memmap (заполняем нулями)
-        out_mmap = np.memmap(tmp_path, dtype=dtype_out, mode='w+', shape=out_shape)
-        out_mmap[:] = 0
-        out_mmap.flush()
-        del out_mmap  # закрываем в главном процессе — воркеры откроют через mode='r+'
+        # Инициализируем выходной буфер нулями
+        out_shared = np.ndarray(out_shape, dtype=dtype_out, buffer=shm_out.buf)
+        out_shared[:] = 0
 
         # Разбиваем срезы по GPU
         all_indices = list(range(n_slices))
@@ -601,7 +587,7 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
         worker_args = [
             {
                 'shm_sino_name':      shm_sino.name,
-                'out_mmap_path':      tmp_path,
+                'shm_out_name':       shm_out.name,
                 'sino_shape':         sino_shape,
                 'out_shape':          out_shape,
                 'dtype_sino':         dtype_sino,
@@ -619,25 +605,20 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
 
         # Запускаем воркеры методом spawn (обязателен на Windows)
         if pool is not None:
-            # Переиспользуем готовый пул — нет overhead spawn
             pool.map(_recon_worker_shmem, worker_args)
         else:
             ctx = multiprocessing.get_context('spawn')
             with ctx.Pool(processes=num_gpus) as _pool:
                 _pool.map(_recon_worker_shmem, worker_args)
 
-        # Читаем результат из memmap в rec_vol
-        result_mmap = np.memmap(tmp_path, dtype=dtype_out, mode='r', shape=out_shape)
-        np.copyto(rec_vol, result_mmap.astype(rec_vol.dtype, copy=False))
-        del result_mmap
+        # Копируем результат из SharedMemory в rec_vol (RAM→RAM, быстро)
+        np.copyto(rec_vol, out_shared.astype(rec_vol.dtype, copy=False))
 
     finally:
         shm_sino.unlink()
         shm_sino.close()
-        try:
-            _os.unlink(tmp_path)
-        except OSError:
-            pass
+        shm_out.unlink()
+        shm_out.close()
 
 
 # =============================================================================
