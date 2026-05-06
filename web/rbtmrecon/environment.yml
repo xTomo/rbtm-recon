@@ -8,7 +8,6 @@ channels:
   - httomo 
 dependencies:
   - python=3.11
-  - cudatoolkit=11.8
   - scipy
   - py-opencv
   - numpy
