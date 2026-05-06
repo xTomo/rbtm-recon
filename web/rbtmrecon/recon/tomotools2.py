@@ -410,7 +410,7 @@ def recon_2d_parallel(sino: np.ndarray, angles: np.ndarray,
     gpu_id    : индекс GPU для ASTRA
     """
     rec = astra_utils.astra_recon_2d_parallel(
-        sino, angles, ['FBP_CUDA', ['CGLS_CUDA', 10]], gpu_id=gpu_id
+        sino, angles, [['FBP_CUDA'], ['CGLS_CUDA', 10]], gpu_id=gpu_id
     )
     return rec / pixel_size
 
