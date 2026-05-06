@@ -219,6 +219,53 @@ def save_csv_report(results: dict, out_dir: Path) -> None:
 # Основная функция
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Собственная реализация фантома Шеппа-Логана (совместима с NumPy 2.0)
+# ---------------------------------------------------------------------------
+
+# Параметры эллипсоидов: (ρ, a, b, c, x0, y0, z0, φ_deg)
+# Источник: Kak & Slaney "Principles of CT", Table 3.1
+_SHEPP_LOGAN_PARAMS = np.array([
+    # ρ      a      b      c     x0     y0     z0    φ
+    [ 1.0,  0.69,  0.92,  0.9,   0.0,  0.0,  0.0,   0.0],
+    [-0.8,  0.6624,0.874, 0.88,  0.0,  0.0,  0.0,   0.0],
+    [-0.2,  0.11,  0.31,  0.22,  0.22, 0.0, -0.25, -18.0],
+    [-0.2,  0.16,  0.41,  0.28, -0.22, 0.0, -0.25,  18.0],
+    [ 0.1,  0.21,  0.25,  0.41,  0.0,  0.35,-0.25,   0.0],
+    [ 0.1,  0.046, 0.046, 0.05,  0.0,  0.1, -0.25,   0.0],
+    [ 0.1,  0.046, 0.046, 0.05,  0.0, -0.1, -0.25,   0.0],
+    [-0.02, 0.046, 0.023, 0.05, -0.08,-0.605, 0.0,   0.0],
+    [-0.02, 0.023, 0.023, 0.02,  0.06,-0.605, 0.0,   0.0],
+    [ 0.02, 0.023, 0.046, 0.02,  0.06,-0.605, 0.0,   0.0],
+], dtype='float64')
+
+
+def _make_shepp_logan_3d(size: int) -> np.ndarray:
+    """Генерирует 3D фантом Шеппа-Логана размером (size, size, size).
+
+    Совместима с NumPy 2.0 (не использует np.lib.index_tricks).
+    Возвращает float32 массив.
+    """
+    half = (size - 1) / 2.0
+    coords = (np.arange(size) - half) / half      # [-1, 1]
+    z, y, x = np.meshgrid(coords, coords, coords, indexing='ij')
+
+    phantom = np.zeros((size, size, size), dtype='float64')
+
+    for row in _SHEPP_LOGAN_PARAMS:
+        rho, a, b, c, x0, y0, z0, phi_deg = row
+        phi = np.deg2rad(phi_deg)
+        cos_p, sin_p = np.cos(phi), np.sin(phi)
+        # Поворот вокруг оси Z
+        xr = cos_p * (x - x0) + sin_p * (y - y0)
+        yr = -sin_p * (x - x0) + cos_p * (y - y0)
+        zr = z - z0
+        mask = (xr / a) ** 2 + (yr / b) ** 2 + (zr / c) ** 2 <= 1.0
+        phantom[mask] += rho
+
+    return phantom.clip(0, None).astype('float32')
+
+
 def run_benchmark(size: int = 256,
                    n_angles: int = 200,
                    num_gpus: int = 2,
@@ -234,8 +281,6 @@ def run_benchmark(size: int = 256,
     use_cgls  : если True — FBP_CUDA + CGLS_CUDA×10, иначе только FBP_CUDA
     out_dir   : каталог для артефактов
     """
-    from tomopy.misc.phantom import shepp3d
-
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
@@ -251,9 +296,7 @@ def run_benchmark(size: int = 256,
     # ------------------------------------------------------------------
     print("\n[1/5] Генерация фантома Шеппа-Логана…")
     t0 = time.perf_counter()
-    phantom_raw = shepp3d(size)                     # (size, size, size), float64
-    phantom = phantom_raw.astype('float32')
-    del phantom_raw
+    phantom = _make_shepp_logan_3d(size)            # (size, size, size), float32
     mem_gb = phantom.nbytes / 1024**3
     print(f"  Фантом: shape={phantom.shape}, dtype={phantom.dtype}, "
           f"размер={mem_gb:.2f} GB, за {time.perf_counter()-t0:.1f} с")
