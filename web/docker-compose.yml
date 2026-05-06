@@ -22,7 +22,7 @@ services:
   reconstructor-jupyter:
     runtime: nvidia
     build: rbtmrecon/
-    command: bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && cd /rbtm/recon/ && jupyter notebook"
+    command: bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && umask 0002 && cd /rbtm/recon/ && python tomo_worker.py & jupyter lab"
 #    runtime: nvidia
     volumes:
       - /diskmnt/fast/robotom:/fast
