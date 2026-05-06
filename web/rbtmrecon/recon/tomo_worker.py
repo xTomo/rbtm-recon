@@ -7,7 +7,7 @@ from shutil import copy
 
 import nbformat
 
-import tomotools
+import tomotools2 as tomotools
 from tomo_queue import get_rec_queue_next_obj, set_object_status
 
 logging.basicConfig(level=logging.INFO)
