@@ -73,7 +73,8 @@ data_dir = '/fast/'
 storage_dir = '/storage/'
 exp_src_dir = '/exp_src'
 
-pixel_size = 9.0e-3  # pixel size in mm
+pixel_size = float(config['SAMPLE'].get('pixel_size', 4.25e-3))
+print(f"pixel_size = {pixel_size} mm")
 
 tmp_dir = os.path.join(data_dir, experiment_id)
 
