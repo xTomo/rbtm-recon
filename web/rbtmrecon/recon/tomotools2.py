@@ -164,11 +164,10 @@ def get_frame_group(data_file: str, group_name: str, mmap_file_dir: str,
         images_count = len(keys)
         first_ds = group[keys[0]]  # type: ignore[index]
         frame_h, frame_w = first_ds.shape  # type: ignore[union-attr]
-        attr_key = list(first_ds.attrs)[0]  # type: ignore[union-attr]
         angles = np.empty((images_count,), dtype='float32')
         for i, k in enumerate(keys):
             ds = group[k]  # type: ignore[index]
-            attributes = json.loads(str(ds.attrs[attr_key]))[0]  # type: ignore[union-attr]
+            attributes = json.loads(str(ds.attrs['frame_info']))[0]  # type: ignore[union-attr]
             angles[i] = attributes['frame']['object']['angle position']
 
     images = np.empty((images_count, frame_h, frame_w), dtype='float32')
