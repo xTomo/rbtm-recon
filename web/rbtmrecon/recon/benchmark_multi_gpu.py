@@ -396,7 +396,7 @@ def run_benchmark(size: int = 256,
     # ------------------------------------------------------------------
     # 3. Single-GPU реконструкция (2D FBP/CGLS срез за срезом)
     # ------------------------------------------------------------------
-    print("\n[3/6] Single-GPU реконструкция (2D, срез за срезом)…")
+    print("\n[3/5] Single-GPU реконструкция (2D, срез за срезом)…")
     rec_single, t_single = _recon_single_gpu(
         sinogram, angles_deg, pixel_size, use_cgls, gpu_id=0
     )
@@ -404,7 +404,7 @@ def run_benchmark(size: int = 256,
     # ------------------------------------------------------------------
     # 4. Multi-GPU реконструкция (spawn + SharedMemory)
     # ------------------------------------------------------------------
-    print(f"\n[4/6] Multi-GPU spawn-реконструкция ({num_gpus} GPU, SharedMemory)…")
+    print(f"\n[4/5] Multi-GPU spawn-реконструкция ({num_gpus} GPU, SharedMemory)…")
     if num_gpus < 2:
         print("  ПРОПУЩЕНО (num_gpus < 2)")
         rec_multi  = rec_single
@@ -416,79 +416,46 @@ def run_benchmark(size: int = 256,
         speedup_mp = t_single / t_multi if t_multi > 0 else float('inf')
 
     # ------------------------------------------------------------------
-    # 5. CIL + TIGRE multi-GPU FBP (нативный multi-GPU с ramp-фильтром)
+    # 5. Метрики качества
     # ------------------------------------------------------------------
-    gpu_indices = list(range(num_gpus))
-    print(f"\n[5/6] CIL/TIGRE FBP multi-GPU (gpu_indices={gpu_indices})…")
-    from tomotools2 import recon_volume_cil
-    rec_cil = np.empty_like(rec_single)
-    t0_cil = time.perf_counter()
-    try:
-        recon_volume_cil(sinogram, angles_deg, pixel_size, rec_cil,
-                          gpu_indices=gpu_indices)
-        t_cil = time.perf_counter() - t0_cil
-        nan_cil = int(np.isnan(rec_cil).sum())
-        if nan_cil:
-            warnings.warn(f"CIL/TIGRE: {nan_cil} NaN — заменены нулями")
-            np.nan_to_num(rec_cil, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-        cil_ok = True
-    except Exception as e:
-        warnings.warn(f"CIL/TIGRE недоступен: {e}")
-        rec_cil = rec_single.copy()
-        t_cil = t_single
-        cil_ok = False
-    speedup_cil = t_single / t_cil if t_cil > 0 else float('inf')
-    print(f"  CIL/TIGRE реконструкция завершена за {t_cil:.1f} с")
-
-    # ------------------------------------------------------------------
-    # 6. Метрики качества
-    # ------------------------------------------------------------------
-    print("\n[6/6] Вычисление метрик качества…")
+    print("\n[5/5] Вычисление метрик качества…")
 
     rmse_single = compute_rmse(rec_single, phantom)
     rmse_multi  = compute_rmse(rec_multi,  phantom)
-    rmse_cil    = compute_rmse(rec_cil,    phantom)
     ssim_single = compute_ssim_volume(rec_single, phantom)
     ssim_multi  = compute_ssim_volume(rec_multi,  phantom)
-    ssim_cil    = compute_ssim_volume(rec_cil,    phantom)
 
-    cil_label = 'CIL/TIGRE' if cil_ok else 'CIL/TIGRE(err)'
-
-    print("\n" + "=" * 72)
+    print("\n" + "=" * 60)
     print("РЕЗУЛЬТАТЫ")
-    print("=" * 72)
-    print(f"  {'Параметр':<30} {'Single-GPU':>12} {'MP multi-GPU':>13} {cil_label:>16}")
-    print(f"  {'-'*71}")
-    print(f"  {'Время реконструкции, с':<30} {t_single:>12.1f} {t_multi:>13.1f} {t_cil:>16.1f}")
-    print(f"  {'Ускорение':<30} {'—':>12} {speedup_mp:>12.2f}x {speedup_cil:>15.2f}x")
-    print(f"  {'RMSE (нормир.)':<30} {rmse_single:>12.6f} {rmse_multi:>13.6f} {rmse_cil:>16.6f}")
-    print(f"  {'SSIM (среднее 3 срезов)':<30} {ssim_single:>12.4f} {ssim_multi:>13.4f} {ssim_cil:>16.4f}")
-    print("=" * 72)
+    print("=" * 60)
+    print(f"  {'Параметр':<30} {'Single-GPU':>12} {'Multi-GPU':>12}")
+    print(f"  {'-'*54}")
+    print(f"  {'Время реконструкции, с':<30} {t_single:>12.1f} {t_multi:>12.1f}")
+    print(f"  {'Ускорение':<30} {'—':>12} {speedup_mp:>12.2f}x")
+    print(f"  {'RMSE (нормир.)':<30} {rmse_single:>12.6f} {rmse_multi:>12.6f}")
+    print(f"  {'SSIM (среднее 3 срезов)':<30} {ssim_single:>12.4f} {ssim_multi:>12.4f}")
+    print("=" * 60)
 
     # ------------------------------------------------------------------
     # Сохранение артефактов
     # ------------------------------------------------------------------
     results = {
-        'size':           size,
-        'n_angles':       n_angles,
-        'num_gpus':       num_gpus,
-        'use_cgls':       use_cgls,
-        't_single_s':     round(t_single,    3),
-        't_multi_mp_s':   round(t_multi,     3),
-        't_cil_s':        round(t_cil,       3),
-        'speedup_mp':     round(speedup_mp,   3),
-        'speedup_cil':    round(speedup_cil,  3),
-        'rmse_single':    round(rmse_single,  8),
-        'rmse_multi_mp':  round(rmse_multi,   8),
-        'rmse_cil':       round(rmse_cil,     8),
-        'ssim_single':    round(ssim_single,  6),
-        'ssim_multi_mp':  round(ssim_multi,   6),
-        'ssim_cil':       round(ssim_cil,     6),
+        'size':          size,
+        'n_angles':      n_angles,
+        'num_gpus':      num_gpus,
+        'use_cgls':      use_cgls,
+        't_single_s':    round(t_single,  3),
+        't_multi_s':     round(t_multi,   3),
+        'speedup':       round(speedup_mp, 3),
+        'rmse_single':   round(rmse_single, 8),
+        'rmse_multi':    round(rmse_multi,  8),
+        'ssim_single':   round(ssim_single, 6),
+        'ssim_multi':    round(ssim_multi,  6),
     }
 
     print()
     save_csv_report(results, out_path)
-    save_slices_png(rec_single, rec_cil, phantom, out_path)
+    save_slices_png(rec_single, rec_multi, phantom, out_path)
 
 
 # ---------------------------------------------------------------------------

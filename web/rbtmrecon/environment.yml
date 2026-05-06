@@ -35,9 +35,6 @@ dependencies:
   - pillow
   - k3d
   - scikit-learn
-  # TIGRE из conda-forge (настоящая реализация с CUDA multi-GPU)
-  # tigre на PyPI — это placeholder-заглушка, не использовать!
-  - tigre
   - pip
   - pip:
     - plumbum
