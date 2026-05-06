@@ -49,7 +49,8 @@ c.ServerApp.ip = '0.0.0.0'\n\
 c.ServerApp.port = 5551\n\
 c.ServerApp.open_browser = False\n\
 c.ServerApp.password = u'sha1:b53c6ff4cf18:365ffefa7ddea6908cf8ce15e63826df112990c2'\n\
-c.ServerApp.root_dir = '/storage'" >> ~/.jupyter/jupyter_server_config.py
+c.ServerApp.root_dir = '/storage'\n\
+c.ServerApp.default_url = '/lab'" >> ~/.jupyter/jupyter_server_config.py
 CMD bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && \
             umask 0002 && \
             cd /rbtm/recon/ && \
