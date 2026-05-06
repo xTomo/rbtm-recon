@@ -428,22 +428,16 @@ def recon_volume_astra3d(sinogram_fixed: np.ndarray,
                           pixel_size: float,
                           rec_vol: np.ndarray,
                           gpu_indices: list | tuple = (0,),
-                          n_cgls_iter: int = 10,
                           chunk_size: int = 64) -> None:
-    """Реконструкция всего объёма с нативным ASTRA 3D multi-GPU по чанкам.
+    """Реконструкция всего объёма с нативным ASTRA 3D multi-GPU по чанкам (FBP).
 
-    Полный объём 1000³ × float32 ≈ 4 GB не помещается в VRAM одного GPU.
-    Функция разбивает синограмму на чанки по ``chunk_size`` срезов и
-    вызывает ``CGLS3D_CUDA`` для каждого чанка отдельно.
+    Использует ``FBP3D_CUDA`` — единственный 3D-алгоритм ASTRA, пригодный
+    для чанковой обработки. В отличие от итерационных алгоритмов (CGLS3D),
+    FBP3D обрабатывает каждый срез независимо, поэтому разбивка на чанки
+    не нарушает корректность реконструкции.
 
-    Для каждого чанка вызывается ``astra.set_gpu_index(gpu_indices)`` —
-    ASTRA самостоятельно распределяет вычисления чанка по указанным GPU
-    без каких-либо дополнительных процессов.
-
-    Требования
-    ----------
-    * Алгоритм ``CGLS3D_CUDA`` поддерживает multi-GPU начиная с ASTRA 1.8.
-    * Для FBP3D_CUDA multi-GPU поддержки нет — функция всегда использует CGLS.
+    ``astra.set_gpu_index(gpu_indices)`` вызывается один раз до цикла —
+    ASTRA распределяет вычисления каждого чанка по указанным GPU.
 
     Параметры
     ----------
@@ -457,11 +451,8 @@ def recon_volume_astra3d(sinogram_fixed: np.ndarray,
         Выходной массив для записи результата (memmap или обычный ndarray).
     gpu_indices    : list or tuple of int
         Индексы GPU для нативного multi-GPU в ASTRA, например [0, 1].
-    n_cgls_iter    : int
-        Количество итераций CGLS3D_CUDA (default: 10).
     chunk_size     : int
         Количество срезов в одном ASTRA 3D вызове (default: 64).
-        Уменьшите при OOM (напр. 32), увеличьте при большом VRAM (128+).
         VRAM на чанк ≈ chunk_size × W × W × 4 байт.
         При W=1000, chunk_size=64: ~256 MB.
     """
@@ -470,16 +461,19 @@ def recon_volume_astra3d(sinogram_fixed: np.ndarray,
     H = sinogram_fixed.shape[0]
     angles_f32 = data_angles.astype('float32', copy=False)
 
-    # Устанавливаем GPU один раз на весь объём
+    # Устанавливаем multi-GPU один раз до цикла
     astra.set_gpu_index(list(gpu_indices))
 
     for start in range(0, H, chunk_size):
         end = min(start + chunk_size, H)
         sino_chunk = sinogram_fixed[start:end]   # (chunk, N_angles, W)
+        # FBP3D_CUDA: каждый срез независим — чанковая обработка корректна.
+        # CGLS3D_CUDA/SIRT3D_CUDA нельзя разбивать на чанки — алгоритм
+        # ожидает полный синограммный вектор и будет давать NaN/мусор.
         rec_chunk = astra_utils.astra_recon_3d_parallel(
             sino_chunk,
             angles_f32,
-            [['CGLS3D_CUDA', n_cgls_iter]],
+            [['FBP3D_CUDA']],
         )
         rec_vol[start:end] = (rec_chunk / pixel_size).astype(rec_vol.dtype, copy=False)
 

@@ -422,11 +422,11 @@ def run_benchmark(size: int = 256,
     from tomotools2 import recon_volume_astra3d
     rec_astra3d = np.empty_like(rec_single)
     gpu_indices = list(range(num_gpus))
-    # CGLS3D_CUDA всегда используется (FBP3D не поддерживает multi-GPU)
-    n_iter = 10 if use_cgls else 1
+    # FBP3D_CUDA: единственный 3D-алгоритм ASTRA пригодный для чанковой
+    # обработки (каждый срез независим). use_cgls игнорируется для 3D.
     t0_a3d = time.perf_counter()
     recon_volume_astra3d(sinogram, angles_deg, pixel_size, rec_astra3d,
-                          gpu_indices=gpu_indices, n_cgls_iter=n_iter)
+                          gpu_indices=gpu_indices)
     t_astra3d = time.perf_counter() - t0_a3d
     speedup_a3d = t_single / t_astra3d if t_astra3d > 0 else float('inf')
     nan_a3d = int(np.isnan(rec_astra3d).sum())
