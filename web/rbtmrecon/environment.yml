@@ -12,11 +12,11 @@ dependencies:
   - py-opencv
   - numpy
   - matplotlib
-  - astra-toolbox=*=cuda*
+  - astra-toolbox
+  - cuda-version=12  # заставляет conda выбирать сборки astra-toolbox под CUDA 12 (без зависимости от cudatoolkit)
   - cil=25.0.0
   - ipp=2021.12
   - ccpi-regulariser
-  - tigre
   - tomopy
   - scikit-image
   - h5py
@@ -42,3 +42,4 @@ dependencies:
     - pyvista
     - line_profiler
     - cupy-cuda12x
+    - tigre
