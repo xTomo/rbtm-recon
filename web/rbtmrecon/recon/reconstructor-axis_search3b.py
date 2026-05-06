@@ -37,6 +37,8 @@ from plumbum.cmd import cp, rm, mv, ls
 logger = logging.getLogger()
 logger.setLevel(logging.WARN)
 
+logging.getLogger('asyncio').setLevel(logging.CRITICAL)
+
 from tomotools2 import (
     STORAGE_SERVER,
     # I/O
@@ -267,8 +269,6 @@ rm['-rf', tmp_path]()
 print(ls['-lhaR', storage_exp_dir]())
 
 # %%
-import logging
-logging.getLogger('asyncio').setLevel(logging.CRITICAL)
 get_ipython().kernel.do_shutdown(restart=False)
 
 # %% [markdown]
