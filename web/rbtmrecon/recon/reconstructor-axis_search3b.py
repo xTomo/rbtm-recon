@@ -267,6 +267,8 @@ rm['-rf', tmp_path]()
 print(ls['-lha', storage_exp_dir]())
 
 # %%
+import logging
+logging.getLogger('asyncio').setLevel(logging.CRITICAL)
 get_ipython().kernel.do_shutdown(restart=False)
 
 # %% [markdown]
