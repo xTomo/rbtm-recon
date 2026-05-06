@@ -1,3 +1,4 @@
+import configparser
 import json
 import logging
 import os
@@ -5,17 +6,16 @@ import shutil
 import time
 from urllib.request import urlretrieve
 
-import cv2
 import h5py
 import numpy as np
 import pylab as plt
 import requests
-import scipy.ndimage
-import scipy.optimize
-from tqdm.notebook import tqdm  # noqa
+import scipy.ndimage as ndi
+import scipy.optimize as optimize
 import cupy as cp
+import cupyx.scipy.ndimage as cndi
 from cupyx.scipy.ndimage import median_filter
-
+from tqdm.notebook import tqdm  # noqa
 
 import tomo.recon.astra_utils as astra_utils  # noqa
 
@@ -23,23 +23,32 @@ import tomo.recon.astra_utils as astra_utils  # noqa
 STORAGE_SERVER = "http://rbtmstorage_server_1:5006/"
 
 
-def mkdir_p(path):
+# =============================================================================
+# --- I/O ---
+# =============================================================================
+
+def mkdir_p(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
-def get_experiment_hdf5(experiment_id, output_dir, experiment_files_dir=None, storage_server=STORAGE_SERVER):
+def get_experiment_hdf5(experiment_id: str, output_dir: str,
+                        experiment_files_dir: str | None = None,
+                        storage_server: str = STORAGE_SERVER) -> str:
+    """Возвращает путь к локальному HDF5-файлу эксперимента.
+
+    Если файл уже существует и читается — возвращает его.
+    Иначе копирует из ``experiment_files_dir`` или скачивает с сервера.
+    """
     data_file = os.path.join(output_dir, experiment_id + '.h5')
     logging.info('Output experiment HDF5 file: {}'.format(data_file))
 
-    # check if file exist and can be read
     if os.path.isfile(data_file):
         try:
-            with h5py.File(data_file, 'r') as h5f:
+            with h5py.File(data_file, 'r'):
                 pass
-        except OSError as e:  # Seams file is damaged
+        except OSError:
             logging.info('Deleting damaged file: {}'.format(data_file))
             os.remove(data_file)
-
         except Exception as e:
             raise e
         else:
@@ -47,14 +56,10 @@ def get_experiment_hdf5(experiment_id, output_dir, experiment_files_dir=None, st
             return data_file
 
     if experiment_files_dir is None:
-        # download file
-        hdf5_url = storage_server + 'storage/experiments/{}.h5'.format(
-            experiment_id)
+        hdf5_url = storage_server + 'storage/experiments/{}.h5'.format(experiment_id)
         logging.info('Downloading file: {}'.format(hdf5_url))
-
         remaining_download_tries = 5
         last_exception = None
-
         while remaining_download_tries > 0:
             try:
                 urlretrieve(hdf5_url, filename=data_file)
@@ -62,9 +67,9 @@ def get_experiment_hdf5(experiment_id, output_dir, experiment_files_dir=None, st
                 time.sleep(0.1)
             except Exception as e:
                 last_exception = e
-                logging.warning("error downloading {}  on trial no {}: {}".format(
+                logging.warning("error downloading {} on trial no {}: {}".format(
                     hdf5_url, 6 - remaining_download_tries, e))
-                remaining_download_tries = remaining_download_tries - 1
+                remaining_download_tries -= 1
                 continue
             else:
                 break
@@ -73,34 +78,37 @@ def get_experiment_hdf5(experiment_id, output_dir, experiment_files_dir=None, st
                 'Failed to download {} after 5 attempts'.format(hdf5_url)
             ) from last_exception
     else:
-        # copy local file
         src_file = os.path.join(experiment_files_dir, experiment_id + '.h5')
-        logging.info('Copyng local  file: {}'.format(src_file))
+        logging.info('Copying local file: {}'.format(src_file))
         shutil.copy(src_file, data_file)
 
     return data_file
 
 
-def get_tomoobject_info(experiment_id, storage_server=STORAGE_SERVER):
-    exp_info = json.dumps(({"_id": experiment_id}))
+def get_tomoobject_info(experiment_id: str, storage_server: str = STORAGE_SERVER) -> dict:
+    """Возвращает метаданные эксперимента из хранилища."""
+    exp_info = json.dumps({"_id": experiment_id})
     experiment = requests.post(storage_server + 'storage/experiments/get',
                                exp_info, timeout=1000)
-    experiment_info = json.loads(experiment.content)[0]
-    return experiment_info
+    return json.loads(experiment.content)[0]
 
 
-def get_mm_shape(data_file):
-    if os.path.exists(data_file + '.size'):
-        res = np.loadtxt(data_file + '.size').astype('uint16')
-        if res.ndim > 0:
-            return tuple(res)
-        else:
-            return res,
-    else:
-        return None
+def get_mm_shape(data_file: str) -> tuple | None:
+    """Читает форму memmap-массива из .size файла рядом с data_file."""
+    size_file = data_file + '.size'
+    if os.path.exists(size_file):
+        res = np.loadtxt(size_file).astype('uint16')
+        return tuple(res) if res.ndim > 0 else (res,)
+    return None
 
 
-def persistent_array(data_file, shape, dtype, force_create=True):
+def persistent_array(data_file: str, shape: tuple | None,
+                     dtype: str | np.dtype | type,
+                     force_create: bool = True) -> tuple[np.memmap, bool]:
+    """Создаёт или открывает memmap-массив.
+
+    Возвращает (array, loaded_from_disk).
+    """
     if force_create:
         logging.info('Force create')
     elif os.path.exists(data_file):
@@ -124,24 +132,8 @@ def persistent_array(data_file, shape, dtype, force_create=True):
     return res, False
 
 
-# def persistent_array(data_file, shape, dtype, force_create=True):
-#     compressor = zarr.Blosc(cname='zstd', clevel=3, shuffle=2)
-#     if force_create:
-#         logging.info('Force create')
-#         logging.info('Creating new file: {}'.format(data_file))
-#         res = zarr.open(data_file, dtype=dtype, mode='w',
-#                         shape=shape)
-#         return res, False
-#
-#     elif os.path.exists(data_file):
-#         res = zarr.open(data_file, dtype=dtype, mode='a',
-#                         shape=shape)
-#         logging.info('Loading existing file: {}'.format(data_file))
-#         return res, True
-
-
-def get_frame_group(data_file, group_name, mmap_file_dir, num_workers=8,
-                    hdf5_cache_mb=512):
+def get_frame_group(data_file: str, group_name: str, mmap_file_dir: str,
+                    num_workers: int = 8, hdf5_cache_mb: int = 512) -> tuple[np.ndarray, np.ndarray]:
     """Загружает группу кадров из HDF5-файла.
 
     Параметры
@@ -156,113 +148,282 @@ def get_frame_group(data_file, group_name, mmap_file_dir, num_workers=8,
         Количество потоков для параллельного чтения (0 — без параллелизма).
     hdf5_cache_mb : int
         Размер chunk-кэша HDF5 в мегабайтах.
+
+    Возвращает
+    ----------
+    images : np.ndarray, shape (N, H, W)
+    angles : np.ndarray, shape (N,)
     """
     from concurrent.futures import ThreadPoolExecutor
 
     rdcc_nbytes = hdf5_cache_mb * 1024 * 1024
 
-    # --- Первый проход: метаданные (быстро, один файловый дескриптор) ---
     with h5py.File(data_file, 'r', rdcc_nbytes=rdcc_nbytes) as h5f:
-        group = h5f[group_name]
-        keys = list(group.keys())          # стабильный порядок, один вызов
+        group = h5f[group_name]  # type: ignore[index]
+        keys = list(group.keys())  # type: ignore[union-attr]
         images_count = len(keys)
-
-        first_ds = group[keys[0]]
-        frame_h, frame_w = first_ds.shape
-        attr_key = list(first_ds.attrs)[0]  # имя атрибута — одинаково для всей группы
-
-        # Pre-allocate: np.empty быстрее np.zeros (не обнуляет память)
+        first_ds = group[keys[0]]  # type: ignore[index]
+        frame_h, frame_w = first_ds.shape  # type: ignore[union-attr]
+        attr_key = list(first_ds.attrs)[0]  # type: ignore[union-attr]
         angles = np.empty((images_count,), dtype='float32')
-
         for i, k in enumerate(keys):
-            ds = group[k]
-            attributes = json.loads(ds.attrs[attr_key])[0]
+            ds = group[k]  # type: ignore[index]
+            attributes = json.loads(str(ds.attrs[attr_key]))[0]  # type: ignore[union-attr]
             angles[i] = attributes['frame']['object']['angle position']
 
     images = np.empty((images_count, frame_h, frame_w), dtype='float32')
 
-    # --- Второй проход: параллельное чтение пикселей ---
     def _read_one(args):
         idx, key = args
-        # Каждый поток открывает свой дескриптор — безопасно для HDF5 в режиме 'r'
         with h5py.File(data_file, 'r', rdcc_nbytes=rdcc_nbytes) as f:
-            images[idx] = f[group_name][key][()]
+            images[idx] = f[group_name][key][()]  # type: ignore[index]
 
     if num_workers > 1:
         with ThreadPoolExecutor(max_workers=num_workers) as pool:
-            list(tqdm(
-                pool.map(_read_one, enumerate(keys)),
-                total=images_count,
-                desc=group_name,
-            ))
+            list(tqdm(pool.map(_read_one, enumerate(keys)),
+                      total=images_count, desc=group_name))
     else:
-        # Однопоточный fallback (один открытый файл — меньше overhead)
         with h5py.File(data_file, 'r', rdcc_nbytes=rdcc_nbytes) as h5f:
-            group = h5f[group_name]
+            group = h5f[group_name]  # type: ignore[index]
             for i, k in enumerate(tqdm(keys, desc=group_name)):
-                images[i] = group[k][()]
+                images[i] = group[k][()]  # type: ignore[index]
 
     return images, angles
 
 
-# def safe_median(data):
-#     m_data = cv2.medianBlur(data, 3)
-#     mask = np.abs(m_data - data) > 0.1 * np.abs(data)
-#     res = data.copy()
-#     res[mask] = m_data[mask]
-#     return res
+def load_tomo_data(data_file: str, tmp_dir: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Загружает данные томографии из HDF5-файла.
+
+    Возвращает
+    ----------
+    empty_image : np.ndarray  — медиана пустых кадров минус тёмный ток
+    data_images : np.ndarray  — проекции минус тёмный ток
+    data_angles : np.ndarray  — углы проекций
+    """
+    empty_images, _ = get_frame_group(data_file, 'empty', tmp_dir)
+    dark_images, _ = get_frame_group(data_file, 'dark', tmp_dir)
+
+    empty_image = np.median(empty_images, axis=0)
+    dark_image = np.median(dark_images, axis=0)
+    empty_image -= dark_image
+
+    # TODO: добавить поддержку, когда много кадров на одном угле
+    data_images, data_angles = get_frame_group(data_file, 'data', tmp_dir)
+    data_images -= dark_image
+
+    return empty_image, data_images, data_angles
 
 
-def safe_median(data):
+def load_recon_config(tmp_dir: str, storage_dir: str, experiment_id: str) -> dict:
+    """Ищет и загружает rec_config.ini из нескольких стандартных мест.
+
+    Порядок поиска:
+      1. ./rec_config.ini (текущий каталог)
+      2. {tmp_dir}/rec_config.ini
+      3. {storage_dir}/{experiment_id}/reconstruction/rec_config.ini
+
+    Возвращает dict секций конфига (или пустой dict, если файл не найден).
+    """
+    candidates = [
+        "rec_config.ini",
+        os.path.join(tmp_dir, 'rec_config.ini'),
+        os.path.join(storage_dir, experiment_id, 'reconstruction', 'rec_config.ini'),
+    ]
+    config_file = next((p for p in candidates if os.path.exists(p)), None)
+
+    if config_file is not None:
+        recon_conf = configparser.ConfigParser()
+        recon_conf.read(config_file)
+        # Копируем секции, исключая служебный DEFAULT
+        return {s: dict(recon_conf[s]) for s in recon_conf.sections()}
+    return {}
+
+
+def save_recon_config(recon_config: dict, tmp_dir: str) -> None:
+    """Сохраняет секции 'roi', 'corr', 'axis_corr' в {tmp_dir}/rec_config.ini."""
+    cfg = configparser.ConfigParser()
+    for key in ['roi', 'corr', 'axis_corr']:
+        if key in recon_config:
+            cfg[key] = recon_config[key]
+    config_path = os.path.join(tmp_dir, 'rec_config.ini')
+    with open(config_path, 'w') as configfile:
+        cfg.write(configfile)
+    logging.info('Saved recon config: {}'.format(config_path))
+
+
+# =============================================================================
+# --- Preprocessing ---
+# =============================================================================
+
+def safe_median(data: np.ndarray) -> np.ndarray:
+    """Заменяет выбросы (>10 % отклонение от медианы) медианным значением.
+
+    Выполняется на GPU через CuPy.
+    """
     data_gpu = cp.asarray(data)
     m_data = median_filter(data_gpu, size=3)
     mask = cp.abs(m_data - data_gpu) > 0.1 * cp.abs(data_gpu)
     res = data_gpu.copy()
-    res[mask] = m_data[mask]
-    
-    return cp.asnumpy(res)  # Конвертируем обратно в numpy
+    res[mask] = m_data[mask]  # type: ignore[index]
+    return cp.asnumpy(res)
 
-def recon_2d_parallel(sino, angles, pixel_size=9e-3):
-    rec = astra_utils.astra_recon_2d_parallel(sino, angles, 
-                                              ['FBP_CUDA', 
-                                              ['CGLS_CUDA', 10]])
+
+def normalize_projections(data_images_crop: np.ndarray,
+                          empty_beam_crop: np.ndarray) -> None:
+    """Нормирует проекции in-place: d = log(empty) − log(data), clip ≥ 0.
+
+    Применяет safe_median для подавления одиночных выбросов.
+    Модифицирует data_images_crop на месте.
+    """
+    te = empty_beam_crop.copy()
+    te[te < 1] = 1
+    log_te = np.log(te)
+
+    for di in tqdm(range(data_images_crop.shape[0])):
+        td = data_images_crop[di]
+        td[td < 1] = 1
+        d = log_te - np.log(td)
+        d = safe_median(d)
+        d[d < 0] = 0
+        data_images_crop[di] = d
+
+
+def remove_stripes_sinogram(sinogram_fixed: np.ndarray) -> None:
+    """Удаляет кольцевые артефакты из синограммы in-place.
+
+    Обрабатывает синограмму батчами по ~48 срезов на GPU.
+    """
+    from tomo.remove_stripe import remove_all_stripe
+
+    indexes = range(sinogram_fixed.shape[0])
+    num_subarrays = len(indexes) // 48 + 1
+
+    for subarr in tqdm(np.array_split(indexes, num_subarrays)):
+        t = sinogram_fixed[subarr]
+        t = remove_all_stripe(cp.asanyarray(t.swapaxes(0, 1))).get().swapaxes(0, 1)
+        sinogram_fixed[subarr] = t
+
+
+# =============================================================================
+# --- Axis correction ---
+# =============================================================================
+
+def transform_image(im: np.ndarray, shift_x: float, angle: float) -> np.ndarray:
+    """Сдвигает и поворачивает изображение на GPU (CuPy).
+
+    Параметры
+    ----------
+    im      : входное 2D-изображение (float32)
+    shift_x : сдвиг по горизонтали в пикселях
+    angle   : угол поворота в градусах
+
+    Возвращает np.ndarray той же формы.
+    """
+    imcu = cp.asarray(im)
+    imcu = cndi.shift(imcu, [0, shift_x], order=3, mode='nearest')
+    imcu = cndi.rotate(imcu, angle, order=3, reshape=False, mode='nearest')
+    return imcu.get()
+
+
+def find_axis_correction(data_images_crop: np.ndarray,
+                         data_angles: np.ndarray) -> tuple[float, float]:
+    """Автоматически определяет поправку оси вращения методом Пауэлла.
+
+    Минимизирует L2-норму разности трансформированных кадров 0° и 180°.
+
+    Параметры
+    ----------
+    data_images_crop : нормированные кадры, shape (N, H, W)
+    data_angles      : углы в градусах, shape (N,)
+
+    Возвращает
+    ----------
+    shift_x : float — горизонтальный сдвиг оси вращения в пикселях
+    alfa    : float — угол наклона оси вращения в градусах
+    """
+    position_0, position_180 = get_angles_at_180_deg(data_angles)
+    data_0_orig = data_images_crop[position_0[0]]
+    data_180_orig = np.fliplr(data_images_crop[position_180[0]])
+
+    im0 = data_0_orig / (data_0_orig ** 2).sum() ** 0.5
+    im1 = data_180_orig / (data_180_orig ** 2).sum() ** 0.5
+
+    cm0 = ndi.center_of_mass(im0)  # type: ignore[assignment]
+    cm1 = ndi.center_of_mass(im1)  # type: ignore[assignment]
+    initial_shift = (float(cm0[0]) - float(cm1[0])) / 2  # type: ignore[arg-type]
+
+    def _objective(shift_angle, img0, img1):
+        s, a = shift_angle
+        diff = transform_image(img0, s, a) - transform_image(img1, -s, -a)
+        return (diff ** 2).sum()
+
+    result = optimize.minimize(
+        _objective,
+        np.array([initial_shift, 0.0]),
+        args=(im0, im1),
+        method='Powell',
+        options={'return_all': True},
+    )
+    shift_x, alfa = result.x
+    return float(shift_x), float(alfa)
+
+
+def apply_axis_correction(data_images_crop: np.ndarray,
+                          shift_x: float,
+                          alfa: float) -> np.ndarray:
+    """Применяет коррекцию оси вращения и возвращает синограмму.
+
+    Параметры
+    ----------
+    data_images_crop : нормированные кадры, shape (N, H, W)
+    shift_x          : горизонтальный сдвиг в пикселях
+    alfa             : угол наклона оси в градусах
+
+    Возвращает
+    ----------
+    sinogram_fixed : np.ndarray, shape (H, N, W), dtype float32
+    """
+    n_frames, height, width = data_images_crop.shape
+    sinogram_fixed = np.zeros((height, n_frames, width), dtype='float32')
+
+    for i in tqdm(range(n_frames)):
+        sinogram_fixed[:, i, :] = transform_image(data_images_crop[i], shift_x, alfa)
+
+    return sinogram_fixed
+
+
+# =============================================================================
+# --- Reconstruction ---
+# =============================================================================
+
+def recon_2d_parallel(sino: np.ndarray, angles: np.ndarray,
+                      pixel_size: float = 9e-3) -> np.ndarray:
+    """FBP + CGLS реконструкция одного 2D среза.
+
+    Результат масштабируется на 1/pixel_size.
+    """
+    rec = astra_utils.astra_recon_2d_parallel(
+        sino, angles, ['FBP_CUDA', ['CGLS_CUDA', 10]]
+    )
     return rec / pixel_size
 
 
-def recon_2d_parallel_nonorm(sino, angles):  # used for axis search
-    rec = astra_utils.astra_recon_2d_parallel(sino[angles<180], angles[angles<180], ['FBP_CUDA'])
-    return rec
+def recon_2d_parallel_nonorm(sino: np.ndarray, angles: np.ndarray) -> np.ndarray:
+    """FBP реконструкция одного 2D среза без нормировки (для предпросмотра)."""
+    return astra_utils.astra_recon_2d_parallel(
+        sino[angles < 180], angles[angles < 180], ['FBP_CUDA']
+    )
 
-def preview_axis_correction(sinogram_mem, angles, remove_rings=False):
-    # from tomopy.prep.stripe import remove_stripe_ti
-    from tomo.remove_stripe import remove_stripe_ti, remove_all_stripe
-    import cupy as cp
-    import cupyx.scipy.ndimage as cndi
-    
-    if sinogram_mem.ndim >2:
-        n_slices = np.min([10, sinogram_mem.shape[0]])
-        start_slice = sinogram_mem.shape[0]//n_slices
-    else: #for single sliced sinogram
-        n_slices = 1
-        start_slice = 0
-        sinogram_mem = sinogram_mem[None,:,:] 
-        
-    for slice_idx in tqdm(range(0, n_slices)):
-        slice_numb = start_slice*slice_idx
-        # sino2d = np.mean(sinogram_mem[:, :, slice_numb:slice_numb+1], axis=-1)
-        sino2d = sinogram_mem[slice_numb]
-        print(sino2d.shape)
-        if remove_rings:
-            sino2d = remove_all_stripe(cp.asanyarray(sino2d[:, None, :])).get()
-            sino2d = np.squeeze(sino2d)
-        recon = recon_2d_parallel_nonorm(sino2d, angles)
-        plt.figure(figsize=(10,10))
-        plt.imshow(recon, vmin = np.percentile(recon,10), vmax = np.percentile(recon,99.9))
-        plt.show()
 
-def show_exp_data(empty_beam, data_images):
+# =============================================================================
+# --- Visualization ---
+# =============================================================================
+
+def show_exp_data(empty_beam: np.ndarray, data_images: np.ndarray) -> None:
+    """Отображает первый нормированный кадр данных."""
     plt.figure()
-    plt.imshow(data_images[0]/empty_beam, vmin=0, vmax=1, cmap=plt.cm.gray, interpolation='bilinear')
+    plt.imshow(data_images[0] / empty_beam, vmin=0, vmax=1,
+               cmap='gray', interpolation='bilinear')
     cbar = plt.colorbar()
     cbar.set_label('Интенсивность, усл.ед.', rotation=90)
     plt.title('Нормированное изображение объекта')
@@ -271,117 +432,189 @@ def show_exp_data(empty_beam, data_images):
     plt.show()
 
 
-def load_tomo_data(data_file, tmp_dir):
-    empty_images, _ = get_frame_group(data_file, 'empty', tmp_dir)
-    dark_images, _ = get_frame_group(data_file, 'dark', tmp_dir)
+def show_frames_with_border(data_images: np.ndarray, empty_beam: np.ndarray,
+                             data_angles: np.ndarray, image_id: int,
+                             x_min: int, x_max: int,
+                             y_min: int, y_max: int) -> None:
+    """Показывает кадр с отмеченной областью ROI."""
+    te = empty_beam
+    angles_sorted_ind = np.argsort(data_angles)
+    td = np.asarray(data_images[angles_sorted_ind[image_id]])
+    td[td < 1] = 1
+    d = np.log(te) - np.log(td)
 
-    empty_image = np.median(empty_images, axis=0)
-    dark_image = np.median(dark_images, axis=0)
-
-    empty_image -= dark_image
-
-    # Загружаем кадры с даннымии
-    # TODO: добавить поддержку, когда много кадров на одном угле
-    data_images, data_angles = get_frame_group(data_file, 'data', tmp_dir)
-    data_images -= dark_image
-
-    return empty_image, data_images, data_angles
-
-
-# TODO: Profile this function
-def find_good_frames(data_images, data_angles):
-    intensity = data_images.mean(axis=-1).mean(axis=-1)
-
-    intensity_mask = (intensity < 1.2 * intensity.mean()) * (intensity > 0.8 * intensity.mean())  # dorp bad points
-    good_frames = np.arange(len(intensity))[intensity_mask]
-
-    intensity_t = intensity[good_frames]
-    data_angles_t = data_angles[good_frames]
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(data_angles[np.argsort(data_angles)],
-             intensity[np.argsort(data_angles)],
-             label='Before filtering')
-
-    plt.hlines(np.median(intensity, axis=0), 0, np.max(data_angles), 'r', label='Reference value')
-
-    plt.plot(data_angles_t[np.argsort(data_angles_t)],
-             intensity_t[np.argsort(data_angles_t)],
-             'g', label='After filtering')
-
-    plt.xlabel('Angle')
-    plt.ylabel('Frame mean intensity')
-    plt.grid()
-    plt.legend(loc=0)
+    filter_step = 2
+    plt.figure(figsize=(16, 8))
+    plt.subplot(121)
+    plt.imshow(d, cmap='gray',
+               vmin=float(np.percentile(d[::filter_step, ::filter_step], 1)),
+               vmax=float(np.percentile(d[::filter_step, ::filter_step], 99.9)))
+    plt.axis('image')
+    plt.hlines([y_min, y_max], x_min, x_max, 'r')
+    plt.vlines([x_min, x_max], y_min, y_max, 'g')
+    plt.xlabel('X')
+    plt.ylabel('Y')
+    plt.subplot(122)
+    plt.imshow(d[y_min:y_max, x_min:x_max], cmap='gray',
+               vmin=float(np.percentile(d[y_min:y_max:filter_step, x_min:x_max:filter_step], 1)),
+               vmax=float(np.percentile(d[y_min:y_max:filter_step, x_min:x_max:filter_step], 99.9)))
     plt.show()
-    return good_frames
+    print("x_min, x_max, y_min, y_max = {}, {}, {}, {}".format(x_min, x_max, y_min, y_max))
 
 
-def group_data(data_images, data_angles, mmap_file_dir):
-    uniq_angles, _ = persistent_array(
-        os.path.join(mmap_file_dir, 'uniq_angles.tmp'),
-        shape=(len(list(set(data_angles))),),
-        dtype='float32', force_create=True)
-    uniq_angles[:] = list(set(data_angles))
-
-    uniq_data_images, _ = persistent_array(
-        os.path.join(mmap_file_dir, 'uniq_data_images.tmp'),
-        shape=(len(uniq_angles), data_images.shape[1], data_images.shape[2]),
-        dtype='float32', force_create=True)
-
-    for ua_id, ua in tqdm(list(enumerate(uniq_angles))):
-        indexes = np.argwhere(data_angles == uniq_angles[ua_id])
-        if len(indexes) > 1:
-            tmp_images = data_images[indexes]
-            tmp_images = np.squeeze(tmp_images)
-            mean_image = np.mean(tmp_images, axis=0)
-            uniq_data_images[ua_id] = mean_image
-        else:
-            uniq_data_images[ua_id] = data_images[indexes]
-    return uniq_data_images, uniq_angles
+def show_center_of_mass(data_images_crop: np.ndarray) -> None:
+    """Отображает траекторию центра масс объекта по кадрам."""
+    cxy = np.asarray([ndi.center_of_mass(data_images_crop[i])
+                      for i in range(data_images_crop.shape[0])])
+    plt.figure(figsize=(6, 6))
+    plt.scatter(cxy[:, 1], cxy[:, 0], c=range(cxy.shape[0]), cmap='viridis')
+    plt.grid()
+    plt.show()
 
 
-def correct_rings(sino0, level):
-    def get_my_b(level):
-        t = np.mean(sino0, axis=0)
-        gt = scipy.ndimage.gaussian_filter1d(t, level / 2.)
-        return gt - t
-
-    def get_my_a(level):
-        my_b = get_my_b(level)
-        return np.mean(my_b) / my_b.shape[0]
-
-    my_a = get_my_a(level)
-    my_b = get_my_b(level)
-
-    res = sino0.copy()
-    if not level == 0:
-        res += sino0 * my_a + my_b
-
-    return res
+def show_reconstruction_cuts(rec_vol: np.ndarray, n_cuts: int = 20) -> None:
+    """Отображает n_cuts срезов вдоль осей 0 и 1 реконструированного объёма."""
+    for j in range(2):
+        for i in range(n_cuts):
+            plt.figure(figsize=(10, 8))
+            data = rec_vol.take(i * rec_vol.shape[j] // n_cuts, axis=j)
+            plt.imshow(data, cmap='viridis',
+                       vmin=float(np.maximum(0, np.percentile(data[:], 10))),
+                       vmax=float(np.percentile(data[:], 99.9)))
+            plt.axis('image')
+            plt.title(str(i * rec_vol.shape[j] // n_cuts))
+            plt.colorbar()
+            plt.show()
 
 
-# # build frames for video
-# images_dir = os.path.join(tmp_dir,'images')
-# mkdir_p(images_dir)
-# im_max=np.percentile(sinogram, 99.9)
-# im_min=np.percentile(sinogram, 10)
-# print(im_min, im_max)
-# for ia, a in tqdm(list(enumerate(np.argsort(uniq_angles)))):
-# #     print('{:34}'.format(ia))
-#     plt.imsave(os.path.join(images_dir,'prj_{:03}.png'.format(ia)),
-#                np.rot90(sinogram[a],3), vmin=im_min, vmax=im_max,
-#                cmap=plt.cm.gray_r)
+def preview_axis_correction(sinogram_mem: np.ndarray, angles: np.ndarray,
+                             remove_rings: bool = False) -> None:
+    """Реконструирует и показывает до 10 срезов синограммы для контроля оси."""
+    from tomo.remove_stripe import remove_all_stripe
 
-# !cd {images_dir} && ffmpeg -r 10 -i "prj_%03d.png" -b:v 1000k prj.avi
-# !cd {images_dir} && rm prj.mp4
+    if sinogram_mem.ndim > 2:
+        n_slices = min(10, sinogram_mem.shape[0])
+        start_slice = sinogram_mem.shape[0] // n_slices
+    else:
+        n_slices = 1
+        start_slice = 0
+        sinogram_mem = sinogram_mem[None, :, :]
 
-# seraching opposite frames (0 and 180 deg)
-def get_angles_at_180_deg(uniq_angles):
+    for slice_idx in tqdm(range(n_slices)):
+        slice_numb = start_slice * slice_idx
+        sino2d = sinogram_mem[slice_numb]
+        print(sino2d.shape)
+        if remove_rings:
+            sino2d = remove_all_stripe(cp.asanyarray(sino2d[:, None, :])).get()
+            sino2d = np.squeeze(sino2d)
+        recon = recon_2d_parallel_nonorm(sino2d, angles)
+        plt.figure(figsize=(10, 10))
+        plt.imshow(recon,
+                   vmin=float(np.percentile(recon, 10)),
+                   vmax=float(np.percentile(recon, 99.9)))
+        plt.show()
+
+
+def create_axis_search_widget(sinogram_fixed: np.ndarray,
+                               data_images_crop: np.ndarray,
+                               data_angles: np.ndarray,
+                               shift_x: float,
+                               alfa: float):
+    """Создаёт интерактивный виджет ручной коррекции оси вращения.
+
+    Параметры
+    ----------
+    sinogram_fixed   : синограмма для обновления in-place, shape (H, N, W)
+    data_images_crop : нормированные кадры, shape (N, H, W)
+    data_angles      : углы в градусах, shape (N,)
+    shift_x          : начальное значение сдвига
+    alfa             : начальное значение угла
+
+    Возвращает
+    ----------
+    ui         : ipywidgets.VBox — виджет для отображения через display()
+    shift_text : FloatText с текущим сдвигом
+    angle_text : FloatText с текущим углом
+    """
+    import ipywidgets as widgets
+    from IPython.display import display  # noqa: F401
+
+    position_0, position_180 = get_angles_at_180_deg(data_angles)
+    im_0 = data_images_crop[position_0[0]]
+    im_180 = data_images_crop[position_180[0]]
+
+    def _show_alignment(shift, angle):
+        t_im_0 = transform_image(im_0, shift, angle)
+        t_im_180 = transform_image(im_180, shift, angle)
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 8))
+        im1 = ax1.imshow(t_im_0 - np.fliplr(t_im_180), cmap='seismic')
+        fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+        ax1.set_title('Разность (0° − flip(180°))')
+        im2 = ax2.imshow(t_im_0, cmap='viridis')
+        fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+        ax2.set_title('Кадр 0°')
+        plt.tight_layout()
+        plt.show()
+
+    def _apply_and_reconstruct(shift, angle):
+        for i in tqdm(range(data_images_crop.shape[0])):
+            sinogram_fixed[:, i, :] = transform_image(data_images_crop[i], shift, angle)
+        preview_axis_correction(sinogram_fixed, data_angles, remove_rings=True)
+
+    shift_slider = widgets.FloatSlider(
+        min=-200, max=200, step=0.05, value=shift_x,
+        description='Shift:', layout=widgets.Layout(width='400px'))
+    shift_text = widgets.FloatText(
+        value=shift_x, step=0.05, layout=widgets.Layout(width='100px'))
+    angle_slider = widgets.FloatSlider(
+        min=-3., max=3., step=0.001, value=alfa,
+        description='Angle:', layout=widgets.Layout(width='400px'))
+    angle_text = widgets.FloatText(
+        value=alfa, step=0.001, layout=widgets.Layout(width='100px'))
+
+    widgets.jslink((shift_slider, 'value'), (shift_text, 'value'))
+    widgets.jslink((angle_slider, 'value'), (angle_text, 'value'))
+
+    btn_show = widgets.Button(description='Показать совмещение', button_style='info',
+                               layout=widgets.Layout(width='220px'))
+    btn_apply = widgets.Button(description='Применить + реконструкция', button_style='primary',
+                                layout=widgets.Layout(width='250px'))
+    output = widgets.Output(layout=widgets.Layout(border='none'))
+
+    def on_show_click(b):
+        with output:
+            output.clear_output(wait=True)
+            _show_alignment(shift_slider.value, angle_slider.value)
+
+    def on_apply_click(b):
+        with output:
+            output.clear_output(wait=True)
+            _apply_and_reconstruct(shift_slider.value, angle_slider.value)
+
+    btn_show.on_click(on_show_click)
+    btn_apply.on_click(on_apply_click)
+
+    ui = widgets.VBox([
+        widgets.HBox([shift_slider, shift_text]),
+        widgets.HBox([angle_slider, angle_text]),
+        widgets.HBox([btn_show, btn_apply]),
+        output,
+    ])
+    return ui, shift_text, angle_text
+
+
+# =============================================================================
+# --- Volume utilities ---
+# =============================================================================
+
+def get_angles_at_180_deg(uniq_angles: np.ndarray) -> tuple[list[int], list[int]]:
+    """Находит пары кадров под углами 0° и 180°.
+
+    Возвращает (position_0, position_180) — списки индексов.
+    """
     t = np.subtract.outer(uniq_angles, uniq_angles) % 360
     pos = np.argwhere(np.abs(t - 180) % 360 == 0)
-    position_0 = []
-    position_180 = []
+    position_0, position_180 = [], []
     for tpos in pos:
         p0, p180 = tpos
         if p0 < p180:
@@ -390,204 +623,67 @@ def get_angles_at_180_deg(uniq_angles):
     return position_0, position_180
 
 
-def test_rec(s1, uniq_angles, vmaxk=1.):
-    plt.figure(figsize=(7, 7))
-    plt.imshow(s1[np.argsort(uniq_angles)], interpolation='bilinear', cmap=plt.cm.gray_r)
-    plt.axis('tight')
-    plt.colorbar()
-    plt.show()
+def reshape_volume(array_3d: np.ndarray, binning_factor: int) -> np.ndarray:
+    """Pixel binning для трёхмерного массива по всем трём осям.
 
-    bh_corr = 1.0
-    t_angles = (uniq_angles - uniq_angles.min()) < 180  # remove angles >180
-    rec_slice = recon_2d_parallel(s1[t_angles], uniq_angles[t_angles])
+    Параметры
+    ----------
+    array_3d       : входной 3D-массив
+    binning_factor : коэффициент сжатия (целое число > 0)
 
-    plt.figure(figsize=(10, 8))
-    plt.imshow(safe_median(rec_slice),
-               vmin=np.percentile(rec_slice, 2), vmax=np.percentile(rec_slice, 98) * vmaxk, cmap=plt.cm.viridis)
-    plt.axis('equal')
-    plt.colorbar()
-    plt.title('ddddd')
-    plt.show()
-
-
-def reshape_volume(array_3d, binning_factor):
+    Возвращает сжатый массив (float32).
     """
-    Более эффективная реализация pixel binning для трёхмерного numpy массива
-    по всем трём осям.
-    
-    Параметры:
-    array_3d (numpy.ndarray): Входной трёхмерный массив
-    binning_factor (int): Коэффициент сжатия (должен быть целым числом > 0)
-    
-    Возвращает:
-    numpy.ndarray: Сжатый массив
-    """
-    # Проверка входных данных
     if not isinstance(array_3d, np.ndarray) or array_3d.ndim != 3:
         raise ValueError("Входные данные должны быть трёхмерным numpy массивом")
-    
     if not isinstance(binning_factor, int) or binning_factor <= 0:
         raise ValueError("Коэффициент сжатия должен быть положительным целым числом")
-    
-    # Получаем размеры исходного массива
-    height, width, depth = array_3d.shape
-    
-    # Вычисляем новые размеры
-    new_height = height // binning_factor
-    new_width = width // binning_factor
-    new_depth = depth // binning_factor
-    
-    # Обрезаем массив до размеров, кратных binning_factor
-    trimmed_array = array_3d[:new_height*binning_factor, 
-                             :new_width*binning_factor, 
-                             :new_depth*binning_factor]
-    
-    # Изменяем форму массива для группировки вокселей
-    reshaped = trimmed_array.reshape(new_height, binning_factor, 
-                                     new_width, binning_factor, 
-                                     new_depth, binning_factor)
-    
-    # Вычисляем среднее по группам вокселей
-    result = reshaped.mean(axis=(1, 3, 5), dtype='float32')
-    return result
 
-def save_amira(in_array, out_path, name, reshape=3, pixel_size=9.0e-3):
+    height, width, depth = array_3d.shape
+    nh, nw, nd = height // binning_factor, width // binning_factor, depth // binning_factor
+
+    trimmed = array_3d[:nh * binning_factor, :nw * binning_factor, :nd * binning_factor]
+    reshaped = trimmed.reshape(nh, binning_factor, nw, binning_factor, nd, binning_factor)
+    return reshaped.mean(axis=(1, 3, 5), dtype='float32')
+
+
+def save_amira(in_array: np.ndarray, out_path: str, name: str,
+               reshape: int = 3, pixel_size: float = 9.0e-3) -> None:
+    """Сохраняет объём в формате Amira raw + .hx скрипт.
+
+    Параметры
+    ----------
+    in_array   : реконструированный объём
+    out_path   : каталог для сохранения
+    name       : имя образца (пробелы заменяются на _)
+    reshape    : коэффициент биннинга (1 — без биннинга)
+    pixel_size : размер пикселя в мм
+    """
     data_path = str(out_path)
     os.makedirs(data_path, exist_ok=True)
     name = name.replace(' ', '_')
 
     if reshape != 1:
-        reshaped_vol = reshape_volume(in_array, reshape)
-        file_shape = reshaped_vol.shape
-        shape_str = f'{file_shape[0]}_{file_shape[1]}_{file_shape[2]}'
-        out_name = f'{name}.{shape_str}.{reshape}.raw'
-        with open(os.path.join(data_path, out_name), 'wb') as amira_file:
-            reshaped_vol.tofile(amira_file)
+        vol = reshape_volume(in_array, reshape)
     else:
-        file_shape = in_array.shape
-        shape_str = f'{file_shape[0]}_{file_shape[1]}_{file_shape[2]}'
-        out_name = f'{name}.{shape_str}.{reshape}.raw'
-        # with open(os.path.join(data_path, out_name), 'wb') as amira_file:
-        #     in_array.tofile(amira_file)
-            
-    with open(os.path.join(data_path, f'tomo.{name}.{reshape}.hx'), 'w') as af:
+        vol = in_array
+    file_shape = vol.shape
+    shape_str = '{}_{}_{}' .format(*file_shape)
+    out_name = '{}.{}.{}.raw'.format(name, shape_str, reshape)
+
+    if reshape != 1:
+        with open(os.path.join(data_path, out_name), 'wb') as f:
+            vol.tofile(f)
+
+    hx_path = os.path.join(data_path, 'tomo.{}.{}.hx'.format(name, reshape))
+    with open(hx_path, 'w') as af:
         af.write('# Amira Script\n')
-        # af.write('remove -all\n')
-        template_str = '[ load -unit mm -raw ${{SCRIPTDIR}}/{} ' + \
-                       'little xfastest float 1 {} {} {}  0 {} 0 {} 0 {} ] setLabel {}\n'
-        af.write(template_str.format(
+        template = ('[ load -unit mm -raw ${{SCRIPTDIR}}/{} '
+                    'little xfastest float 1 {} {} {}  0 {} 0 {} 0 {} ] setLabel {}\n')
+        af.write(template.format(
             out_name,
             file_shape[2], file_shape[1], file_shape[0],
             pixel_size * reshape * (file_shape[2] - 1),
             pixel_size * reshape * (file_shape[1] - 1),
             pixel_size * reshape * (file_shape[0] - 1),
-            out_name)
-        )
-
-
-def show_frames_with_border(data_images, empty_beam, data_angles, image_id, x_min, x_max, y_min, y_max):
-    te = empty_beam
-
-    angles_sorted_ind = np.argsort(data_angles)
-    td = np.asarray(data_images[angles_sorted_ind[image_id]])
-    td[td < 1] = 1
-
-    d = np.log(te) - np.log(td)
-
-    filter_step = 2
-    plt.figure(figsize=(16, 8))
-    plt.subplot(121)
-    plt.imshow(d, cmap=plt.cm.gray, 
-               vmin=np.percentile(d[::filter_step,::filter_step], 1), 
-               vmax=np.percentile(d[::filter_step,::filter_step], 99.9))
-    plt.axis('image')
-    plt.hlines([y_min, y_max], x_min, x_max, 'r')
-    plt.vlines([x_min, x_max], y_min, y_max, 'g')
-    plt.xlabel('X')
-    plt.ylabel('Y')
-    plt.subplot(122)
-    plt.imshow(d[y_min:y_max, x_min:x_max], cmap=plt.cm.gray,
-               vmin=np.percentile(d[y_min:y_max:filter_step, x_min:x_max:filter_step], 1),
-               vmax=np.percentile(d[y_min:y_max:filter_step, x_min:x_max:filter_step], 99.9))
-    plt.show()
-    print("x_min, x_max, y_min, y_max = {}, {}, {}, {}".format(x_min, x_max, y_min, y_max))
-
-
-def save_dict_to_hdf5(dic, filename):
-    """
-    ....
-    """
-    with h5py.File(filename, 'w') as h5file:
-        recursively_save_dict_contents_to_group(h5file, '/', dic)
-
-
-def recursively_save_dict_contents_to_group(h5file, path, dic):
-    """
-    ....
-    """
-    for key, item in dic.items():
-        if isinstance(item, (np.ndarray, int, float, np.int32, np.int64, np.float32, np.float64, str, bytes)):
-            h5file[path + key] = item
-        elif isinstance(item, dict):
-            recursively_save_dict_contents_to_group(h5file, path + key + '/', item)
-        else:
-            raise ValueError('Cannot save {} {} type'.format(item, type(item)))
-
-
-def load_dict_from_hdf5(filename):
-    """
-    ....
-    """
-    with h5py.File(filename, 'r') as h5file:
-        return recursively_load_dict_contents_from_group(h5file, '/')
-
-
-def recursively_load_dict_contents_from_group(h5file, path):
-    """
-    ....
-    """
-    ans = {}
-    for key, item in h5file[path].items():
-        if isinstance(item, h5py.Dataset):
-            ans[key] = item[()]
-        elif isinstance(item, h5py.Group):
-            ans[key] = recursively_load_dict_contents_from_group(h5file, path + key + '/')
-    return ans
-
-
-def find_roi(data_images, empty_beam, data_angles):
-    te = np.asarray(empty_beam)
-    te[te < 1] = 1
-    x_mins = []
-    x_maxs = []
-    y_mins = []
-    y_maxs = []
-    for ia in tqdm(np.argsort(data_angles)[::len(data_angles) // 8]):
-        td = np.asarray(data_images[ia])
-        td[td < 1] = 1
-
-        d = np.log(te) - np.log(td)
-        d[d < 0] = 0
-        q = d > np.percentile(np.asarray(d), 20)
-        mask = scipy.ndimage.binary_opening(q, np.ones((9, 9), dtype=int))
-
-        x_mask = np.argwhere(np.sum(mask, axis=1) > 20)  # np.percentile(mask, 99.9, axis=1)
-        x_min = np.min(x_mask)
-        x_max = np.max(x_mask)
-
-        y_mask = np.argwhere(np.sum(mask, axis=0) > 20)  # np.percentile(mask, 99.9, axis=1)
-        y_min = np.min(y_mask)
-        y_max = np.max(y_mask)
-
-        x_mins.append(x_min)
-        y_mins.append(y_min)
-        x_maxs.append(x_max)
-        y_maxs.append(y_max)
-
-    x_min = np.maximum(0, np.min(x_mins) - 50)
-    y_min = np.maximum(0, np.min(y_mins) - 50)
-    x_max = np.minimum(te.shape[0] - 1, np.max(x_maxs) + 50)
-    y_max = np.minimum(te.shape[1] - 1, np.max(y_maxs) + 50)
-
-    return x_min, x_max, y_min, y_max
-
+            out_name,
+        ))

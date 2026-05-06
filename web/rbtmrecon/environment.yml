@@ -23,6 +23,7 @@ dependencies:
   - h5py
   - requests
   - jupyter
+  - jupyterlab
   - ipython
   - nbformat
   - pyqt

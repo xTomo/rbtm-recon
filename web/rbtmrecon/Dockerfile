@@ -43,16 +43,15 @@ USER makov
 
 RUN echo "MONGODB_URI = 'mongodb://web_database_1:27017'" > /rbtm/recon/conf.py
 
-RUN bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && jupyter notebook --generate-config"
+RUN bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && jupyter server --generate-config"
 RUN echo "\
-c.NotebookApp.ip = '0.0.0.0'\n\
-c.NotebookApp.port = 5551\n\
-c.NotebookApp.open_browser = False\n\
-c.NotebookApp.password = u'sha1:b53c6ff4cf18:365ffefa7ddea6908cf8ce15e63826df112990c2'\n\
-c.NotebookApp.notebook_dir = '/storage'" >> ~/.jupyter/jupyter_notebook_config.py
+c.ServerApp.ip = '0.0.0.0'\n\
+c.ServerApp.port = 5551\n\
+c.ServerApp.open_browser = False\n\
+c.ServerApp.password = u'sha1:b53c6ff4cf18:365ffefa7ddea6908cf8ce15e63826df112990c2'\n\
+c.ServerApp.root_dir = '/storage'" >> ~/.jupyter/jupyter_server_config.py
 CMD bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && \
             umask 0002 && \
-#            chmod  ug+w /rbtm/recon/ && \
             cd /rbtm/recon/ && \
-            jupytext --to notebook reconstructor.py && \
-            python tomo_worker.py"
+            python tomo_worker.py &\
+            jupyter lab"
