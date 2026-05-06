@@ -516,12 +516,13 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
                             rec_vol: np.ndarray,
                             num_gpus: int = 2,
                             use_cgls: bool = True,
-                            norm_thresh_factor: float = 1e-6) -> None:
+                            norm_thresh_factor: float = 1e-6,
+                            pool=None) -> None:
     """Реконструкция всего объёма с разбивкой срезов по нескольким GPU.
 
     Синограмма передаётся через ``multiprocessing.shared_memory`` (без копирования).
-    Результат пишется напрямую в временный ``np.memmap``-файл воркерами,
-    что избегает копирования гигабайтного output-буфера через /dev/shm.
+    Результат пишется напрямую в ``/dev/shm`` (tmpfs) через ``np.memmap``,
+    что избегает медленной записи на диск.
     Дочерние процессы запускаются методом ``spawn`` для гарантии чистого
     CUDA-контекста (обязательно на Windows).
 
@@ -543,6 +544,14 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
         Срез считается пустым (только FBP, без CGLS), если L2-норма его
         синограммы < max_norm * norm_thresh_factor. Предотвращает NaN/Inf
         в CGLS на нулевых/почти нулевых срезах. 0 — отключить проверку.
+    pool                : multiprocessing.pool.Pool или None
+        Готовый пул процессов для переиспользования. Если None — создаётся
+        и уничтожается внутри функции (overhead spawn каждый раз ~2-3 с).
+        Передайте предварительно созданный пул для устранения этого overhead:
+            ctx = multiprocessing.get_context('spawn')
+            pool = ctx.Pool(processes=num_gpus)
+            recon_volume_multi_gpu(..., pool=pool)
+            pool.close(); pool.join()
     """
     import multiprocessing
     import multiprocessing.shared_memory as shm_mod
@@ -609,9 +618,13 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
         ]
 
         # Запускаем воркеры методом spawn (обязателен на Windows)
-        ctx = multiprocessing.get_context('spawn')
-        with ctx.Pool(processes=num_gpus) as pool:
+        if pool is not None:
+            # Переиспользуем готовый пул — нет overhead spawn
             pool.map(_recon_worker_shmem, worker_args)
+        else:
+            ctx = multiprocessing.get_context('spawn')
+            with ctx.Pool(processes=num_gpus) as _pool:
+                _pool.map(_recon_worker_shmem, worker_args)
 
         # Читаем результат из memmap в rec_vol
         result_mmap = np.memmap(tmp_path, dtype=dtype_out, mode='r', shape=out_shape)

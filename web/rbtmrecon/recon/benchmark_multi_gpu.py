@@ -125,22 +125,33 @@ def _recon_multi_gpu(sinogram: np.ndarray, angles_deg: np.ndarray,
                       use_cgls: bool = True) -> tuple[np.ndarray, float]:
     """Multi-GPU реконструкция через recon_volume_multi_gpu (shared memory + memmap).
 
+    Пул процессов создаётся ДО замера времени, чтобы spawn-overhead
+    (~2-3 с инициализации CUDA в каждом воркере) не входил в измерение.
+
     Возвращает (rec_vol, elapsed_seconds).
     """
+    import multiprocessing
     # Импорт здесь, чтобы не мешать spawn-процессам
     from tomotools2 import recon_volume_multi_gpu
 
     H, N, W = sinogram.shape
     rec_vol = np.empty((H, W, W), dtype='float32')
 
+    print(f"  Инициализация пула из {num_gpus} spawn-воркеров…")
+    ctx = multiprocessing.get_context('spawn')
+    pool = ctx.Pool(processes=num_gpus)
+
     print(f"  Multi-GPU реконструкция {H} срезов на {num_gpus} GPU "
           f"({'FBP+CGLS' if use_cgls else 'FBP'})…")
     t0 = time.perf_counter()
     recon_volume_multi_gpu(
         sinogram, angles_deg, pixel_size, rec_vol,
-        num_gpus=num_gpus, use_cgls=use_cgls,
+        num_gpus=num_gpus, use_cgls=use_cgls, pool=pool,
     )
     elapsed = time.perf_counter() - t0
+
+    pool.close()
+    pool.join()
 
     nan_count = int(np.isnan(rec_vol).sum())
     inf_count = int(np.isinf(rec_vol).sum())
