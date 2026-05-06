@@ -419,6 +419,32 @@ def recon_2d_parallel_nonorm(sino: np.ndarray, angles: np.ndarray) -> np.ndarray
 # --- Visualization ---
 # =============================================================================
 
+def disable_output_scrolling() -> None:
+    """Отключает сворачивание вывода ячеек при большом количестве изображений."""
+    from IPython.display import display, Javascript
+    display(Javascript("""
+        document.querySelectorAll('.jp-Cell.jp-mod-outputsScrolled').forEach(function(el) {
+            el.classList.remove('jp-mod-outputsScrolled');
+        });
+        if (window._noScrollObserver) {
+            window._noScrollObserver.disconnect();
+        }
+        window._noScrollObserver = new MutationObserver(function(mutations) {
+            mutations.forEach(function(mutation) {
+                if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+                    var el = mutation.target;
+                    if (el.classList.contains('jp-mod-outputsScrolled')) {
+                        el.classList.remove('jp-mod-outputsScrolled');
+                    }
+                }
+            });
+        });
+        document.querySelectorAll('.jp-Cell').forEach(function(cell) {
+            window._noScrollObserver.observe(cell, { attributes: true, attributeFilter: ['class'] });
+        });
+    """))
+
+
 def show_exp_data(empty_beam: np.ndarray, data_images: np.ndarray) -> None:
     """Отображает первый нормированный кадр данных."""
     plt.figure()

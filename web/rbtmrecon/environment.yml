@@ -37,6 +37,7 @@ dependencies:
   - scikit-learn
   - pip
   - pip:
+    - plumbum
     - pymongo==4
     - git+https://github.com/matejak/imreg_dft.git
     - pyvista

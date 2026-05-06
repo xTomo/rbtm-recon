@@ -23,38 +23,16 @@
 # %matplotlib inline
 
 # %%
-# Отключаем сворачивание вывода при большом количестве изображений
-from IPython.display import display, Javascript
-display(Javascript("""
-    document.querySelectorAll('.jp-Cell.jp-mod-outputsScrolled').forEach(function(el) {
-        el.classList.remove('jp-mod-outputsScrolled');
-    });
-    if (window._noScrollObserver) {
-        window._noScrollObserver.disconnect();
-    }
-    window._noScrollObserver = new MutationObserver(function(mutations) {
-        mutations.forEach(function(mutation) {
-            if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
-                var el = mutation.target;
-                if (el.classList.contains('jp-mod-outputsScrolled')) {
-                    el.classList.remove('jp-mod-outputsScrolled');
-                }
-            }
-        });
-    });
-    document.querySelectorAll('.jp-Cell').forEach(function(cell) {
-        window._noScrollObserver.observe(cell, { attributes: true, attributeFilter: ['class'] });
-    });
-"""))
-
-# %%
 import logging
 import os
 import configparser
 import time
+from pathlib import Path
 
 import pylab as plt
 import numpy as np
+from plumbum import local
+from plumbum.cmd import cp, rm, mv, ls
 
 logger = logging.getLogger()
 logger.setLevel(logging.WARN)
@@ -75,6 +53,7 @@ from tomotools2 import (
     tqdm, show_exp_data, show_frames_with_border,
     show_center_of_mass, show_reconstruction_cuts,
     preview_axis_correction, create_axis_search_widget,
+    disable_output_scrolling,
     # Volume utilities
     save_amira,
 )
@@ -82,6 +61,9 @@ from tomotools2 import (
 import ipywidgets
 
 plt.rcParams['figure.facecolor'] = 'white'
+
+# %%
+disable_output_scrolling()
 
 # %%
 config = configparser.ConfigParser()
@@ -273,13 +255,18 @@ recon_config
 mkdir_p(os.path.join(storage_dir, experiment_id))
 
 # %%
-# # !cp 'tomo.ini'  {os.path.join(storage_dir, experiment_id)}
-# # !rm -rf {tmp_dir}/*.size
-# # !unset LD_LIBRARY_PATH; cp -r {tmp_dir} {os.path.join(storage_dir, experiment_id, 'reconstruction')}
-# # !rm -rf {tmp_dir}
-# # !unset LD_LIBRARY_PATH; mv {os.path.join(data_dir, experiment_id+'.h5')} {storage_dir}
-# # !ls -lha {storage_dir+'/'+experiment_id}
-# # %reset -sf
+storage_exp_dir = Path(storage_dir) / experiment_id
+tmp_path = Path(tmp_dir)
+
+cp['tomo.ini', storage_exp_dir]()
+with local.env(LD_LIBRARY_PATH=''):
+    cp['-r', tmp_path, storage_exp_dir / 'reconstruction']()
+    mv[Path(data_dir) / (experiment_id + '.h5'), storage_dir]()
+rm['-rf', tmp_path]()
+print(ls['-lha', storage_exp_dir]())
+
+# %%
+get_ipython().kernel.do_shutdown(restart=False)
 
 # %% [markdown]
 # # Changelog:
