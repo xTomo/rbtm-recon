@@ -458,12 +458,14 @@ def recon_volume_astra3d(sinogram_fixed: np.ndarray,
     """
     import astra  # noqa
 
+    # astra.set_gpu_index должен быть вызван ДО создания данных ASTRA.
+    # Параметр gpu_indices в astra_recon_3d_parallel не нужен —
+    # глобальная настройка уже применена.
     astra.set_gpu_index(list(gpu_indices))
     rec = astra_utils.astra_recon_3d_parallel(
         sinogram_fixed,
         data_angles.astype('float32', copy=False),
         [['CGLS3D_CUDA', n_cgls_iter]],
-        gpu_indices=list(gpu_indices),
     )
     # astra_recon_3d_parallel возвращает (H, W, W) — совпадает с rec_vol
     np.copyto(rec_vol, (rec / pixel_size).astype(rec_vol.dtype, copy=False))
