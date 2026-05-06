@@ -259,7 +259,7 @@ mkdir_p(os.path.join(storage_dir, experiment_id))
 storage_exp_dir = Path(storage_dir) / experiment_id
 tmp_path = Path(tmp_dir)
 
-cp['tomo.ini', storage_exp_dir]()
+# cp['tomo.ini', storage_exp_dir]()
 with local.env(LD_LIBRARY_PATH=''):
     cp['-r', tmp_path, storage_exp_dir / 'reconstruction']()
     mv[Path(data_dir) / (experiment_id + '.h5'), storage_dir]()
