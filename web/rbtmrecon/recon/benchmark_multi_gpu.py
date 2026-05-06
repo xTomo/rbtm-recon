@@ -121,8 +121,9 @@ def _recon_single_gpu(sinogram: np.ndarray, angles_deg: np.ndarray,
 
 
 def _recon_multi_gpu(sinogram: np.ndarray, angles_deg: np.ndarray,
-                      pixel_size: float, num_gpus: int) -> tuple[np.ndarray, float]:
-    """Multi-GPU реконструкция через recon_volume_multi_gpu (shared memory).
+                      pixel_size: float, num_gpus: int,
+                      use_cgls: bool = True) -> tuple[np.ndarray, float]:
+    """Multi-GPU реконструкция через recon_volume_multi_gpu (shared memory + memmap).
 
     Возвращает (rec_vol, elapsed_seconds).
     """
@@ -132,9 +133,13 @@ def _recon_multi_gpu(sinogram: np.ndarray, angles_deg: np.ndarray,
     H, N, W = sinogram.shape
     rec_vol = np.empty((H, W, W), dtype='float32')
 
-    print(f"  Multi-GPU реконструкция {H} срезов на {num_gpus} GPU…")
+    print(f"  Multi-GPU реконструкция {H} срезов на {num_gpus} GPU "
+          f"({'FBP+CGLS' if use_cgls else 'FBP'})…")
     t0 = time.perf_counter()
-    recon_volume_multi_gpu(sinogram, angles_deg, pixel_size, rec_vol, num_gpus=num_gpus)
+    recon_volume_multi_gpu(
+        sinogram, angles_deg, pixel_size, rec_vol,
+        num_gpus=num_gpus, use_cgls=use_cgls,
+    )
     elapsed = time.perf_counter() - t0
 
     nan_count = int(np.isnan(rec_vol).sum())
@@ -395,7 +400,8 @@ def run_benchmark(size: int = 256,
         t_multi    = t_single
         speedup    = 1.0
     else:
-        rec_multi, t_multi = _recon_multi_gpu(sinogram, angles_deg, pixel_size, num_gpus)
+        rec_multi, t_multi = _recon_multi_gpu(sinogram, angles_deg, pixel_size, num_gpus,
+                                               use_cgls=use_cgls)
         speedup = t_single / t_multi if t_multi > 0 else float('inf')
 
     # ------------------------------------------------------------------

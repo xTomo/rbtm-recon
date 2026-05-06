@@ -430,13 +430,12 @@ def recon_2d_parallel_nonorm(sino: np.ndarray, angles: np.ndarray,
 def _recon_worker_shmem(args: dict) -> None:
     """Воркер реконструкции для отдельного процесса.
 
-    Подключается к блокам SharedMemory для синограммы и выходного объёма,
-    реконструирует диапазон срезов ``slice_indices`` на GPU ``gpu_id``.
+    Читает синограмму из SharedMemory, пишет результат напрямую в memmap-файл.
 
     Параметры в словаре args
     ------------------------
     shm_sino_name     : str   — имя SharedMemory синограммы
-    shm_out_name      : str   — имя SharedMemory выходного объёма
+    out_mmap_path     : str   — путь к memmap-файлу для записи результата
     sino_shape        : tuple — (H, N_angles, W)
     out_shape         : tuple — (H, W, W)
     dtype_sino        : str   — dtype синограммы ('float32')
@@ -446,8 +445,9 @@ def _recon_worker_shmem(args: dict) -> None:
     angles_shape      : tuple — форма массива углов
     pixel_size        : float
     gpu_id            : int
+    use_cgls          : bool  — если True, применяется FBP_CUDA + CGLS_CUDA×10
     norm_thresh_factor: float — срез считается пустым если L2-норма < max*factor
-                                (0 — не проверять, всегда FBP+CGLS)
+                                (0 — не проверять, всегда использовать use_cgls)
     """
     import multiprocessing.shared_memory as shm_mod
     import astra  # noqa: импорт внутри процесса (spawn)
@@ -456,7 +456,7 @@ def _recon_worker_shmem(args: dict) -> None:
 
     # Распаковываем аргументы
     shm_sino_name      = args['shm_sino_name']
-    shm_out_name       = args['shm_out_name']
+    out_mmap_path      = args['out_mmap_path']
     sino_shape         = args['sino_shape']
     out_shape          = args['out_shape']
     dtype_sino         = args['dtype_sino']
@@ -466,33 +466,33 @@ def _recon_worker_shmem(args: dict) -> None:
     angles_shape       = args['angles_shape']
     pixel_size         = args['pixel_size']
     gpu_id             = args['gpu_id']
+    use_cgls           = args.get('use_cgls', True)
     norm_thresh_factor = args.get('norm_thresh_factor', 0.0)
 
     # Восстанавливаем массив углов
     angles = np.frombuffer(angles_bytes, dtype='float32').reshape(angles_shape)
 
-    # Присоединяемся к общей памяти (не создаём новый блок)
+    # Присоединяемся к SharedMemory синограммы (только чтение)
     shm_sino = shm_mod.SharedMemory(name=shm_sino_name)
-    shm_out  = shm_mod.SharedMemory(name=shm_out_name)
-
     sino_arr = np.ndarray(sino_shape, dtype=dtype_sino, buffer=shm_sino.buf)
-    out_arr  = np.ndarray(out_shape,  dtype=dtype_out,  buffer=shm_out.buf)
+
+    # Открываем memmap для записи (уже создан главным процессом)
+    out_arr = np.memmap(out_mmap_path, dtype=dtype_out, mode='r+', shape=out_shape)
 
     # Предвычисляем порог для пустых срезов один раз на воркер
     if norm_thresh_factor > 0:
-        # Используем только свои срезы для оценки max нормы
-        local_sino = sino_arr[slice_indices]
+        local_sino  = sino_arr[slice_indices]
         norms_local = np.linalg.norm(local_sino.reshape(len(slice_indices), -1), axis=1)
-        norm_thresh = norms_local.max() * norm_thresh_factor
+        norm_thresh = float(norms_local.max()) * norm_thresh_factor
     else:
         norm_thresh = -1.0  # отключить проверку
 
-    method_full = [['FBP_CUDA'], ['CGLS_CUDA', 10]]
+    method_full = [['FBP_CUDA'], ['CGLS_CUDA', 10]] if use_cgls else [['FBP_CUDA']]
     method_fbp  = [['FBP_CUDA']]
 
     # Устанавливаем GPU для этого процесса
     with cp.cuda.Device(gpu_id):
-        for idx, i in enumerate(slice_indices):
+        for i in slice_indices:
             sino_i = sino_arr[i]
             if norm_thresh >= 0:
                 norm_i = float(np.linalg.norm(sino_i))
@@ -504,8 +504,10 @@ def _recon_worker_shmem(args: dict) -> None:
             )
             out_arr[i] = rec / pixel_size
 
+    # flush + закрытие
+    out_arr.flush()
+    del out_arr
     shm_sino.close()
-    shm_out.close()
 
 
 def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
@@ -513,12 +515,15 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
                             pixel_size: float,
                             rec_vol: np.ndarray,
                             num_gpus: int = 2,
+                            use_cgls: bool = True,
                             norm_thresh_factor: float = 1e-6) -> None:
     """Реконструкция всего объёма с разбивкой срезов по нескольким GPU.
 
-    Данные передаются в дочерние процессы через ``multiprocessing.shared_memory``
-    без копирования. Дочерние процессы запускаются методом ``spawn`` для
-    гарантии чистого CUDA-контекста (обязательно на Windows).
+    Синограмма передаётся через ``multiprocessing.shared_memory`` (без копирования).
+    Результат пишется напрямую в временный ``np.memmap``-файл воркерами,
+    что избегает копирования гигабайтного output-буфера через /dev/shm.
+    Дочерние процессы запускаются методом ``spawn`` для гарантии чистого
+    CUDA-контекста (обязательно на Windows).
 
     Параметры
     ----------
@@ -532,6 +537,8 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
         Выходной массив (memmap или обычный ndarray) для записи результата.
     num_gpus            : int
         Количество GPU для параллельной реконструкции.
+    use_cgls            : bool
+        Если True — FBP_CUDA + CGLS_CUDA×10, иначе только FBP_CUDA.
     norm_thresh_factor  : float
         Срез считается пустым (только FBP, без CGLS), если L2-норма его
         синограммы < max_norm * norm_thresh_factor. Предотвращает NaN/Inf
@@ -539,6 +546,7 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
     """
     import multiprocessing
     import multiprocessing.shared_memory as shm_mod
+    import tempfile
 
     n_slices   = sinogram_fixed.shape[0]
     sino_shape = sinogram_fixed.shape          # (H, N_angles, W)
@@ -546,21 +554,25 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
     dtype_sino = sinogram_fixed.dtype.str      # '<f4'
     dtype_out  = rec_vol.dtype.str
 
-    # --- Создаём блоки SharedMemory ---
+    # --- SharedMemory только для синограммы (чтение воркерами) ---
     nbytes_sino = int(np.prod(sino_shape)) * np.dtype(dtype_sino).itemsize
-    nbytes_out  = int(np.prod(out_shape))  * np.dtype(dtype_out).itemsize
-
     shm_sino = shm_mod.SharedMemory(create=True, size=nbytes_sino)
-    shm_out  = shm_mod.SharedMemory(create=True, size=nbytes_out)
+
+    # --- Временный memmap для выходного буфера (воркеры пишут напрямую) ---
+    tmp_file = tempfile.NamedTemporaryFile(suffix='.raw', delete=False)
+    tmp_path = tmp_file.name
+    tmp_file.close()
 
     try:
         # Копируем синограмму в SharedMemory
         sino_shared = np.ndarray(sino_shape, dtype=dtype_sino, buffer=shm_sino.buf)
         np.copyto(sino_shared, sinogram_fixed.astype(dtype_sino, copy=False))
 
-        # Инициализируем выходной буфер нулями
-        out_shared = np.ndarray(out_shape, dtype=dtype_out, buffer=shm_out.buf)
-        out_shared[:] = 0
+        # Создаём выходной memmap (заполняем нулями)
+        out_mmap = np.memmap(tmp_path, dtype=dtype_out, mode='w+', shape=out_shape)
+        out_mmap[:] = 0
+        out_mmap.flush()
+        del out_mmap  # закрываем в главном процессе — воркеры откроют через mode='r+'
 
         # Разбиваем срезы по GPU
         all_indices = list(range(n_slices))
@@ -570,7 +582,7 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
         worker_args = [
             {
                 'shm_sino_name':      shm_sino.name,
-                'shm_out_name':       shm_out.name,
+                'out_mmap_path':      tmp_path,
                 'sino_shape':         sino_shape,
                 'out_shape':          out_shape,
                 'dtype_sino':         dtype_sino,
@@ -580,6 +592,7 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
                 'angles_shape':       angles_f32.shape,
                 'pixel_size':         pixel_size,
                 'gpu_id':             gpu_id,
+                'use_cgls':           use_cgls,
                 'norm_thresh_factor': norm_thresh_factor,
             }
             for gpu_id, chunk in enumerate(chunks)
@@ -590,14 +603,19 @@ def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
         with ctx.Pool(processes=num_gpus) as pool:
             pool.map(_recon_worker_shmem, worker_args)
 
-        # Копируем результат обратно
-        np.copyto(rec_vol, out_shared.astype(rec_vol.dtype, copy=False))
+        # Читаем результат из memmap в rec_vol
+        result_mmap = np.memmap(tmp_path, dtype=dtype_out, mode='r', shape=out_shape)
+        np.copyto(rec_vol, result_mmap.astype(rec_vol.dtype, copy=False))
+        del result_mmap
 
     finally:
         shm_sino.unlink()
-        shm_out.unlink()
         shm_sino.close()
-        shm_out.close()
+        try:
+            import os
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 # =============================================================================
