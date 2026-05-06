@@ -396,22 +396,177 @@ def apply_axis_correction(data_images_crop: np.ndarray,
 # =============================================================================
 
 def recon_2d_parallel(sino: np.ndarray, angles: np.ndarray,
-                      pixel_size: float = 9e-3) -> np.ndarray:
+                      pixel_size: float = 9e-3,
+                      gpu_id: int = 0) -> np.ndarray:
     """FBP + CGLS реконструкция одного 2D среза.
 
     Результат масштабируется на 1/pixel_size.
+
+    Параметры
+    ----------
+    sino      : синограмма, shape (N_angles, W)
+    angles    : углы в градусах, shape (N_angles,)
+    pixel_size: размер пикселя в мм
+    gpu_id    : индекс GPU для ASTRA
     """
     rec = astra_utils.astra_recon_2d_parallel(
-        sino, angles, ['FBP_CUDA', ['CGLS_CUDA', 10]]
+        sino, angles, ['FBP_CUDA', ['CGLS_CUDA', 10]], gpu_id=gpu_id
     )
     return rec / pixel_size
 
 
-def recon_2d_parallel_nonorm(sino: np.ndarray, angles: np.ndarray) -> np.ndarray:
+def recon_2d_parallel_nonorm(sino: np.ndarray, angles: np.ndarray,
+                              gpu_id: int = 0) -> np.ndarray:
     """FBP реконструкция одного 2D среза без нормировки (для предпросмотра)."""
     return astra_utils.astra_recon_2d_parallel(
-        sino[angles < 180], angles[angles < 180], ['FBP_CUDA']
+        sino[angles < 180], angles[angles < 180], ['FBP_CUDA'], gpu_id=gpu_id
     )
+
+
+# ---------------------------------------------------------------------------
+# Multi-GPU reconstruction via shared memory
+# ---------------------------------------------------------------------------
+
+def _recon_worker_shmem(args: dict) -> None:
+    """Воркер реконструкции для отдельного процесса.
+
+    Подключается к блокам SharedMemory для синограммы и выходного объёма,
+    реконструирует диапазон срезов ``slice_indices`` на GPU ``gpu_id``.
+
+    Параметры в словаре args
+    ------------------------
+    shm_sino_name  : str   — имя SharedMemory синограммы
+    shm_out_name   : str   — имя SharedMemory выходного объёма
+    sino_shape     : tuple — (H, N_angles, W)
+    out_shape      : tuple — (H, W, W)
+    dtype_sino     : str   — dtype синограммы ('float32')
+    dtype_out      : str   — dtype выходного объёма ('float32')
+    slice_indices  : list  — список индексов срезов для обработки
+    angles         : bytes — np.ndarray углов, сериализованный через tobytes()
+    angles_shape   : tuple — форма массива углов
+    pixel_size     : float
+    gpu_id         : int
+    """
+    import multiprocessing.shared_memory as shm_mod
+    import astra  # noqa: импорт внутри процесса (spawn)
+    import cupy as cp  # noqa
+
+    # Распаковываем аргументы
+    shm_sino_name  = args['shm_sino_name']
+    shm_out_name   = args['shm_out_name']
+    sino_shape     = args['sino_shape']
+    out_shape      = args['out_shape']
+    dtype_sino     = args['dtype_sino']
+    dtype_out      = args['dtype_out']
+    slice_indices  = args['slice_indices']
+    angles_bytes   = args['angles']
+    angles_shape   = args['angles_shape']
+    pixel_size     = args['pixel_size']
+    gpu_id         = args['gpu_id']
+
+    # Восстанавливаем массив углов
+    angles = np.frombuffer(angles_bytes, dtype='float32').reshape(angles_shape)
+
+    # Присоединяемся к общей памяти (не создаём новый блок)
+    shm_sino = shm_mod.SharedMemory(name=shm_sino_name)
+    shm_out  = shm_mod.SharedMemory(name=shm_out_name)
+
+    sino_arr = np.ndarray(sino_shape, dtype=dtype_sino, buffer=shm_sino.buf)
+    out_arr  = np.ndarray(out_shape,  dtype=dtype_out,  buffer=shm_out.buf)
+
+    # Устанавливаем GPU для этого процесса
+    with cp.cuda.Device(gpu_id):
+        for i in slice_indices:
+            out_arr[i] = recon_2d_parallel(sino_arr[i], angles, pixel_size, gpu_id=gpu_id)
+
+    shm_sino.close()
+    shm_out.close()
+
+
+def recon_volume_multi_gpu(sinogram_fixed: np.ndarray,
+                            data_angles: np.ndarray,
+                            pixel_size: float,
+                            rec_vol: np.ndarray,
+                            num_gpus: int = 2) -> None:
+    """Реконструкция всего объёма с разбивкой срезов по нескольким GPU.
+
+    Данные передаются в дочерние процессы через ``multiprocessing.shared_memory``
+    без копирования. Дочерние процессы запускаются методом ``spawn`` для
+    гарантии чистого CUDA-контекста (обязательно на Windows).
+
+    Параметры
+    ----------
+    sinogram_fixed : np.ndarray, shape (H, N_angles, W)
+        Синограмма после коррекции оси и удаления колец.
+    data_angles    : np.ndarray, shape (N_angles,)
+        Углы проекций в градусах.
+    pixel_size     : float
+        Размер пикселя в мм.
+    rec_vol        : np.ndarray, shape (H, W, W)
+        Выходной массив (memmap или обычный ndarray) для записи результата.
+    num_gpus       : int
+        Количество GPU для параллельной реконструкции.
+    """
+    import multiprocessing
+    import multiprocessing.shared_memory as shm_mod
+
+    n_slices   = sinogram_fixed.shape[0]
+    sino_shape = sinogram_fixed.shape          # (H, N_angles, W)
+    out_shape  = rec_vol.shape                 # (H, W, W)
+    dtype_sino = sinogram_fixed.dtype.str      # '<f4'
+    dtype_out  = rec_vol.dtype.str
+
+    # --- Создаём блоки SharedMemory ---
+    nbytes_sino = int(np.prod(sino_shape)) * np.dtype(dtype_sino).itemsize
+    nbytes_out  = int(np.prod(out_shape))  * np.dtype(dtype_out).itemsize
+
+    shm_sino = shm_mod.SharedMemory(create=True, size=nbytes_sino)
+    shm_out  = shm_mod.SharedMemory(create=True, size=nbytes_out)
+
+    try:
+        # Копируем синограмму в SharedMemory
+        sino_shared = np.ndarray(sino_shape, dtype=dtype_sino, buffer=shm_sino.buf)
+        np.copyto(sino_shared, sinogram_fixed.astype(dtype_sino, copy=False))
+
+        # Инициализируем выходной буфер нулями
+        out_shared = np.ndarray(out_shape, dtype=dtype_out, buffer=shm_out.buf)
+        out_shared[:] = 0
+
+        # Разбиваем срезы по GPU
+        all_indices = list(range(n_slices))
+        chunks = [list(c) for c in np.array_split(all_indices, num_gpus)]
+
+        angles_f32 = data_angles.astype('float32', copy=False)
+        worker_args = [
+            {
+                'shm_sino_name': shm_sino.name,
+                'shm_out_name':  shm_out.name,
+                'sino_shape':    sino_shape,
+                'out_shape':     out_shape,
+                'dtype_sino':    dtype_sino,
+                'dtype_out':     dtype_out,
+                'slice_indices': chunk,
+                'angles':        angles_f32.tobytes(),
+                'angles_shape':  angles_f32.shape,
+                'pixel_size':    pixel_size,
+                'gpu_id':        gpu_id,
+            }
+            for gpu_id, chunk in enumerate(chunks)
+        ]
+
+        # Запускаем воркеры методом spawn (обязателен на Windows)
+        ctx = multiprocessing.get_context('spawn')
+        with ctx.Pool(processes=num_gpus) as pool:
+            pool.map(_recon_worker_shmem, worker_args)
+
+        # Копируем результат обратно
+        np.copyto(rec_vol, out_shared.astype(rec_vol.dtype, copy=False))
+
+    finally:
+        shm_sino.unlink()
+        shm_out.unlink()
+        shm_sino.close()
+        shm_out.close()
 
 
 # =============================================================================

@@ -38,6 +38,10 @@ services:
     ports:
       - "5551:5551"
     container_name: web_reconstructor_jupyter_1
+    # Увеличиваем /dev/shm для multiprocessing.shared_memory (multi-GPU реконструкция).
+    # Для фантома 1000^3: синограмма ~0.8 GB + объём ~4 GB → нужно ≥ 6 GB.
+    # Альтернатива: ipc: host  (использует всю RAM хоста, менее изолированно)
+    shm_size: '6gb'
   web:
     build: rbtmwebrecon/
     depends_on:
