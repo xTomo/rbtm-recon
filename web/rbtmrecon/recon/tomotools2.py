@@ -402,7 +402,7 @@ def recon_2d_parallel(sino: np.ndarray, angles: np.ndarray,
     Результат масштабируется на 1/pixel_size.
     """
     rec = astra_utils.astra_recon_2d_parallel(
-        sino, angles, ['FBP_CUDA', ['CGLS_CUDA', 10]]
+        sino, angles, [['FBP_CUDA'], ['CGLS_CUDA', 10]]
     )
     return rec / pixel_size
 
@@ -410,7 +410,7 @@ def recon_2d_parallel(sino: np.ndarray, angles: np.ndarray,
 def recon_2d_parallel_nonorm(sino: np.ndarray, angles: np.ndarray) -> np.ndarray:
     """FBP реконструкция одного 2D среза без нормировки (для предпросмотра)."""
     return astra_utils.astra_recon_2d_parallel(
-        sino[angles < 180], angles[angles < 180], ['FBP_CUDA']
+        sino[angles < 180], angles[angles < 180], [['FBP_CUDA']]
     )
 
 
