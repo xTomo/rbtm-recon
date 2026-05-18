@@ -1,4 +1,5 @@
 import configparser
+import glob
 import logging
 import os
 import subprocess
@@ -93,8 +94,10 @@ def copy_python_files(obj_id, storage_dir):
     # copy(NOTEBOOK_NAME[:-5] + 'py', out_dir)
     # copy('reconstructor-axis_search2.py', out_dir)
     # copy('tomotools.py', out_dir)
-    copy('reconstructor-axis_search3b.py', out_dir)
-    copy('tomotools2.py', out_dir)
+    for f in glob.glob('reconstructor*.py'):
+        copy(f, out_dir)
+    for f in glob.glob('tomotools*.py'):
+        copy(f, out_dir)
     copytree('tomo', os.path.join(out_dir, 'tomo'), dirs_exist_ok=True)
     return out_dir
 
