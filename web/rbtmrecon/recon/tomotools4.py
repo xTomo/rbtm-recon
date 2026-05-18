@@ -729,6 +729,23 @@ def measure_repositioning_shifts(
         shifts_x[k] = float(shift[1])
         print(f"[DBG]   phase_cc: shift={shift}, error={_error:.4f}, phasediff={_phasediff:.4f}")
 
+        # --- DEBUG: прямая кросс-корреляция без phase normalization ---
+        from scipy.signal import fftconvolve
+        cc = fftconvolve(data_norm - data_norm.mean(),
+                         (dc_norm - dc_norm.mean())[::-1, ::-1], mode='full')
+        peak_loc = np.unravel_index(np.argmax(cc), cc.shape)
+        center = ((np.array(cc.shape) - 1) // 2).astype(int)
+        direct_shift = np.array(peak_loc) - center
+        print(f"[DBG]   direct_cc_shift: {direct_shift}, "
+              f"peak={cc[peak_loc]:.4f}, at_zero={cc[center[0], center[1]]:.4f}")
+        # Диапазон значений кросс-корреляции вблизи нуля
+        r = 5
+        cc_center_patch = cc[center[0]-r:center[0]+r+1, center[1]-r:center[1]+r+1]
+        peak_in_patch = np.unravel_index(np.argmax(cc_center_patch), cc_center_patch.shape)
+        print(f"[DBG]   cc patch [-5..+5] peak at {np.array(peak_in_patch)-r}, "
+              f"val={cc_center_patch.max():.4f} vs global_peak={cc[peak_loc]:.4f}")
+        # --- END DEBUG ---
+
         logging.info(f'Checkpoint {k}, angle={dc_angle:.2f}: '
                      f'shift_y={shifts_y[k]:.3f}, shift_x={shifts_x[k]:.3f}')
 
