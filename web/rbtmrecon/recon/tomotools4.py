@@ -364,8 +364,9 @@ def _read_series_length_from_hdf5(data_file: str, total_empty_count: int) -> int
             exp_info_raw = h5f.attrs.get('exp_info')
             if exp_info_raw is not None:
                 exp_info = json.loads(exp_info_raw)
-                if 'series_length' in exp_info:
-                    return int(exp_info['series_length'])
+                exp_params = exp_info.get('experiment parameters', {})
+                if 'series_length' in exp_params:
+                    return int(exp_params['series_length'])
     except Exception as e:
         logging.warning('Could not read series_length from exp_info: {}'.format(e))
 
