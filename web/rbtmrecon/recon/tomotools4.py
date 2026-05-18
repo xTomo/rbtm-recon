@@ -640,6 +640,15 @@ def measure_repositioning_shifts(
         logging.warning('No periodic empties found — no checkpoints to measure')
         return np.array([]), np.array([]), np.array([])
 
+    # --- DEBUG ---
+    print(f"[DBG] series_length = {adv_data.series_length}")
+    print(f"[DBG] K (num checkpoints) = {K}")
+    print(f"[DBG] periodic_empty_fnumbers = {adv_data.periodic_empty_fnumbers}")
+    print(f"[DBG] data_check_numbers = {adv_data.data_check_numbers}")
+    print(f"[DBG] data_numbers[:5] = {adv_data.data_numbers[:5]}, "
+          f"data_numbers[-5:] = {adv_data.data_numbers[-5:]}")
+    # --- END DEBUG ---
+
     checkpoint_angles = np.empty(K, dtype='float32')
     shifts_y = np.empty(K, dtype='float64')
     shifts_x = np.empty(K, dtype='float64')
@@ -654,6 +663,9 @@ def measure_repositioning_shifts(
         mask_dc = ((adv_data.data_check_numbers >= fn_start) &
                    (adv_data.data_check_numbers < next_fn))
         dc_indices = np.where(mask_dc)[0]
+
+        print(f"[DBG] Checkpoint {k}: fn_start={fn_start}, next_fn={next_fn}, "
+              f"dc_candidates={adv_data.data_check_numbers}, dc_indices={dc_indices}")
 
         if len(dc_indices) == 0:
             logging.warning(f'Checkpoint {k}: no data_check frames found, skipping')
@@ -672,6 +684,12 @@ def measure_repositioning_shifts(
         # Ищем соответствующий data кадр до checkpoint k
         data_idx = _find_matching_data_frame(
             dc_angle, adv_data.data_angles, adv_data.data_numbers, fn_start)
+
+        print(f"[DBG]   dc_angle={dc_angle:.2f}, data_idx={data_idx}, "
+              f"fn_start={fn_start}")
+        if data_idx is not None:
+            print(f"[DBG]   matched data_number={adv_data.data_numbers[data_idx]}, "
+                  f"matched_angle={adv_data.data_angles[data_idx]:.2f}")
 
         if data_idx is None:
             logging.warning(f'Checkpoint {k}: no matching data frame at angle {dc_angle:.2f}, skipping')
