@@ -713,11 +713,21 @@ def measure_repositioning_shifts(
         dc_norm = np.log(ref_empty) - np.log(dc_frame)
         dc_norm = safe_median(dc_norm)
 
+        # --- DEBUG нормированные изображения ---
+        print(f"[DBG]   data_norm:  min={data_norm.min():.4f} max={data_norm.max():.4f} "
+              f"std={data_norm.std():.6f} mean={data_norm.mean():.4f}")
+        print(f"[DBG]   dc_norm:    min={dc_norm.min():.4f} max={dc_norm.max():.4f} "
+              f"std={dc_norm.std():.6f} mean={dc_norm.mean():.4f}")
+        print(f"[DBG]   diff(dc-data): max_abs={np.abs(dc_norm - data_norm).max():.6f} "
+              f"mean_abs={np.abs(dc_norm - data_norm).mean():.6f}")
+        # --- END DEBUG ---
+
         # Фазовая кросс-корреляция
         shift, _error, _phasediff = phase_cross_correlation(
             data_norm, dc_norm, upsample_factor=10)
         shifts_y[k] = float(shift[0])
         shifts_x[k] = float(shift[1])
+        print(f"[DBG]   phase_cc: shift={shift}, error={_error:.4f}, phasediff={_phasediff:.4f}")
 
         logging.info(f'Checkpoint {k}, angle={dc_angle:.2f}: '
                      f'shift_y={shifts_y[k]:.3f}, shift_x={shifts_x[k]:.3f}')
