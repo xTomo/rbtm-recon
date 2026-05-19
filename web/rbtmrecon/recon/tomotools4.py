@@ -611,6 +611,7 @@ def measure_repositioning_shifts(
         adv_data: 'AdvancedTomoData',
         x_min: int, x_max: int,
         y_min: int, y_max: int,
+        debug: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Измеряет сдвиг позиционирования объекта на каждом checkpoint-е.
 
@@ -628,6 +629,7 @@ def measure_repositioning_shifts(
     ----------
     adv_data  : AdvancedTomoData
     x_min, x_max, y_min, y_max : границы ROI
+    debug     : bool — если True, выводит подробную диагностику в stdout
 
     Возвращает
     ----------
@@ -640,14 +642,13 @@ def measure_repositioning_shifts(
         logging.warning('No periodic empties found — no checkpoints to measure')
         return np.array([]), np.array([]), np.array([])
 
-    # --- DEBUG ---
-    print(f"[DBG] series_length = {adv_data.series_length}")
-    print(f"[DBG] K (num checkpoints) = {K}")
-    print(f"[DBG] periodic_empty_fnumbers = {adv_data.periodic_empty_fnumbers}")
-    print(f"[DBG] data_check_numbers = {adv_data.data_check_numbers}")
-    print(f"[DBG] data_numbers[:5] = {adv_data.data_numbers[:5]}, "
-          f"data_numbers[-5:] = {adv_data.data_numbers[-5:]}")
-    # --- END DEBUG ---
+    if debug:
+        print(f"[DBG] series_length = {adv_data.series_length}")
+        print(f"[DBG] K (num checkpoints) = {K}")
+        print(f"[DBG] periodic_empty_fnumbers = {adv_data.periodic_empty_fnumbers}")
+        print(f"[DBG] data_check_numbers = {adv_data.data_check_numbers}")
+        print(f"[DBG] data_numbers[:5] = {adv_data.data_numbers[:5]}, "
+              f"data_numbers[-5:] = {adv_data.data_numbers[-5:]}")
 
     checkpoint_angles = np.empty(K, dtype='float32')
     shifts_y = np.empty(K, dtype='float64')
@@ -664,8 +665,9 @@ def measure_repositioning_shifts(
                    (adv_data.data_check_numbers < next_fn))
         dc_indices = np.where(mask_dc)[0]
 
-        print(f"[DBG] Checkpoint {k}: fn_start={fn_start}, next_fn={next_fn}, "
-              f"dc_candidates={adv_data.data_check_numbers}, dc_indices={dc_indices}")
+        if debug:
+            print(f"[DBG] Checkpoint {k}: fn_start={fn_start}, next_fn={next_fn}, "
+                  f"dc_candidates={adv_data.data_check_numbers}, dc_indices={dc_indices}")
 
         if len(dc_indices) == 0:
             logging.warning(f'Checkpoint {k}: no data_check frames found, skipping')
@@ -685,11 +687,11 @@ def measure_repositioning_shifts(
         data_idx = _find_matching_data_frame(
             dc_angle, adv_data.data_angles, adv_data.data_numbers, fn_start)
 
-        print(f"[DBG]   dc_angle={dc_angle:.2f}, data_idx={data_idx}, "
-              f"fn_start={fn_start}")
-        if data_idx is not None:
-            print(f"[DBG]   matched data_number={adv_data.data_numbers[data_idx]}, "
-                  f"matched_angle={adv_data.data_angles[data_idx]:.2f}")
+        if debug:
+            print(f"[DBG]   dc_angle={dc_angle:.2f}, data_idx={data_idx}, fn_start={fn_start}")
+            if data_idx is not None:
+                print(f"[DBG]   matched data_number={adv_data.data_numbers[data_idx]}, "
+                      f"matched_angle={adv_data.data_angles[data_idx]:.2f}")
 
         if data_idx is None:
             logging.warning(f'Checkpoint {k}: no matching data frame at angle {dc_angle:.2f}, skipping')
@@ -713,38 +715,37 @@ def measure_repositioning_shifts(
         dc_norm = np.log(ref_empty) - np.log(dc_frame)
         dc_norm = safe_median(dc_norm)
 
-        # --- DEBUG нормированные изображения ---
-        print(f"[DBG]   data_norm:  min={data_norm.min():.4f} max={data_norm.max():.4f} "
-              f"std={data_norm.std():.6f} mean={data_norm.mean():.4f}")
-        print(f"[DBG]   dc_norm:    min={dc_norm.min():.4f} max={dc_norm.max():.4f} "
-              f"std={dc_norm.std():.6f} mean={dc_norm.mean():.4f}")
-        print(f"[DBG]   diff(dc-data): max_abs={np.abs(dc_norm - data_norm).max():.6f} "
-              f"mean_abs={np.abs(dc_norm - data_norm).mean():.6f}")
-        # --- END DEBUG ---
+        if debug:
+            print(f"[DBG]   data_norm:  min={data_norm.min():.4f} max={data_norm.max():.4f} "
+                  f"std={data_norm.std():.6f} mean={data_norm.mean():.4f}")
+            print(f"[DBG]   dc_norm:    min={dc_norm.min():.4f} max={dc_norm.max():.4f} "
+                  f"std={dc_norm.std():.6f} mean={dc_norm.mean():.4f}")
+            print(f"[DBG]   diff(dc-data): max_abs={np.abs(dc_norm - data_norm).max():.6f} "
+                  f"mean_abs={np.abs(dc_norm - data_norm).mean():.6f}")
+
+            # Прямая кросс-корреляция (без phase normalization) для сравнения
+            from scipy.signal import fftconvolve
+            cc = fftconvolve(data_norm - data_norm.mean(),
+                             (dc_norm - dc_norm.mean())[::-1, ::-1], mode='full')
+            peak_loc = np.unravel_index(np.argmax(cc), cc.shape)
+            center = ((np.array(cc.shape) - 1) // 2).astype(int)
+            direct_shift = np.array(peak_loc) - center
+            print(f"[DBG]   direct_cc_shift: {direct_shift}, "
+                  f"peak={cc[peak_loc]:.4f}, at_zero={cc[center[0], center[1]]:.4f}")
+            r = 5
+            cc_patch = cc[center[0]-r:center[0]+r+1, center[1]-r:center[1]+r+1]
+            patch_peak = np.unravel_index(np.argmax(cc_patch), cc_patch.shape)
+            print(f"[DBG]   cc patch [-5..+5] peak at {np.array(patch_peak)-r}, "
+                  f"val={cc_patch.max():.4f} vs global_peak={cc[peak_loc]:.4f}")
 
         # Фазовая кросс-корреляция
         shift, _error, _phasediff = phase_cross_correlation(
             data_norm, dc_norm, upsample_factor=10)
         shifts_y[k] = float(shift[0])
         shifts_x[k] = float(shift[1])
-        print(f"[DBG]   phase_cc: shift={shift}, error={_error:.4f}, phasediff={_phasediff:.4f}")
 
-        # --- DEBUG: прямая кросс-корреляция без phase normalization ---
-        from scipy.signal import fftconvolve
-        cc = fftconvolve(data_norm - data_norm.mean(),
-                         (dc_norm - dc_norm.mean())[::-1, ::-1], mode='full')
-        peak_loc = np.unravel_index(np.argmax(cc), cc.shape)
-        center = ((np.array(cc.shape) - 1) // 2).astype(int)
-        direct_shift = np.array(peak_loc) - center
-        print(f"[DBG]   direct_cc_shift: {direct_shift}, "
-              f"peak={cc[peak_loc]:.4f}, at_zero={cc[center[0], center[1]]:.4f}")
-        # Диапазон значений кросс-корреляции вблизи нуля
-        r = 5
-        cc_center_patch = cc[center[0]-r:center[0]+r+1, center[1]-r:center[1]+r+1]
-        peak_in_patch = np.unravel_index(np.argmax(cc_center_patch), cc_center_patch.shape)
-        print(f"[DBG]   cc patch [-5..+5] peak at {np.array(peak_in_patch)-r}, "
-              f"val={cc_center_patch.max():.4f} vs global_peak={cc[peak_loc]:.4f}")
-        # --- END DEBUG ---
+        if debug:
+            print(f"[DBG]   phase_cc: shift={shift}, error={_error:.4f}, phasediff={_phasediff:.4f}")
 
         logging.info(f'Checkpoint {k}, angle={dc_angle:.2f}: '
                      f'shift_y={shifts_y[k]:.3f}, shift_x={shifts_x[k]:.3f}')

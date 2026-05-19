@@ -193,7 +193,7 @@ shifts_x = np.array([])
 if adv_data is not None:
     print("Измерение сдвигов позиционирования...")
     checkpoint_angles, shifts_y, shifts_x = measure_repositioning_shifts(
-        adv_data, x_min, x_max, y_min, y_max)
+        adv_data, x_min, x_max, y_min, y_max, debug=True)
 
     print("\nРезультаты:")
     for k in range(len(shifts_y)):
