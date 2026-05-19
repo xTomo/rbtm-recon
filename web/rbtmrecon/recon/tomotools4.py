@@ -738,6 +738,25 @@ def measure_repositioning_shifts(
             print(f"[DBG]   cc patch [-5..+5] peak at {np.array(patch_peak)-r}, "
                   f"val={cc_patch.max():.4f} vs global_peak={cc[peak_loc]:.4f}")
 
+            # Визуализация разницы совмещаемых изображений
+            diff = dc_norm - data_norm
+            vabs = max(abs(diff.min()), abs(diff.max())) or 1e-9
+            fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+            axes[0].imshow(data_norm, cmap='gray', origin='lower')
+            axes[0].set_title(f'data (before, idx={data_idx})')
+            axes[0].axis('off')
+            axes[1].imshow(dc_norm, cmap='gray', origin='lower')
+            axes[1].set_title(f'data_check (after, idx={dc_idx})')
+            axes[1].axis('off')
+            im = axes[2].imshow(diff, cmap='seismic', origin='lower',
+                                vmin=-vabs, vmax=vabs)
+            axes[2].set_title(f'diff (dc - data), checkpoint {k}, angle={dc_angle:.1f}°')
+            axes[2].axis('off')
+            plt.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
+            fig.suptitle(f'Repositioning shift: checkpoint {k}')
+            plt.tight_layout()
+            plt.show()
+
         # Фазовая кросс-корреляция
         shift, _error, _phasediff = phase_cross_correlation(
             data_norm, dc_norm, upsample_factor=10)
