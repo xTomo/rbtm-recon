@@ -73,13 +73,15 @@ rbtmrecon (tomo_worker.py)
 |---|---|
 | `recon/tomo_worker.py` | Основной цикл: берёт задание из MongoDB, запускает реконструкцию |
 | `recon/tomo_queue.py` | Работа с MongoDB |
-| `recon/tomotools2.py` | Инструменты: загрузка данных, нормировка, коррекция оси, реконструкция |
-| `recon/reconstructor-axis_search3b.py` | Ноутбук-шаблон реконструкции (jupytext-формат) |
+| `recon/tomotools2.py` | Инструменты для стандартного эксперимента (legacy) |
+| `recon/tomotools4.py` | Расширенные инструменты: поддержка AdvancedExperiment, коррекция позиционирования, нормировка с дрейфом |
+| `recon/reconstructor4.py` | Ноутбук-шаблон реконструкции v4 (AdvancedExperiment + Standard, jupytext-формат) |
+| `recon/reconstructor-axis_search3b.py` | Устаревший ноутбук-шаблон (только Standard) |
 | `recon/hdf2vtk.py` | Конвертация HDF5 → VTK (ручной запуск) |
 | `recon/tomo.ini` | Пример конфигурации одного эксперимента |
 | `environment.yml` | conda-окружение `xrecon` (Python 3.11 + CUDA 12) |
 
-**Алгоритм реконструкции (один объект):**
+**Алгоритм реконструкции (один объект, `reconstructor4.py`):**
 
 ```
 1. Получить метаданные эксперимента из rbtmstorage
@@ -87,12 +89,18 @@ rbtmrecon (tomo_worker.py)
 3. Скачать HDF5-файл в /fast/<experiment_id>/
 4. jupytext: .py → .ipynb
 5. nbconvert: выполнить ноутбук (CUDA)
-   ├── Загрузить данные (data/empty/dark кадры)
+   ├── Автодетекция формата: is_advanced_experiment() → advanced / standard
+   ├── [Advanced] load_tomo_data_advanced() — раздельная загрузка empty/data/data_check
+   ├── [Advanced] analyze_source_drift() — визуализация дрейфа трубки
    ├── Нормировать проекции
+   │   ├── [Advanced] normalize_projections_with_timeline() — с интерполяцией empty
+   │   └── [Standard] normalize_projections() — единый empty
+   ├── [Advanced] measure_repositioning_shifts() — кросс-корреляция data vs data_check
+   ├── [Advanced] apply_repositioning_correction() — sub-pixel коррекция до нормировки
    ├── Найти коррекцию оси вращения (метод Пауэлла)
    ├── Применить коррекцию, построить синограмму
    ├── Удалить кольцевые артефакты
-   └── FBP + CGLS реконструкция (astra-toolbox)
+   └── FBP реконструкция (astra-toolbox)
 6. nbconvert: .ipynb → HTML-отчёт
 7. Установить статус 'done' / 'error' в MongoDB
 ```
@@ -296,3 +304,85 @@ python tomo_worker.py
 
 - Требует запущенного стека `rbtmstorage` и сети `rbtmstorage_default`
 - IP Jupyter-сервера (`10.0.7.153`) захардкожен в Dockerfile веб-сервиса
+
+---
+
+## tomotools4 — поддержка AdvancedExperiment
+
+`tomotools4.py` полностью заменяет `tomotools2.py` для продвинутого режима и совместим с ним для стандартного.
+
+### Ключевые функции
+
+| Функция | Описание |
+|---|---|
+| `is_advanced_experiment(data_file)` | Детектор формата по наличию непустой группы `data_check` |
+| `load_tomo_data_advanced(data_file, tmp_dir)` | Загружает `AdvancedTomoData` (dark, initial/periodic empty, data, data_check) |
+| `analyze_source_drift(adv_data)` | График дрейфа интенсивности рентгеновской трубки по сериям empty |
+| `measure_repositioning_shifts(adv_data, ...)` | Кросс-корреляция data vs data_check для измерения сдвига позиционирования |
+| `apply_repositioning_correction(data_images, ...)` | Sub-pixel коррекция кадров in-place (ДО нормировки) |
+| `analyze_repositioning_accuracy(adv_data, ...)` | Графики ошибки позиционирования по checkpoints |
+| `normalize_projections_with_timeline(data_images_crop, adv_data, ...)` | Нормировка с линейной интерполяцией empty между checkpoint-ами |
+
+### Структура данных AdvancedTomoData
+
+```python
+AdvancedTomoData(
+    dark_image,               # медиана dark кадров, shape (H, W)
+    initial_empty,            # медиана начальной empty серии, shape (H, W)
+    periodic_empties,         # list[np.ndarray] — медианы periodic серий
+    periodic_empty_fnumbers,  # list[int] — frame_number первого кадра каждой periodic серии
+    data_images,              # dark-subtracted проекции, shape (N, H, W)
+    data_angles,              # углы, shape (N,)
+    data_numbers,             # глобальные frame_numbers, shape (N,)
+    data_check_images,        # dark-subtracted контрольные кадры, shape (M, H, W)
+    data_check_angles,        # shape (M,)
+    data_check_numbers,       # глобальные frame_numbers, shape (M,)
+    series_length,            # длина dark/empty серии
+)
+```
+
+### Нумерация сегментов (для коррекции позиционирования)
+
+```
+frame_numbers:  0..19 (dark)  20..29 (empty_init)  30..69 (data seg0)
+                70..79 (periodic_empty[0])  80 (data_check[0])  81..130 (data seg1)
+                131..140 (periodic_empty[1])  141 (data_check[1])  ...
+
+periodic_empty_fnumbers = [70, 131, ...]
+data_check_numbers      = [80, 141, ...]
+
+Сегмент 0 (data seg0): data_number < 70  → референс, не корректируется
+Сегмент 1 (data seg1): data_number > 70  → смещён на shifts[0]
+Сегмент 2 (data seg2): data_number > 131 → смещён на shifts[1]
+```
+
+### Отладка measure_repositioning_shifts
+
+Функция принимает параметр `debug=True` для вывода диагностики:
+
+```python
+checkpoint_angles, shifts_y, shifts_x = measure_repositioning_shifts(
+    adv_data, x_min, x_max, y_min, y_max, debug=True)
+```
+
+Вывод включает:
+- `series_length`, `periodic_empty_fnumbers`, `data_check_numbers` — для проверки разбиения
+- `fn_start` / `next_fn` / `dc_indices` — для каждого checkpoint-а
+- `data_norm`/`dc_norm` статистики — для контроля нормировки
+- `direct_cc_shift` — сдвиг через прямую кросс-корреляцию (для сравнения с `phase_cross_correlation`)
+
+### Известная ловушка: `series_length` из HDF5
+
+`series_length` читается из атрибута `exp_info` HDF5-файла. Структура атрибута — это полный MongoDB-документ:
+
+```json
+{
+  "experiment parameters": {
+    "series_length": 10,
+    "empty_period": 50
+  }
+}
+```
+
+Правильный путь: `exp_info['experiment parameters']['series_length']` (не `exp_info['series_length']`).
+Если `series_length` прочитан неправильно — `periodic_empty_fnumbers` смещаются и `measure_repositioning_shifts` возвращает нулевые сдвиги для всех checkpoints. Исправлено в `tomotools4.py`.
