@@ -128,6 +128,9 @@ def get_frame_group_v2(
     angles       : np.ndarray, shape (N,)
     frame_numbers: np.ndarray, shape (N,)  — только если return_frame_numbers=True
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     rdcc_nbytes = hdf5_cache_mb * 1024 * 1024
     
     with h5py.File(data_file, 'r', rdcc_nbytes=rdcc_nbytes) as f:
@@ -138,13 +141,17 @@ def get_frame_group_v2(
         mapping = f['mapping']
         indices = mapping[f'{group_name}_indices'][:]
         
+        logger.info(f'Loading {group_name}: {len(indices)} frames from indices {indices[:3]}...{indices[-3:]}')
+        
         if len(indices) == 0:
             # Пустая группа
             return (np.array([]), np.array([]), np.array([])) if return_frame_numbers else (np.array([]), np.array([]))
         
         # Читаем кадры одним срезом
         images_all = f['images/all']
+        logger.info(f'Reading {len(indices)} frames from images/all (shape={images_all.shape}, dtype={images_all.dtype})')
         images = images_all[indices]
+        logger.info(f'Loaded {group_name} images: shape={images.shape}, dtype={images.dtype}')
         
         # Читаем углы и frame_numbers из timeline
         timeline = f['timeline']
@@ -172,19 +179,25 @@ def load_tomo_data_v2(data_file: str, tmp_dir: str) -> Tuple[np.ndarray, np.ndar
 
     Сигнатура идентична tomotools2.load_tomo_data() и tomotools4.load_tomo_data().
     """
+    logger.info(f'load_tomo_data_v2: starting for {data_file}')
+    
     with h5py.File(data_file, 'r') as f:
         if not is_hdf5_v2(data_file):
             raise ValueError(f'File {data_file} is not HDF5 v2 format')
         
         is_advanced = bool(f['metadata/is_advanced'][()])
+        logger.info(f'Experiment type: {"advanced" if is_advanced else "simple"}')
         
         # Читаем dark
+        logger.info('Loading dark frames...')
         dark_images, _ = get_frame_group_v2(data_file, 'dark', tmp_dir)
         if len(dark_images) == 0:
             raise ValueError('No dark frames found')
         dark_image = np.median(dark_images, axis=0).astype('float32')
+        logger.info(f'Dark image computed: shape={dark_image.shape}')
         
         # Читаем empty
+        logger.info('Loading empty frames...')
         empty_images, _ = get_frame_group_v2(data_file, 'empty', tmp_dir)
         if len(empty_images) == 0:
             raise ValueError('No empty frames found')
@@ -199,13 +212,16 @@ def load_tomo_data_v2(data_file: str, tmp_dir: str) -> Tuple[np.ndarray, np.ndar
         # Вычитаем dark
         empty_image -= dark_image
         empty_image[empty_image < 1] = 1
+        logger.info(f'Empty image computed: shape={empty_image.shape}')
         
         # Читаем data
+        logger.info('Loading data frames...')
         data_images, data_angles = get_frame_group_v2(data_file, 'data', tmp_dir)
         if len(data_images) == 0:
             raise ValueError('No data frames found')
         
         data_images = data_images.astype('float32') - dark_image
+        logger.info(f'Data loaded: shape={data_images.shape}, angles={len(data_angles)}')
         
         return empty_image, data_images, data_angles
 
