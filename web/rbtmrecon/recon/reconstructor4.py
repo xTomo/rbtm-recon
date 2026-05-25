@@ -100,28 +100,35 @@ data_file = get_experiment_hdf5(experiment_id, data_dir,
                                 STORAGE_SERVER)
 mkdir_p(tmp_dir)
 
-empty_beam, data_images, data_angles = load_tomo_data(data_file, tmp_dir)
-empty_beam[empty_beam < 1] = 1
-
-show_exp_data(empty_beam, data_images)
-
-# %% [markdown]
-# # Тип эксперимента и анализ дрейфа источника
-
-# %%
+# Автодетекция типа эксперимента ПЕРЕД загрузкой
 _is_advanced = is_advanced_experiment(data_file)
 print(f"Формат эксперимента: {'advanced (AdvancedExperiment)' if _is_advanced else 'standard (Experiment)'}")
 
-adv_data = None
 if _is_advanced:
+    # Advanced: загружаем сразу AdvancedTomoData (один проход чтения)
     print("Загружаем расширенные данные (initial/periodic empty, data_check)...")
     adv_data = load_tomo_data_advanced(data_file, tmp_dir)
     print(f"  series_length      = {adv_data.series_length}")
     print(f"  periodic empties   = {len(adv_data.periodic_empties)}")
     print(f"  data frames        = {adv_data.data_images.shape[0]}")
     print(f"  data_check frames  = {adv_data.data_check_images.shape[0]}")
+    
+    # Для совместимости с остальным кодом
+    all_empties = [adv_data.initial_empty] + adv_data.periodic_empties
+    empty_beam = np.median(np.stack(all_empties, axis=0), axis=0).astype('float32')
+    empty_beam[empty_beam < 1] = 1
+    data_images = adv_data.data_images
+    data_angles = adv_data.data_angles
+    
     print("\nАнализ дрейфа источника:")
     analyze_source_drift(adv_data)
+else:
+    # Standard: обычная загрузка
+    adv_data = None
+    empty_beam, data_images, data_angles = load_tomo_data(data_file, tmp_dir)
+    empty_beam[empty_beam < 1] = 1
+
+show_exp_data(empty_beam, data_images)
 
 # %% [markdown]
 # # Конфигурация реконструкции
