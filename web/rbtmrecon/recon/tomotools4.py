@@ -37,7 +37,7 @@ from cupyx.scipy.ndimage import median_filter
 from tqdm.notebook import tqdm  # noqa
 
 import tomo.recon.astra_utils as astra_utils  # noqa
-from tomo.recon.hdf5_v2 import is_hdf5_v2, load_tomo_data_v2, load_tomo_data_advanced_v2, get_frame_group_v2, FRAME_MODES  # noqa
+from hdf5_v2 import is_hdf5_v2, load_tomo_data_v2, load_tomo_data_advanced_v2, get_frame_group_v2, FRAME_MODES  # noqa
 
 # STORAGE_SERVER = "http://10.0.7.153:5006/"
 STORAGE_SERVER = "http://rbtmstorage_server_1:5006/"

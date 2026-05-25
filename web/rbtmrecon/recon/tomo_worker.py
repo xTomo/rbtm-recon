@@ -98,6 +98,8 @@ def copy_python_files(obj_id, storage_dir):
         copy(f, out_dir)
     for f in glob.glob('tomotools*.py'):
         copy(f, out_dir)
+    for f in glob.glob('hdf5_*.py'):
+        copy(f, out_dir)
     copytree('tomo', os.path.join(out_dir, 'tomo'), dirs_exist_ok=True)
     return out_dir
 
