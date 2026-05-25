@@ -147,10 +147,20 @@ def get_frame_group_v2(
             # Пустая группа
             return (np.array([]), np.array([]), np.array([])) if return_frame_numbers else (np.array([]), np.array([]))
         
-        # Читаем кадры одним срезом
+        # Читаем кадры одним срезом (или поштучно для больших наборов)
         images_all = f['images/all']
         logger.info(f'Reading {len(indices)} frames from images/all (shape={images_all.shape}, dtype={images_all.dtype})')
-        images = images_all[indices]
+        
+        # Для больших наборов (>100 кадров) читаем поштучно с прогрессом
+        if len(indices) > 100:
+            from tqdm.notebook import tqdm
+            H, W = images_all.shape[1], images_all.shape[2]
+            images = np.empty((len(indices), H, W), dtype=images_all.dtype)
+            for i, idx in enumerate(tqdm(indices, desc=f'Reading {group_name}')):
+                images[i] = images_all[idx]
+        else:
+            images = images_all[indices]
+        
         logger.info(f'Loaded {group_name} images: shape={images.shape}, dtype={images.dtype}')
         
         # Читаем углы и frame_numbers из timeline
