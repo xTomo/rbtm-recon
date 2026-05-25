@@ -325,8 +325,8 @@ def load_tomo_data_advanced_v2(data_file: str, tmp_dir: str) -> 'AdvancedTomoDat
         data_check_angles = data_check_angles[sort_idx]
         data_check_numbers = data_check_fnums[sort_idx]
         
-        # Импортируем AdvancedTomoData из tomotools4
-        from tomo.recon.tomotools4 import AdvancedTomoData
+        # Импортируем AdvancedTomoData из tomotools4 (лежит в том же каталоге)
+        from tomotools4 import AdvancedTomoData
         
         return AdvancedTomoData(
             dark_image=dark_image,
