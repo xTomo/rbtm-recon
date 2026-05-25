@@ -37,6 +37,7 @@ from cupyx.scipy.ndimage import median_filter
 from tqdm.notebook import tqdm  # noqa
 
 import tomo.recon.astra_utils as astra_utils  # noqa
+from tomo.recon.hdf5_v2 import is_hdf5_v2, load_tomo_data_v2, load_tomo_data_advanced_v2, FRAME_MODES  # noqa
 
 # STORAGE_SERVER = "http://10.0.7.153:5006/"
 STORAGE_SERVER = "http://rbtmstorage_server_1:5006/"
@@ -227,8 +228,18 @@ def is_advanced_experiment(data_file: str) -> bool:
     """Возвращает True, если HDF5 содержит непустую группу data_check.
 
     Признак продвинутого (AdvancedExperiment) формата данных.
+    Поддерживает v1 (группа data_check) и v2 (timeline/modes).
     """
     with h5py.File(data_file, 'r') as h5f:
+        # v2 формат: проверяем metadata/is_advanced
+        if 'timeline' in h5f:
+            if 'metadata' in h5f and 'is_advanced' in h5f['metadata']:
+                return bool(h5f['metadata/is_advanced'][()])
+            # Fallback для v2 без явного флага: ищем data_check в modes
+            if 'timeline' in h5f and 'modes' in h5f['timeline']:
+                modes = h5f['timeline/modes'][:]
+                return int(np.sum(modes == FRAME_MODES['data_check'])) > 0
+        # v1 формат: проверяем группу data_check
         return 'data_check' in h5f and len(h5f['data_check']) > 0
 
 
@@ -267,7 +278,9 @@ class AdvancedTomoData:
 def load_tomo_data_advanced(data_file: str, tmp_dir: str) -> AdvancedTomoData:
     """Загружает данные advanced эксперимента из HDF5-файла.
 
-    Алгоритм:
+    Автоматически определяет версию формата (v1 / v2).
+
+    Алгоритм для v1:
       1. Загружает dark → dark_image = median
       2. Загружает empty с frame_numbers → сортирует по frame_number
       3. Читает series_length из exp_info атрибута HDF5
@@ -280,6 +293,12 @@ def load_tomo_data_advanced(data_file: str, tmp_dir: str) -> AdvancedTomoData:
     ----------
     AdvancedTomoData
     """
+    # Автодетекция версии HDF5
+    if is_hdf5_v2(data_file):
+        logging.info('HDF5 v2 format detected, using load_tomo_data_advanced_v2')
+        return load_tomo_data_advanced_v2(data_file, tmp_dir)
+    
+    # Legacy v1 формат — оригинальная логика
     # --- Dark ---
     dark_images, _ = get_frame_group(data_file, 'dark', tmp_dir)
     dark_image = np.median(dark_images, axis=0).astype('float32')
@@ -394,7 +413,7 @@ def _read_series_length_from_hdf5(data_file: str, total_empty_count: int) -> int
 def load_tomo_data(data_file: str, tmp_dir: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Загружает данные томографии из HDF5-файла.
 
-    Автоматически определяет формат (standard / advanced).
+    Автоматически определяет версию формата (v1 / v2) и тип эксперимента (standard / advanced).
     Для advanced усредняет все empty серии для backward-compatible empty_image.
 
     Возвращает
@@ -405,8 +424,14 @@ def load_tomo_data(data_file: str, tmp_dir: str) -> tuple[np.ndarray, np.ndarray
 
     Сигнатура и возвращаемые значения идентичны tomotools2.load_tomo_data().
     """
+    # Автодетекция версии HDF5
+    if is_hdf5_v2(data_file):
+        logging.info('HDF5 v2 format detected, using load_tomo_data_v2')
+        return load_tomo_data_v2(data_file, tmp_dir)
+    
+    # Legacy v1 формат
     if is_advanced_experiment(data_file):
-        logging.info('Advanced experiment detected, using load_tomo_data_advanced')
+        logging.info('Advanced experiment detected (v1), using load_tomo_data_advanced')
         adv = load_tomo_data_advanced(data_file, tmp_dir)
         # Усредняем все empty (initial + periodic) для единого empty_image
         all_empties = [adv.initial_empty] + adv.periodic_empties
@@ -414,7 +439,7 @@ def load_tomo_data(data_file: str, tmp_dir: str) -> tuple[np.ndarray, np.ndarray
         data_images = adv.data_images
         data_angles = adv.data_angles
     else:
-        logging.info('Standard experiment detected')
+        logging.info('Standard experiment detected (v1)')
         empty_images, _ = get_frame_group(data_file, 'empty', tmp_dir)
         dark_images, _ = get_frame_group(data_file, 'dark', tmp_dir)
 
