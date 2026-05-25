@@ -147,17 +147,32 @@ def get_frame_group_v2(
             # Пустая группа
             return (np.array([]), np.array([]), np.array([])) if return_frame_numbers else (np.array([]), np.array([]))
         
-        # Читаем кадры одним срезом (или поштучно для больших наборов)
+        # Читаем кадры параллельно (как в v1)
         images_all = f['images/all']
         logger.info(f'Reading {len(indices)} frames from images/all (shape={images_all.shape}, dtype={images_all.dtype})')
         
-        # Для больших наборов (>100 кадров) читаем поштучно с прогрессом
-        if len(indices) > 100:
+        H, W = images_all.shape[1], images_all.shape[2]
+        images = np.empty((len(indices), H, W), dtype=images_all.dtype)
+        
+        if num_workers > 1 and len(indices) > 1:
+            from concurrent.futures import ThreadPoolExecutor
             from tqdm.notebook import tqdm
-            H, W = images_all.shape[1], images_all.shape[2]
-            images = np.empty((len(indices), H, W), dtype=images_all.dtype)
-            for i, idx in enumerate(tqdm(indices, desc=f'Reading {group_name}')):
-                images[i] = images_all[idx]
+            
+            def _read_chunk(args):
+                start, end = args
+                with h5py.File(data_file, 'r', rdcc_nbytes=rdcc_nbytes) as hf:
+                    imgs = hf['images/all'][indices[start:end]]
+                return start, imgs
+            
+            # Разбиваем на ~равные chunks
+            chunk_size = max(1, len(indices) // num_workers)
+            ranges = [(i, min(i + chunk_size, len(indices))) for i in range(0, len(indices), chunk_size)]
+            
+            with ThreadPoolExecutor(max_workers=num_workers) as pool:
+                results = list(tqdm(pool.map(_read_chunk, ranges), total=len(ranges), desc=f'Reading {group_name}'))
+            
+            for start, chunk_imgs in results:
+                images[start:start + len(chunk_imgs)] = chunk_imgs
         else:
             images = images_all[indices]
         
