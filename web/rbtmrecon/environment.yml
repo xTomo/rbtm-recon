@@ -43,5 +43,6 @@ dependencies:
     - git+https://github.com/matejak/imreg_dft.git
     - pyvista
     - line_profiler
-    - cupy-cuda12x
+    - cupy-cuda12x[ctk]
     - tigre
+    - pytest

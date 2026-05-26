@@ -28,6 +28,8 @@ COPY environment.yml /rbtm/
 # Сообщаем conda-solver, что системный CUDA 12.1 уже доступен,
 # чтобы не устанавливать cudatoolkit из conda ни явно, ни транзитивно.
 ENV CONDA_OVERRIDE_CUDA=12.1
+# Указываем CuPy путь к заголовкам CUDA (уже есть в devel-образе)
+ENV CUDA_PATH=/usr/local/cuda
 
 RUN /opt/conda/bin/conda env create -f environment.yml  && /opt/conda/bin/conda clean -y --all
 
