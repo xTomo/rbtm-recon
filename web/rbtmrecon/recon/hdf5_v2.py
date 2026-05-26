@@ -155,8 +155,9 @@ def get_frame_group_v2(
         images = np.empty((len(indices), H, W), dtype=images_all.dtype)
         
         from tqdm.notebook import tqdm
-        batch_size = 50  # оптимальный размер для chunk-cache
-        for start in tqdm(range(0, len(indices), batch_size), desc=f'Reading {group_name}'):
+        batch_size = 5  # плавный прогресс-бар (больше шагов)
+        for start in tqdm(range(0, len(indices), batch_size), desc=f'Reading {group_name}',
+                         mininterval=0.1, ncols=80):
             end = min(start + batch_size, len(indices))
             images[start:end] = images_all[indices[start:end]]
         
