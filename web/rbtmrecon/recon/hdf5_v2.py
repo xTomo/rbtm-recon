@@ -154,10 +154,10 @@ def get_frame_group_v2(
         H, W = images_all.shape[1], images_all.shape[2]
         images = np.empty((len(indices), H, W), dtype=images_all.dtype)
         
-        from tqdm.notebook import tqdm
+        from tqdm.auto import tqdm
         batch_size = 5  # плавный прогресс-бар (больше шагов)
         for start in tqdm(range(0, len(indices), batch_size), desc=f'Reading {group_name}',
-                         mininterval=0.1, ncols=80):
+                         mininterval=0.5, ncols=100, leave=True, position=0):
             end = min(start + batch_size, len(indices))
             images[start:end] = images_all[indices[start:end]]
         
