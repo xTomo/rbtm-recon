@@ -35,6 +35,7 @@ dependencies:
   - pillow
   - k3d
   - scikit-learn
+  - tomocupy
   - pip
   - pip:
     - plumbum
@@ -44,4 +45,3 @@ dependencies:
     - line_profiler
     - cupy-cuda12x
     - tigre
-    - tomocupy
