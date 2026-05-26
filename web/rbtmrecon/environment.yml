@@ -35,7 +35,7 @@ dependencies:
   - pillow
   - k3d
   - scikit-learn
-  - tomocupy
+  # - tomocupy
   - pip
   - pip:
     - plumbum

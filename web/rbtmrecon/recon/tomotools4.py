@@ -1446,7 +1446,8 @@ def remove_stripes_sinogram(sinogram_fixed: np.ndarray) -> None:
 
     Обрабатывает синограмму батчами по ~48 срезов на GPU.
     """
-    from tomocupy.processing.remove_stripe import remove_all_stripe
+    # from tomocupy.processing.remove_stripe import remove_all_stripe
+    from tomo.remove_stripe import remove_all_stripe
 
     indexes = range(sinogram_fixed.shape[0])
     num_subarrays = len(indexes) // 20 + 1
