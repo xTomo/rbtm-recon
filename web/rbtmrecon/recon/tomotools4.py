@@ -1242,8 +1242,6 @@ def show_reconstruction_cuts(rec_vol: np.ndarray, n_cuts: int = 20) -> None:
 def preview_axis_correction(sinogram_mem: np.ndarray, angles: np.ndarray,
                              remove_rings: bool = False) -> None:
     """Реконструирует и показывает до 10 срезов синограммы для контроля оси."""
-    
-    # from tomocupy.processing.remove_stripe import remove_all_stripe
     from tomo.remove_stripe import remove_all_stripe
     
     if sinogram_mem.ndim > 2:
@@ -1333,17 +1331,14 @@ def create_axis_search_widget(sinogram_fixed: np.ndarray,
                                layout=widgets.Layout(width='220px'))
     btn_apply = widgets.Button(description='Применить + реконструкция', button_style='primary',
                                 layout=widgets.Layout(width='250px'))
-    output = widgets.Output(layout=widgets.Layout(border='none'))
 
     def on_show_click(b):
-        with output:
-            output.clear_output(wait=True)
-            _show_alignment(shift_slider.value, angle_slider.value)
+        _show_alignment(shift_slider.value, angle_slider.value)
 
     def on_apply_click(b):
-        with output:
-            output.clear_output(wait=True)
-            _apply_and_reconstruct(shift_slider.value, angle_slider.value)
+        print(f"Применяем коррекцию: shift={shift_slider.value:.2f}, angle={angle_slider.value:.3f}")
+        _apply_and_reconstruct(shift_slider.value, angle_slider.value)
+        print("Готово!")
 
     btn_show.on_click(on_show_click)
     btn_apply.on_click(on_apply_click)
@@ -1352,7 +1347,6 @@ def create_axis_search_widget(sinogram_fixed: np.ndarray,
         widgets.HBox([shift_slider, shift_text]),
         widgets.HBox([angle_slider, angle_text]),
         widgets.HBox([btn_show, btn_apply]),
-        output,
     ])
     return ui, shift_text, angle_text
 
@@ -1448,7 +1442,6 @@ def remove_stripes_sinogram(sinogram_fixed: np.ndarray) -> None:
 
     Обрабатывает синограмму батчами по ~48 срезов на GPU.
     """
-    # from tomocupy.processing.remove_stripe import remove_all_stripe
     from tomo.remove_stripe import remove_all_stripe
 
     indexes = range(sinogram_fixed.shape[0])
