@@ -292,7 +292,7 @@ def remove_stripes_sinogram(sinogram_fixed: np.ndarray) -> None:
 
     Обрабатывает синограмму батчами по ~48 срезов на GPU.
     """
-    from tomo.remove_stripe import remove_all_stripe
+    from tomocupy.processing.remove_stripe import remove_all_stripe
 
     indexes = range(sinogram_fixed.shape[0])
     num_subarrays = len(indexes) // 48 + 1
@@ -515,7 +515,7 @@ def show_reconstruction_cuts(rec_vol: np.ndarray, n_cuts: int = 20) -> None:
 def preview_axis_correction(sinogram_mem: np.ndarray, angles: np.ndarray,
                              remove_rings: bool = False) -> None:
     """Реконструирует и показывает до 10 срезов синограммы для контроля оси."""
-    from tomo.remove_stripe import remove_all_stripe
+    from tomocupy.processing.remove_stripe import remove_all_stripe
 
     if sinogram_mem.ndim > 2:
         n_slices = min(10, sinogram_mem.shape[0])

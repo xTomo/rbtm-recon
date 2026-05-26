@@ -44,3 +44,4 @@ dependencies:
     - line_profiler
     - cupy-cuda12x
     - tigre
+    - tomocupy
