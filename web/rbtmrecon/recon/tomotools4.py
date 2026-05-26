@@ -826,9 +826,12 @@ def apply_repositioning_correction(
     Сегмент 0 (до первого checkpoint) — без коррекции (референсная позиция).
     Сегмент k (k >= 1) — кадры после checkpoint k-1 до checkpoint k → сдвиг shifts[k-1].
 
+    ВАЖНО: применять ПОСЛЕ нормировки к нормированным кадрам (data_images_crop).
+
     Параметры
     ----------
-    data_images   : dark-subtracted кадры shape (N, H, W), изменяются in-place
+    data_images   : нормированные кадры shape (N, H, W) или (N, H_roi, W_roi),
+                    изменяются in-place
     data_numbers  : глобальные frame_numbers, shape (N,)
     adv_data      : AdvancedTomoData (нужны periodic_empty_fnumbers)
     shifts_y      : shape (K,) — сдвиги по Y на каждом checkpoint
@@ -1446,7 +1449,7 @@ def remove_stripes_sinogram(sinogram_fixed: np.ndarray) -> None:
     from tomocupy.processing.remove_stripe import remove_all_stripe
 
     indexes = range(sinogram_fixed.shape[0])
-    num_subarrays = len(indexes) // 48 + 1
+    num_subarrays = len(indexes) // 20 + 1
 
     for subarr in tqdm(np.array_split(indexes, num_subarrays)):
         t = sinogram_fixed[subarr]

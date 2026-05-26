@@ -190,7 +190,7 @@ show_frames_with_border(data_images, empty_beam, data_angles, 0, x_min, x_max, y
 #
 # Измеряем сдвиг позиции объекта после каждого возврата на стол
 # (кросс-корреляция data vs data_check при одном угле).
-# Затем применяем sub-pixel коррекцию к data_images ПЕРЕД нормировкой.
+# Коррекция sub-pixel сдвига применяется ПОСЛЕ нормировки.
 
 # %%
 checkpoint_angles = np.array([])
@@ -214,23 +214,6 @@ if adv_data is not None and len(shifts_y) > 0:
         adv_data, checkpoint_angles, shifts_y, shifts_x,
         x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max)
 
-# %%
-# Применить коррекцию позиционирования к сырым (dark-subtracted) data_images
-# ВАЖНО: это нужно сделать ДО нормировки и ДО crop по ROI
-apply_repositioning = adv_data is not None and len(shifts_y) > 0  # можно вручную отключить
-
-if apply_repositioning:
-    print("Применяем коррекцию позиционирования к data_images...")
-    apply_repositioning_correction(
-        adv_data.data_images, adv_data.data_numbers, adv_data, shifts_y, shifts_x)
-    # Синхронизируем data_images (из load_tomo_data) с исправленными данными
-    # (они могут отличаться, если load_tomo_data возвращал усреднённый empty,
-    #  но data_images — общий массив)
-    data_images = adv_data.data_images
-    print("Коррекция позиционирования применена.")
-else:
-    print("Коррекция позиционирования пропущена.")
-
 # %% [markdown]
 # # Нормировка проекций
 
@@ -250,6 +233,19 @@ if use_timeline_normalization:
         data_images_crop, adv_data, x_min, x_max, y_min, y_max)
 else:
     normalize_projections(data_images_crop, empty_beam_crop)
+
+# %%
+# Применить коррекцию позиционирования к нормированным data_images_crop
+# ВАЖНО: выполняется ПОСЛЕ нормировки
+apply_repositioning = adv_data is not None and len(shifts_y) > 0  # можно вручную отключить
+
+if apply_repositioning:
+    print("Применяем коррекцию позиционирования к нормированным данным...")
+    apply_repositioning_correction(
+        data_images_crop, adv_data.data_numbers, adv_data, shifts_y, shifts_x)
+    print("Коррекция позиционирования применена.")
+else:
+    print("Коррекция позиционирования пропущена.")
 
 # %% [markdown]
 # # Центр масс
