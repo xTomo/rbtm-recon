@@ -773,18 +773,24 @@ def measure_repositioning_shifts(
             # Визуализация разницы совмещаемых изображений
             diff = dc_norm - data_norm
             vabs = max(abs(diff.min()), abs(diff.max())) or 1e-9
-            fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-            axes[0].imshow(data_norm, cmap='gray', origin='lower')
+            fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+            
+            im0 = axes[0].imshow(data_norm, cmap='gray')
             axes[0].set_title(f'data (before, idx={data_idx})')
             axes[0].axis('off')
-            axes[1].imshow(dc_norm, cmap='gray', origin='lower')
+            plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+            
+            im1 = axes[1].imshow(dc_norm, cmap='gray')
             axes[1].set_title(f'data_check (after, idx={dc_idx})')
             axes[1].axis('off')
-            im = axes[2].imshow(diff, cmap='seismic', origin='lower',
+            plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+            
+            im2 = axes[2].imshow(diff, cmap='seismic',
                                 vmin=-vabs, vmax=vabs)
             axes[2].set_title(f'diff (dc - data), checkpoint {k}, angle={dc_angle:.1f}°')
             axes[2].axis('off')
-            plt.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
+            plt.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+            
             fig.suptitle(f'Repositioning shift: checkpoint {k}')
             plt.tight_layout()
             plt.show()

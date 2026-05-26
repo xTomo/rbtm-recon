@@ -155,7 +155,7 @@ else:
 
 print("x_min, x_max, y_min, y_max = ", x_min, x_max, y_min, y_max)
 
-tmp_img = data_images[::100]
+tmp_img = data_images[::10]
 ff = ipywidgets.interact_manual(
     show_frames_with_border,
     data_images=ipywidgets.fixed(tmp_img),
