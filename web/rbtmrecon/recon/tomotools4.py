@@ -546,40 +546,41 @@ def _interpolate_empty(adv_data: AdvancedTomoData,
     """Возвращает интерполированный empty_crop для кадра с заданным frame_number.
 
     Линейно интерполирует между ближайшими empty сериями по frame_number.
-    Для кадров до первой periodic вставки использует initial_empty.
-    Для кадров после последней periodic вставки использует последнюю periodic.
+    Начальная серия участвует в интерполяции наравне с periodic: её опорный
+    frame_number — ``adv_data.initial_empty_fnumber`` (первый кадр начальной
+    empty-серии).
+
+      * frame_number <= initial_empty_fnumber        → initial_empty (константа)
+      * initial_empty_fnumber < fn < periodic[0]     → интерполяция initial ↔ periodic[0]
+      * между periodic сериями                       → интерполяция соседних
+      * frame_number >= последней periodic           → последняя periodic (константа)
     """
     # Список (frame_number, empty_image) всех серий по возрастанию
-    all_fnums = [-1] + adv_data.periodic_empty_fnumbers  # -1 = initial (до всех data)
-    all_empties = [adv_data.initial_empty] + adv_data.periodic_empties
+    all_fnums = ([int(adv_data.initial_empty_fnumber)]
+                 + [int(fn) for fn in adv_data.periodic_empty_fnumbers])
+    all_empties = [adv_data.initial_empty] + list(adv_data.periodic_empties)
 
-    # Находим, между какими двумя сериями находится данный frame_number
-    # Ищем i такое, что all_fnums[i] <= frame_number < all_fnums[i+1]
-    idx = 0
-    for i in range(len(all_fnums) - 1):
-        if all_fnums[i + 1] <= frame_number:
-            idx = i + 1
-        else:
-            break
-
-    # Если кадр после последней вставки — используем последний empty
-    if idx >= len(all_empties) - 1:
-        e = all_empties[-1][y_min:y_max, x_min:x_max].copy()
+    def _crop(empty_image):
+        e = np.asarray(empty_image)[y_min:y_max, x_min:x_max].astype('float32').copy()
         e[e < 1] = 1
         return e
 
-    # Если кадр до первой вставки — используем initial
-    if idx == 0 and (len(adv_data.periodic_empty_fnumbers) == 0
-                     or frame_number < adv_data.periodic_empty_fnumbers[0]):
-        e = adv_data.initial_empty[y_min:y_max, x_min:x_max].copy()
-        e[e < 1] = 1
-        return e
+    # До начальной серии (или вообще нет periodic) — initial константой
+    if len(all_fnums) == 1 or frame_number <= all_fnums[0]:
+        return _crop(all_empties[0])
 
-    # Линейная интерполяция
+    # После последней periodic вставки — последний empty константой
+    if frame_number >= all_fnums[-1]:
+        return _crop(all_empties[-1])
+
+    # Интервал, в который попал кадр: all_fnums[idx] <= fn < all_fnums[idx + 1]
+    idx = int(np.searchsorted(np.asarray(all_fnums), frame_number, side='right')) - 1
+    idx = min(max(idx, 0), len(all_fnums) - 2)
+
     fn0 = all_fnums[idx]
     fn1 = all_fnums[idx + 1]
-    e0 = all_empties[idx][y_min:y_max, x_min:x_max].astype('float32')
-    e1 = all_empties[idx + 1][y_min:y_max, x_min:x_max].astype('float32')
+    e0 = _crop(all_empties[idx])
+    e1 = _crop(all_empties[idx + 1])
 
     w = float(frame_number - fn0) / float(fn1 - fn0) if fn1 != fn0 else 0.0
     e_interp = ((1.0 - w) * e0 + w * e1).astype('float32')
@@ -936,7 +937,6 @@ def analyze_source_drift(adv_data: 'AdvancedTomoData') -> None:
     ----------
     adv_data : AdvancedTomoData
     """
-    all_fnums = [-1] + adv_data.periodic_empty_fnumbers
     all_empties = [adv_data.initial_empty] + adv_data.periodic_empties
     labels = ['initial'] + [f'periodic {k+1}' for k in range(len(adv_data.periodic_empties))]
 

@@ -220,3 +220,64 @@ def test_apply_repositioning_no_shifts_is_noop():
     t4.apply_repositioning_correction(norm, adv.data_numbers, adv,
                                       np.array([]), np.array([]))
     assert np.array_equal(norm, before)
+
+
+# =============================================================================
+# 4c — интерполяция empty между сериями
+# =============================================================================
+
+def _adv_for_interpolation(initial_value, initial_fn, periodic_values, periodic_fns):
+    def const(v):
+        return np.full((4, 5), float(v), dtype='float32')
+
+    return t4.AdvancedTomoData(
+        dark_image=np.zeros((4, 5), 'float32'),
+        initial_empty=const(initial_value),
+        initial_empty_fnumber=initial_fn,
+        periodic_empties=[const(v) for v in periodic_values],
+        periodic_empty_fnumbers=list(periodic_fns),
+        data_images=np.empty((0, 4, 5), 'float32'),
+        data_angles=np.empty((0,), 'float32'),
+        data_numbers=np.empty((0,), 'int64'),
+        data_check_images=np.empty((0, 4, 5), 'float32'),
+        data_check_angles=np.empty((0,), 'float32'),
+        data_check_numbers=np.empty((0,), 'int64'),
+        series_length=2,
+    )
+
+
+@pytest.mark.parametrize('frame_number, expected', [
+    (2, 100.0),      # ровно начальная серия
+    (0, 100.0),      # до начальной серии — константа
+    (50, 149.0),     # линейно между fn=2 (100) и fn=100 (200)
+    (100, 200.0),    # ровно первая periodic
+    (150, 300.0),    # линейно между fn=100 (200) и fn=200 (400)
+    (200, 400.0),    # ровно последняя periodic
+    (250, 400.0),    # после последней — константа
+])
+def test_interpolate_empty(frame_number, expected):
+    adv = _adv_for_interpolation(100, 2, [200, 400], [100, 200])
+    res = t4._interpolate_empty(adv, frame_number, 0, 5, 0, 4)
+    assert res.shape == (4, 5)
+    assert res == pytest.approx(np.full((4, 5), expected), abs=0.51)
+
+
+def test_interpolate_empty_uses_initial_fnumber():
+    """Ветка idx == 0 должна интерполировать, а не возвращать initial всегда."""
+    adv = _adv_for_interpolation(100, 2, [200], [100])
+    near_initial = t4._interpolate_empty(adv, 10, 0, 5, 0, 4)[0, 0]
+    near_periodic = t4._interpolate_empty(adv, 90, 0, 5, 0, 4)[0, 0]
+    assert 100.0 < near_initial < near_periodic < 200.0
+
+
+def test_interpolate_empty_without_periodic():
+    adv = _adv_for_interpolation(123, 5, [], [])
+    for fn in (0, 5, 1000):
+        assert t4._interpolate_empty(adv, fn, 0, 5, 0, 4) == pytest.approx(
+            np.full((4, 5), 123.0))
+
+
+def test_interpolate_empty_respects_roi():
+    adv = _adv_for_interpolation(100, 2, [200], [100])
+    res = t4._interpolate_empty(adv, 50, 1, 4, 0, 2)
+    assert res.shape == (2, 3)
