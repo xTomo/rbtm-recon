@@ -71,7 +71,9 @@ def view_tomo_objects():
     tomo_objects = storage_utils.get_tomoobjects_full_info()
     t1 = time.time()
     logging.info(f'[PROFILE] get_tomoobjects_full_info в view: {t1 - t0:.3f}s')
-    tomo_objects.sort(key=lambda x: x['timestamp'], reverse=True)
+    # .get(): у части объектов storage может не быть timestamp — без этого
+    # весь список страниц падал с KeyError
+    tomo_objects.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
 
     total = len(tomo_objects)
 

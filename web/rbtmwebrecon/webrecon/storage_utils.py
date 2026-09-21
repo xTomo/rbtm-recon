@@ -30,7 +30,9 @@ def get_reconstructed_files_list(experiment_id, is_local_ip):
     if os.path.exists(os.path.join(app_tomo_data,'tomo_rec.h5')):
         res['tomo_rec'] =  url_prefx+'/static/tomo_data/' + experiment_id +'/tomo_rec.h5'
 
-    tomo_reports = glob.glob(os.path.join(app_tomo_data,'reconstructor-v*.html'))
+    # reconstructor*.html: имена отчётов менялись (reconstructor-v3.html,
+    # reconstructor-axis_search3b.html, reconstructor4.html)
+    tomo_reports = glob.glob(os.path.join(app_tomo_data,'reconstructor*.html'))
 
     if len(tomo_reports)>0:
        res['tomo_reports'] = [url_prefx+tr[len(app_root):] for tr in tomo_reports]
@@ -94,12 +96,15 @@ def get_tomoobject_info(experiment_id, is_local_ip):
 def get_tomoobjects_list():
     # exp_info = json.dumps({'finished': True})
     exp_info = json.dumps({})
- 
-    experiment = requests.post(STORAGE_SERVER + 'storage/experiments/get',
-                               exp_info, timeout=1000)
-    experiment_info = json.loads(experiment.content)
-    ids = [x['_id'] for x in experiment_info]
-    return ids
+
+    try:
+        experiment = requests.post(STORAGE_SERVER + 'storage/experiments/get',
+                                   exp_info, timeout=1000)
+        experiment_info = json.loads(experiment.content)
+    except Exception as e:
+        logging.error(f'Ошибка при обращении к storage серверу: {e}')
+        return []
+    return [x['_id'] for x in experiment_info]
 
 
 # [ДОБАВЛЕНО] Новая функция, заменяющая цепочку get_tomoobjects_list() + N×get_tomoobject_info().
