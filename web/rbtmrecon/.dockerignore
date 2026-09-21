@@ -1,0 +1,28 @@
+# Контекст сборки — каталог rbtmrecon/ (COPY . /rbtm)
+
+# VCS. recon/tomo — git-сабмодуль: его .git (файл-указатель в worktree или
+# каталог при обычном клоне) не должен попадать в образ, сам каталог tomo/ нужен
+.git
+.git/
+**/.git
+**/.gitignore
+**/.gitmodules
+
+# Python
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+.pytest_cache/
+
+# Jupyter
+**/.ipynb_checkpoints/
+**/*.ipynb
+
+# Редакторы
+.idea/
+.vscode/
+.DS_Store
+
+# Тесты и временные данные
+tests/
+**/tmp/

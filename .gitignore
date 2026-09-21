@@ -1,7 +1,7 @@
 .idea/
 .DS_Store
 *.pyc
-__pycahe__
+__pycache__
 .ipynb_checkpoints
 .vscode
 web/data/*

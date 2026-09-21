@@ -1,0 +1,25 @@
+# Контекст сборки — каталог rbtmwebrecon/ (COPY . /webrbtm)
+
+# VCS
+.git
+.git/
+**/.git
+**/.gitignore
+
+# Python
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+.pytest_cache/
+
+# Jupyter
+**/.ipynb_checkpoints/
+
+# Редакторы
+.idea/
+.vscode/
+.DS_Store
+
+# Тесты и данные, смонтированные в рантайме
+tests/
+webrecon/static/tomo_data/
