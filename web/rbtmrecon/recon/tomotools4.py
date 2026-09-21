@@ -685,8 +685,10 @@ def measure_repositioning_shifts(
       4. Измеряем сдвиг фазовой кросс-корреляцией (субпиксель, upsample_factor=10).
 
     Сдвиги характеризуют каждый checkpoint k: насколько объект сместился
-    при возврате на стол. Кадры из сегмента k+1 (после checkpoint k до
-    следующего checkpoint k+1) нужно скорректировать на shifts[k].
+    при возврате на стол ОТНОСИТЕЛЬНО ПРЕДЫДУЩЕГО СЕГМЕНТА (data_check
+    сравнивается с последним data-кадром сегмента k, снятым до вставки).
+    Поэтому сдвиги накопительные: кадры сегмента m нужно скорректировать
+    на cumsum(shifts[:m]) — это и делает apply_repositioning_correction().
 
     Параметры
     ----------
@@ -857,6 +859,12 @@ def apply_repositioning_correction(
     Сегмент 0 (до первого checkpoint) — без коррекции (референсная позиция).
     Сегмент k (k >= 1) — кадры после checkpoint k-1 до checkpoint k.
 
+    НАКОПЛЕНИЕ: shifts[k] измеряется сравнением data_check checkpoint-а k с
+    последним data-кадром ПРЕДЫДУЩЕГО сегмента, то есть характеризует смещение
+    сегмента k+1 ОТНОСИТЕЛЬНО СЕГМЕНТА k, а не относительно референса.
+    Смещение сегмента m относительно сегмента 0 — сумма всех предыдущих шагов,
+    поэтому к сегменту m применяется ``cumsum(shifts[:m])``.
+
     Знак: measure_repositioning_shifts возвращает shift из
     ``phase_cross_correlation(reference=data, moving=data_check)``, то есть
     такой, что ``ndi.shift(data_check, shift) ≈ data``. Кадры сегмента k+1
@@ -880,6 +888,10 @@ def apply_repositioning_correction(
 
     K = len(adv_data.periodic_empty_fnumbers)
 
+    # Накопленные сдвиги: cum_y[m] — смещение сегмента m относительно сегмента 0
+    cum_y = np.concatenate(([0.0], np.cumsum(np.asarray(shifts_y, dtype='float64'))))
+    cum_x = np.concatenate(([0.0], np.cumsum(np.asarray(shifts_x, dtype='float64'))))
+
     for i in tqdm(range(data_images.shape[0]), desc='apply_repositioning_correction'):
         fn = int(data_numbers[i])
 
@@ -892,9 +904,16 @@ def apply_repositioning_correction(
         if segment == 0:
             continue  # референсная позиция — не корректируем
 
-        # Сдвиг для этого сегмента
-        sy = shifts_y[segment - 1]
-        sx = shifts_x[segment - 1]
+        if segment >= len(cum_y):
+            logging.warning(
+                'apply_repositioning_correction: сегмент %d вне диапазона '
+                'измеренных сдвигов (K=%d), используем последний накопленный',
+                segment, len(shifts_y))
+            segment = len(cum_y) - 1
+
+        # Накопленный сдвиг для этого сегмента
+        sy = cum_y[segment]
+        sx = cum_x[segment]
 
         if abs(sy) < 1e-6 and abs(sx) < 1e-6:
             continue

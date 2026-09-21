@@ -353,8 +353,24 @@ data_check_numbers      = [80, 141, ...]
 
 Сегмент 0 (data seg0): data_number < 70  → референс, не корректируется
 Сегмент 1 (data seg1): data_number > 70  → смещён на shifts[0]
-Сегмент 2 (data seg2): data_number > 131 → смещён на shifts[1]
+Сегмент 2 (data seg2): data_number > 131 → смещён на shifts[0] + shifts[1]
 ```
+
+**Сдвиги накопительные.** `shifts[k]` измеряется сравнением `data_check[k]`
+(снят сразу после k-й вставки) с ПОСЛЕДНИМ data-кадром сегмента k при том же
+угле, то есть характеризует смещение сегмента k+1 *относительно сегмента k*,
+а не относительно референса. Поэтому к сегменту m применяется
+`cumsum(shifts[:m])`.
+
+**Знак.** `measure_repositioning_shifts` возвращает результат
+`phase_cross_correlation(reference=data, moving=data_check)` — такой сдвиг,
+что `ndi.shift(data_check, shift) ≈ data`. Кадры сегмента сняты в той же
+позиции, что и `data_check`, поэтому `apply_repositioning_correction`
+применяет тот же сдвиг без смены знака.
+
+**Порядок.** Коррекция позиционирования применяется **ПОСЛЕ** нормировки,
+к нормированным кадрам `data_images_crop` (иначе сдвигались бы «сырые»
+отсчёты вместе с полем засветки).
 
 ### Отладка measure_repositioning_shifts
 

@@ -163,6 +163,55 @@ def test_find_matching_data_frame_returns_none_without_candidates():
     assert t4._find_matching_data_frame(0.0, angles, numbers, 10) is None
 
 
+# =============================================================================
+# 4a — накопительные сдвиги сегментов
+# =============================================================================
+
+def test_apply_repositioning_uses_cumulative_shifts():
+    """Сдвиг сегмента m = cumsum(shifts[:m]), а не shifts[m-1]."""
+    obj = make_object()
+    adv, n_per = build_adv([obj, obj, obj], [[1.0, 0.0], [1.0, 0.0]])
+
+    norm = np.stack([normalize(f) for f in adv.data_images]).astype('float32')
+    shifts_y = np.array([2.0, 3.0])
+    shifts_x = np.array([-1.0, 0.5])
+
+    t4.apply_repositioning_correction(norm, adv.data_numbers, adv,
+                                      shifts_y, shifts_x)
+
+    src = normalize(to_counts(obj))
+    expected_seg1 = ndi.shift(src, [2.0, -1.0], order=3, mode='nearest')
+    expected_seg2 = ndi.shift(src, [5.0, -0.5], order=3, mode='nearest')
+
+    assert np.allclose(norm[0], src, atol=1e-5)                   # сегмент 0
+    assert np.allclose(norm[n_per], expected_seg1, atol=1e-5)     # сегмент 1
+    assert np.allclose(norm[2 * n_per], expected_seg2, atol=1e-5)  # сегмент 2
+
+
+def test_repositioning_roundtrip_two_checkpoints():
+    """Два последовательных репозиционирования: коррекция возвращает референс."""
+    obj = make_object()
+    d1 = [1.5, -2.0]
+    d2 = [-1.0, 1.5]
+    obj1 = ndi.shift(obj, d1, order=3, mode='nearest').astype('float32')
+    obj2 = ndi.shift(obj1, d2, order=3, mode='nearest').astype('float32')
+
+    adv, n_per = build_adv([obj, obj1, obj2], [d1, d2])
+    angles, sy, sx = t4.measure_repositioning_shifts(adv, 0, W, 0, H, debug=False)
+    assert len(sy) == 2
+
+    norm = np.stack([normalize(f) for f in adv.data_images]).astype('float32')
+    target = np.clip(obj, 0, None)
+    before_1 = rms(norm[n_per], target)
+    before_2 = rms(norm[2 * n_per], target)
+
+    t4.apply_repositioning_correction(norm, adv.data_numbers, adv, sy, sx)
+
+    assert rms(norm[n_per], target) < before_1
+    # Ключевая проверка: второй сегмент смещён на d1+d2, одного shifts[1] мало
+    assert rms(norm[2 * n_per], target) < before_2
+
+
 def test_apply_repositioning_no_shifts_is_noop():
     obj = make_object()
     adv, _ = build_adv([obj], [])
