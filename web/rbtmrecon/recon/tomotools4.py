@@ -21,7 +21,6 @@ import logging
 import os
 import shutil
 import time
-from urllib.request import urlretrieve
 
 import h5py
 import numpy as np
@@ -51,13 +50,53 @@ def mkdir_p(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+DOWNLOAD_ATTEMPTS = 5
+DOWNLOAD_TIMEOUT = (10, 600)  # (connect, read) секунд
+
+
+def _copy_local_experiment(src_file: str, data_file: str) -> None:
+    """Копирует файл эксперимента и сверяет размер с источником."""
+    logging.info('Copying local file: {}'.format(src_file))
+    shutil.copy(src_file, data_file)
+    expected = os.path.getsize(src_file)
+    actual = os.path.getsize(data_file)
+    if actual != expected:
+        os.remove(data_file)
+        raise IOError('Incomplete copy of {}: {} of {} bytes'.format(
+            src_file, actual, expected))
+
+
+def _download_experiment(hdf5_url: str, data_file: str) -> None:
+    """Скачивает файл эксперимента потоком и сверяет размер с Content-Length."""
+    logging.info('Downloading file: {}'.format(hdf5_url))
+    with requests.get(hdf5_url, stream=True, timeout=DOWNLOAD_TIMEOUT) as resp:
+        resp.raise_for_status()
+        expected = resp.headers.get('Content-Length')
+        with open(data_file, 'wb') as f:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+
+    actual = os.path.getsize(data_file)
+    if expected is not None and actual != int(expected):
+        os.remove(data_file)
+        raise IOError('Incomplete download of {}: {} of {} bytes'.format(
+            hdf5_url, actual, int(expected)))
+    logging.info('Successfully downloaded: {} ({} bytes)'.format(hdf5_url, actual))
+
+
 def get_experiment_hdf5(experiment_id: str, output_dir: str,
                         experiment_files_dir: str | None = None,
                         storage_server: str = STORAGE_SERVER) -> str:
     """Возвращает путь к локальному HDF5-файлу эксперимента.
 
     Если файл уже существует и читается — возвращает его.
-    Иначе копирует из ``experiment_files_dir`` или скачивает с сервера.
+    Иначе копирует из ``experiment_files_dir``; если локального файла там нет
+    (или каталог не задан) — скачивает с сервера хранилища по HTTP.
+
+    После копирования/скачивания размер сверяется с источником
+    (os.path.getsize / Content-Length); при расхождении файл удаляется и
+    попытка повторяется.
     """
     data_file = os.path.join(output_dir, experiment_id + '.h5')
     logging.info('Output experiment HDF5 file: {}'.format(data_file))
@@ -69,40 +108,39 @@ def get_experiment_hdf5(experiment_id: str, output_dir: str,
         except OSError:
             logging.info('Deleting damaged file: {}'.format(data_file))
             os.remove(data_file)
-        except Exception as e:
-            raise e
         else:
             logging.info('File exists. Use local copy')
             return data_file
 
-    if experiment_files_dir is None:
-        hdf5_url = storage_server + 'storage/experiments/{}.h5'.format(experiment_id)
-        logging.info('Downloading file: {}'.format(hdf5_url))
-        remaining_download_tries = 5
-        last_exception = None
-        while remaining_download_tries > 0:
-            try:
-                urlretrieve(hdf5_url, filename=data_file)
-                logging.info('Successfully downloaded: {}'.format(hdf5_url))
-                time.sleep(0.1)
-            except Exception as e:
-                last_exception = e
-                logging.warning("error downloading {} on trial no {}: {}".format(
-                    hdf5_url, 6 - remaining_download_tries, e))
-                remaining_download_tries -= 1
-                continue
-            else:
-                break
-        else:
-            raise RuntimeError(
-                'Failed to download {} after 5 attempts'.format(hdf5_url)
-            ) from last_exception
-    else:
-        src_file = os.path.join(experiment_files_dir, experiment_id + '.h5')
-        logging.info('Copying local file: {}'.format(src_file))
-        shutil.copy(src_file, data_file)
+    src_file = (os.path.join(experiment_files_dir, experiment_id + '.h5')
+                if experiment_files_dir is not None else None)
+    use_local = src_file is not None and os.path.isfile(src_file)
+    if src_file is not None and not use_local:
+        logging.warning('Local file {} not found, falling back to HTTP'.format(src_file))
 
-    return data_file
+    hdf5_url = storage_server + 'storage/experiments/{}.h5'.format(experiment_id)
+    last_exception = None
+
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        try:
+            if use_local:
+                _copy_local_experiment(src_file, data_file)
+            else:
+                _download_experiment(hdf5_url, data_file)
+        except Exception as e:
+            last_exception = e
+            logging.warning('error fetching {} on trial no {}: {}'.format(
+                src_file if use_local else hdf5_url, attempt, e))
+            if os.path.exists(data_file):
+                os.remove(data_file)
+            time.sleep(0.1)
+        else:
+            return data_file
+
+    raise RuntimeError(
+        'Failed to fetch experiment {} after {} attempts'.format(
+            experiment_id, DOWNLOAD_ATTEMPTS)
+    ) from last_exception
 
 
 def get_tomoobject_info(experiment_id: str, storage_server: str = STORAGE_SERVER) -> dict:

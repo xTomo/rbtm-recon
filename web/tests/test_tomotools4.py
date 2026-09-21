@@ -437,3 +437,125 @@ def test_read_series_length_from_exp_info(tmp_path):
         f.attrs['exp_info'] = _json.dumps(
             {'experiment parameters': {'series_length': 7}})
     assert t4._read_series_length_from_hdf5(str(path), 10) == 7
+
+
+# =============================================================================
+# 4h — получение HDF5 эксперимента (локальная копия / HTTP)
+# =============================================================================
+
+class _FakeResponse:
+    def __init__(self, payload, content_length=None, status=200):
+        self._payload = payload
+        self.headers = {}
+        if content_length is not None:
+            self.headers['Content-Length'] = str(content_length)
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def raise_for_status(self):
+        if self.status >= 400:
+            raise RuntimeError('HTTP {}'.format(self.status))
+
+    def iter_content(self, chunk_size=1):
+        for i in range(0, len(self._payload), chunk_size):
+            yield self._payload[i:i + chunk_size]
+
+
+def _write_h5(path):
+    import h5py
+
+    with h5py.File(path, 'w') as f:
+        f.create_dataset('x', data=np.arange(10))
+    return path.read_bytes()
+
+
+def test_get_experiment_hdf5_copies_local_file(tmp_path):
+    src_dir = tmp_path / 'src'
+    src_dir.mkdir()
+    out_dir = tmp_path / 'out'
+    out_dir.mkdir()
+    payload = _write_h5(src_dir / 'exp1.h5')
+
+    res = t4.get_experiment_hdf5('exp1', str(out_dir), str(src_dir))
+    assert res == str(out_dir / 'exp1.h5')
+    assert (out_dir / 'exp1.h5').read_bytes() == payload
+
+
+def test_get_experiment_hdf5_falls_back_to_http(tmp_path, monkeypatch):
+    """Отсутствующий локальный файл — не фатально, скачиваем по HTTP."""
+    src_dir = tmp_path / 'src'
+    src_dir.mkdir()
+    out_dir = tmp_path / 'out'
+    out_dir.mkdir()
+    payload = _write_h5(tmp_path / 'remote.h5')
+
+    calls = {}
+
+    def fake_get(url, stream=False, timeout=None):
+        calls['url'] = url
+        calls['stream'] = stream
+        calls['timeout'] = timeout
+        return _FakeResponse(payload, content_length=len(payload))
+
+    monkeypatch.setattr(t4.requests, 'get', fake_get)
+
+    res = t4.get_experiment_hdf5('exp1', str(out_dir), str(src_dir),
+                                 storage_server='http://storage:5006/')
+    assert (out_dir / 'exp1.h5').read_bytes() == payload
+    assert calls['url'] == 'http://storage:5006/storage/experiments/exp1.h5'
+    assert calls['stream'] is True
+    assert calls['timeout'] == (10, 600)
+    assert res == str(out_dir / 'exp1.h5')
+
+
+def test_get_experiment_hdf5_retries_on_size_mismatch(tmp_path, monkeypatch):
+    out_dir = tmp_path / 'out'
+    out_dir.mkdir()
+    payload = _write_h5(tmp_path / 'remote.h5')
+    attempts = {'n': 0}
+
+    def fake_get(url, stream=False, timeout=None):
+        attempts['n'] += 1
+        if attempts['n'] == 1:
+            # оборванная загрузка: Content-Length больше реально отданного
+            return _FakeResponse(payload[:20], content_length=len(payload))
+        return _FakeResponse(payload, content_length=len(payload))
+
+    monkeypatch.setattr(t4.requests, 'get', fake_get)
+    monkeypatch.setattr(t4.time, 'sleep', lambda s: None)
+
+    t4.get_experiment_hdf5('exp1', str(out_dir))
+    assert attempts['n'] == 2
+    assert (out_dir / 'exp1.h5').read_bytes() == payload
+
+
+def test_get_experiment_hdf5_raises_after_all_attempts(tmp_path, monkeypatch):
+    out_dir = tmp_path / 'out'
+    out_dir.mkdir()
+
+    def fake_get(url, stream=False, timeout=None):
+        return _FakeResponse(b'', status=500)
+
+    monkeypatch.setattr(t4.requests, 'get', fake_get)
+    monkeypatch.setattr(t4.time, 'sleep', lambda s: None)
+
+    with pytest.raises(RuntimeError, match='after 5 attempts'):
+        t4.get_experiment_hdf5('exp1', str(out_dir))
+    assert not (out_dir / 'exp1.h5').exists()
+
+
+def test_get_experiment_hdf5_reuses_readable_local_copy(tmp_path, monkeypatch):
+    out_dir = tmp_path / 'out'
+    out_dir.mkdir()
+    _write_h5(out_dir / 'exp1.h5')
+
+    def boom(*a, **k):
+        raise AssertionError('должен использоваться существующий файл')
+
+    monkeypatch.setattr(t4.requests, 'get', boom)
+    assert t4.get_experiment_hdf5('exp1', str(out_dir)) == str(out_dir / 'exp1.h5')
