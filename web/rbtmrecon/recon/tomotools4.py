@@ -1411,19 +1411,46 @@ def create_axis_search_widget(sinogram_fixed: np.ndarray,
 # --- Volume utilities ---
 # =============================================================================
 
-def get_angles_at_180_deg(uniq_angles: np.ndarray) -> tuple[list[int], list[int]]:
-    """Находит пары кадров под углами 0° и 180°.
+def get_angles_at_180_deg(uniq_angles: np.ndarray,
+                          tol: float | None = None) -> tuple[list[int], list[int]]:
+    """Находит пары кадров, различающихся на 180°.
+
+    Сравнение ведётся с допуском: углы хранятся как float32, и точное
+    равенство ``== 0`` почти никогда не выполняется. По умолчанию допуск —
+    половина минимального шага по углам, но не меньше 1e-3 градуса.
 
     Возвращает (position_0, position_180) — списки индексов.
+
+    Raises
+    ------
+    ValueError
+        если ни одной пары 0°/180° не нашлось (например, эксперимент прерван
+        и снят меньше чем на полоборота).
     """
-    t = np.subtract.outer(uniq_angles, uniq_angles) % 360
-    pos = np.argwhere(np.abs(t - 180) % 360 == 0)
+    angles = np.asarray(uniq_angles, dtype='float64')
+
+    if tol is None:
+        uniq = np.unique(angles)
+        min_step = float(np.min(np.diff(uniq))) if uniq.size > 1 else 0.0
+        tol = max(min_step / 2.0, 1e-3)
+
+    # t ∈ [0, 360), поэтому |t - 180| — это и есть круговое расстояние до 180°
+    t = np.subtract.outer(angles, angles) % 360.0
+    pos = np.argwhere(np.abs(t - 180.0) <= tol)
+
     position_0, position_180 = [], []
-    for tpos in pos:
-        p0, p180 = tpos
+    for p0, p180 in pos:
         if p0 < p180:
-            position_0.append(p0)
-            position_180.append(p180)
+            position_0.append(int(p0))
+            position_180.append(int(p180))
+
+    if not position_0:
+        raise ValueError(
+            'Не найдено ни одной пары кадров с разностью углов 180° '
+            '(допуск {:.4f}°). Диапазон углов: {:.2f}°..{:.2f}°, кадров: {}. '
+            'Коррекция оси вращения требует съёмки минимум на 180°.'.format(
+                tol, float(angles.min()), float(angles.max()), angles.size))
+
     return position_0, position_180
 
 

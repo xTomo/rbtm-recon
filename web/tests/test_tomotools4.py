@@ -281,3 +281,32 @@ def test_interpolate_empty_respects_roi():
     adv = _adv_for_interpolation(100, 2, [200], [100])
     res = t4._interpolate_empty(adv, 50, 1, 4, 0, 2)
     assert res.shape == (2, 3)
+
+
+# =============================================================================
+# 4d — поиск пар 0°/180° с допуском
+# =============================================================================
+
+def test_get_angles_at_180_deg_half_degree_step():
+    angles = np.arange(0, 360, 0.5, dtype='float32')
+    p0, p180 = t4.get_angles_at_180_deg(angles)
+    assert len(p0) == len(p180) > 0
+    for a, b in zip(p0, p180):
+        assert abs((float(angles[b]) - float(angles[a])) % 360 - 180.0) < 0.26
+
+
+def test_get_angles_at_180_deg_tolerates_float32_noise():
+    """Шаг 0.1° в float32 не представим точно — сравнение == 0 не работает."""
+    angles = np.arange(0, 360, 0.1, dtype='float32')
+    exact = np.argwhere(
+        np.abs(np.subtract.outer(angles, angles) % 360 - 180) % 360 == 0)
+    p0, _ = t4.get_angles_at_180_deg(angles)
+    assert len(p0) > 0
+    # именно эти пары строгое равенство и теряло
+    assert len(p0) >= len(exact) // 2
+
+
+def test_get_angles_at_180_deg_raises_without_pairs():
+    angles = np.linspace(0, 120, 241).astype('float32')
+    with pytest.raises(ValueError, match='180'):
+        t4.get_angles_at_180_deg(angles)
