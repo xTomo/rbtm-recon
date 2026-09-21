@@ -349,9 +349,14 @@ def find_axis_correction(data_images_crop: np.ndarray,
     im0 = data_0_orig / (data_0_orig ** 2).sum() ** 0.5
     im1 = data_180_orig / (data_180_orig ** 2).sum() ** 0.5
 
+    # center_of_mass возвращает (row, col) = (Y, X). transform_image сдвигает
+    # по горизонтали (ось X = столбцы), поэтому начальное приближение берётся
+    # из X-компоненты центра масс, а не из Y (по Y разность тождественно ~0).
+    # Минимум достигается при im1 == shift(im0, 2 * shift_x), то есть
+    # cm1.x - cm0.x = 2 * shift_x.
     cm0 = ndi.center_of_mass(im0)  # type: ignore[assignment]
     cm1 = ndi.center_of_mass(im1)  # type: ignore[assignment]
-    initial_shift = (float(cm0[0]) - float(cm1[0])) / 2  # type: ignore[arg-type]
+    initial_shift = (float(cm1[1]) - float(cm0[1])) / 2  # type: ignore[arg-type]
 
     def _objective(shift_angle, img0, img1):
         s, a = shift_angle

@@ -34,6 +34,15 @@ def _make_module(name):
 if 'cupy' not in sys.modules:
     _cupy = _make_module('cupy')
 
+    class _FakeGPUArray(np.ndarray):
+        """np.ndarray с методом .get(), как у cupy.ndarray."""
+
+        def get(self):
+            return np.asarray(self).view(np.ndarray)
+
+    def _as_gpu(a, *args, **kwargs):
+        return np.asarray(a, *args, **kwargs).view(_FakeGPUArray)
+
     def _cupy_getattr(item, _np=np):
         try:
             return getattr(_np, item)
@@ -41,9 +50,10 @@ if 'cupy' not in sys.modules:
             raise AttributeError('cupy stub has no {}'.format(item)) from exc
 
     _cupy.__getattr__ = _cupy_getattr
-    _cupy.asnumpy = lambda a: np.asarray(a)
-    _cupy.asarray = lambda a, *args, **kwargs: np.asarray(a, *args, **kwargs)
-    _cupy.asanyarray = lambda a, *args, **kwargs: np.asanyarray(a, *args, **kwargs)
+    _cupy.ndarray = _FakeGPUArray
+    _cupy.asnumpy = lambda a: np.asarray(a).view(np.ndarray)
+    _cupy.asarray = _as_gpu
+    _cupy.asanyarray = _as_gpu
 
 # --- cupyx.scipy.ndimage → scipy.ndimage ------------------------------------
 if 'cupyx' not in sys.modules:
@@ -53,9 +63,18 @@ if 'cupyx' not in sys.modules:
     _cupyx_scipy = _make_module('cupyx.scipy')
     _cupyx_ndi = _make_module('cupyx.scipy.ndimage')
 
-    _cupyx_ndi.median_filter = _ndi.median_filter
-    _cupyx_ndi.shift = _ndi.shift
-    _cupyx_ndi.rotate = _ndi.rotate
+    def _as_gpu_result(fn):
+        """cupyx-функции возвращают cupy.ndarray — сохраняем метод .get()."""
+        def wrapper(*args, **kwargs):
+            res = fn(*args, **kwargs)
+            gpu_array = sys.modules['cupy'].ndarray
+            return np.asarray(res).view(gpu_array)
+        wrapper.__name__ = getattr(fn, '__name__', 'wrapped')
+        return wrapper
+
+    _cupyx_ndi.median_filter = _as_gpu_result(_ndi.median_filter)
+    _cupyx_ndi.shift = _as_gpu_result(_ndi.shift)
+    _cupyx_ndi.rotate = _as_gpu_result(_ndi.rotate)
     _cupyx.scipy = _cupyx_scipy
     _cupyx_scipy.ndimage = _cupyx_ndi
 

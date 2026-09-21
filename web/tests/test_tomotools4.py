@@ -310,3 +310,53 @@ def test_get_angles_at_180_deg_raises_without_pairs():
     angles = np.linspace(0, 120, 241).astype('float32')
     with pytest.raises(ValueError, match='180'):
         t4.get_angles_at_180_deg(angles)
+
+
+# =============================================================================
+# 4e — начальное приближение сдвига оси из X-компоненты центра масс
+# =============================================================================
+
+def _axis_pair(s_true, height=48, width=64):
+    """Готовит кадры 0°/180° с известным сдвигом оси вращения s_true.
+
+    Целевая функция find_axis_correction обнуляется при
+    im1 == shift(im0, [0, 2 * s_true]).
+    """
+    yy, xx = np.mgrid[0:height, 0:width]
+    obj = (0.9 * np.exp(-(((yy - 18) ** 2 + (xx - 26) ** 2) / 40.))
+           + 0.5 * np.exp(-(((yy - 30) ** 2 + (xx - 38) ** 2) / 15.)))
+    im0 = ndi.gaussian_filter(obj, 1.0).astype('float32')
+    im1 = ndi.shift(im0, [0, 2 * s_true], order=3, mode='nearest').astype('float32')
+    images = np.stack([im0, np.fliplr(im1)]).astype('float32')
+    return images, np.array([0., 180.], dtype='float32')
+
+
+def test_transform_image_shifts_along_x():
+    """transform_image(im, s, 0) сдвигает по столбцам (X), не по строкам."""
+    im = np.zeros((16, 20), dtype='float32')
+    im[8, 10] = 1.0
+    moved = t4.transform_image(im, 3.0, 0.0)
+    peak = np.unravel_index(np.argmax(moved), moved.shape)
+    assert peak == (8, 13)
+
+
+@pytest.mark.parametrize('s_true', [3.0, -2.5])
+def test_find_axis_correction_recovers_known_shift(s_true):
+    images, angles = _axis_pair(s_true)
+    shift_x, alfa = t4.find_axis_correction(images, angles)
+    assert shift_x == pytest.approx(s_true, abs=0.05)
+    assert alfa == pytest.approx(0.0, abs=0.01)
+
+
+def test_initial_shift_uses_x_component():
+    """Y-компонента центра масс здесь тождественно ~0 — приближение бесполезно."""
+    images, _ = _axis_pair(3.0)
+    im0 = images[0]
+    im1 = np.fliplr(images[1])
+    n0 = im0 / (im0 ** 2).sum() ** 0.5
+    n1 = im1 / (im1 ** 2).sum() ** 0.5
+    cm0 = ndi.center_of_mass(n0)
+    cm1 = ndi.center_of_mass(n1)
+
+    assert abs(cm0[0] - cm1[0]) < 1e-3                      # по Y разницы нет
+    assert (cm1[1] - cm0[1]) / 2 == pytest.approx(3.0, abs=0.05)
