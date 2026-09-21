@@ -258,6 +258,8 @@ class AdvancedTomoData:
     ----
     dark_image               : медиана dark кадров минус нуль, shape (H, W)
     initial_empty            : медиана начальной empty серии (dark-subtracted), shape (H, W)
+    initial_empty_fnumber    : глобальный frame_number первого кадра начальной
+                               empty серии (нужен для интерполяции empty)
     periodic_empties         : list из K np.ndarray shape (H, W) — медианы periodic серий
     periodic_empty_fnumbers  : list из K int — глобальный frame_number первого кадра
                                каждой periodic серии
@@ -280,6 +282,7 @@ class AdvancedTomoData:
     data_check_angles:        np.ndarray
     data_check_numbers:       np.ndarray
     series_length:            int
+    initial_empty_fnumber:    int = 0
 
 
 def load_tomo_data_advanced(data_file: str, tmp_dir: str) -> AdvancedTomoData:
@@ -329,6 +332,7 @@ def load_tomo_data_advanced(data_file: str, tmp_dir: str) -> AdvancedTomoData:
     # Начальная серия
     initial_empty_frames = empty_images[:series_length]
     initial_empty = np.median(initial_empty_frames, axis=0).astype('float32')
+    initial_empty_fnumber = int(empty_fnums[0]) if len(empty_fnums) else 0
 
     # Периодические серии
     periodic_empties = []
@@ -368,6 +372,7 @@ def load_tomo_data_advanced(data_file: str, tmp_dir: str) -> AdvancedTomoData:
     return AdvancedTomoData(
         dark_image=dark_image,
         initial_empty=initial_empty,
+        initial_empty_fnumber=initial_empty_fnumber,
         periodic_empties=periodic_empties,
         periodic_empty_fnumbers=periodic_empty_fnumbers,
         data_images=data_images,
