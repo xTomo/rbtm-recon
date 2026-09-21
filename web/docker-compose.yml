@@ -11,7 +11,7 @@ services:
       - /diskmnt/fast/robotom:/fast
       - /diskmnt/a/makov/robotom/:/storage
       - /home/robotom/rbtm_data/rbtm_storage/data/experiments:/exp_src:ro
-#    restart: unless-stopped
+    restart: unless-stopped
     external_links:
       - rbtmstorage_server_1
     # network_mode: bridge
@@ -28,7 +28,7 @@ services:
       - /diskmnt/fast/robotom:/fast
       - /diskmnt/a/makov/robotom/:/storage
       - /home/robotom/rbtm_data/rbtm_storage/data/experiments:/exp_src:ro
-#    restart: unless-stopped
+    restart: unless-stopped
     external_links:
       - rbtmstorage_server_1
     # network_mode: bridge
@@ -41,10 +41,12 @@ services:
   web:
     build: rbtmwebrecon/
     depends_on:
-      - database
+      database:
+        # Ждём готовности MongoDB, а не просто старта контейнера
+        condition: service_healthy
     volumes:
       - /diskmnt/a/makov/robotom/:/webrbtm/webrecon/static/tomo_data
-#    restart: unless-stopped
+    restart: unless-stopped
     external_links:
       - rbtmstorage_server_1
     # network_mode: bridge
@@ -61,8 +63,19 @@ services:
     # network_mode: bridge
     container_name: web_database_1
     volumes:
+      # ВНИМАНИЕ: путь относительный — он раскрывается от каталога, в котором
+      # запускается docker-compose (обычно rbtm-recon/web). При запуске из
+      # другого каталога Mongo стартует с ПУСТОЙ базой и очередь «теряется».
+      # Решение о переносе на абсолютный путь — за владельцем стенда.
       - ./data/db:/data/db
-#    restart: unless-stopped
+    healthcheck:
+      # mongo:4.0 — старый клиент, mongosh появился только в mongo:5+
+      test: ["CMD", "mongo", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
 
 networks:
   rbtmstorage_default:
