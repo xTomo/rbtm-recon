@@ -65,7 +65,7 @@ from tomotools4 import (
     preview_axis_correction, create_axis_search_widget,
     disable_output_scrolling,
     # Volume utilities
-    save_amira,
+    save_amira, amira_raw_name,
 )
 
 import ipywidgets
@@ -297,13 +297,13 @@ preview_axis_correction(sinogram_fixed, data_angles, remove_rings=False)
 # # Реконструкция
 
 # %%
-raw_file_name = (f"{tomo_info['specimen']}"
-                 f".{sinogram_fixed.shape[0]}_{sinogram_fixed.shape[2]}_{sinogram_fixed.shape[2]}"
-                 f".1.raw")
+rec_shape = (sinogram_fixed.shape[0], sinogram_fixed.shape[2], sinogram_fixed.shape[2])
+# Имя должно совпадать с тем, на которое сошлётся save_amira(..., reshape=1)
+raw_file_name = amira_raw_name(tomo_info['specimen'], rec_shape, 1)
 rec_vol, _ = persistent_array(
     os.path.join(tmp_dir, raw_file_name),
     dtype=np.float32, force_create=False,
-    shape=(sinogram_fixed.shape[0], sinogram_fixed.shape[2], sinogram_fixed.shape[2]),
+    shape=rec_shape,
 )
 
 # %%

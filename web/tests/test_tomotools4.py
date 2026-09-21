@@ -360,3 +360,80 @@ def test_initial_shift_uses_x_component():
 
     assert abs(cm0[0] - cm1[0]) < 1e-3                      # по Y разницы нет
     assert (cm1[1] - cm0[1]) / 2 == pytest.approx(3.0, abs=0.05)
+
+
+# =============================================================================
+# 4g — save_amira, show_frames_with_border, series_length
+# =============================================================================
+
+def test_amira_raw_name_sanitizes_spaces():
+    assert t4.amira_raw_name('обр 1 2', (3, 4, 5), 1) == 'обр_1_2.3_4_5.1.raw'
+
+
+def test_save_amira_hx_points_to_existing_raw(tmp_path):
+    vol = np.arange(2 * 3 * 4, dtype='float32').reshape(2, 3, 4)
+    t4.save_amira(vol, str(tmp_path), 'образец 1', reshape=1, pixel_size=0.01)
+
+    raw = tmp_path / 'образец_1.2_3_4.1.raw'
+    hx = tmp_path / 'tomo.образец_1.1.hx'
+    assert raw.exists()
+    assert hx.exists()
+    assert raw.name in hx.read_text(encoding='utf8')
+
+
+def test_save_amira_keeps_existing_raw(tmp_path):
+    """Файл, уже записанный persistent_array, не переписывается."""
+    vol = np.zeros((2, 3, 4), dtype='float32')
+    raw = tmp_path / 'sample.2_3_4.1.raw'
+    raw.write_bytes(b'x' * 10)
+
+    t4.save_amira(vol, str(tmp_path), 'sample', reshape=1)
+
+    assert raw.read_bytes() == b'x' * 10
+    assert raw.name in (tmp_path / 'tomo.sample.1.hx').read_text(encoding='utf8')
+
+
+def test_save_amira_writes_binned_raw(tmp_path):
+    vol = np.ones((4, 4, 4), dtype='float32')
+    t4.save_amira(vol, str(tmp_path), 'sample', reshape=2)
+    raw = tmp_path / 'sample.2_2_2.2.raw'
+    assert raw.exists()
+    assert raw.stat().st_size == 2 * 2 * 2 * 4
+    assert raw.name in (tmp_path / 'tomo.sample.2.hx').read_text(encoding='utf8')
+
+
+def test_show_frames_with_border_does_not_mutate_input(monkeypatch):
+    import pylab as plt
+
+    monkeypatch.setattr(plt, 'show', lambda *a, **k: None)
+    data = np.full((3, 8, 8), 0.5, dtype='float32')
+    before = data.copy()
+    empty = np.full((8, 8), 10.0, dtype='float32')
+    angles = np.array([0., 10., 20.], dtype='float32')
+
+    t4.show_frames_with_border(data, empty, angles, 0, 1, 7, 1, 7)
+    plt.close('all')
+
+    assert np.array_equal(data, before)
+
+
+def test_read_series_length_raises_without_metadata(tmp_path):
+    import h5py
+
+    path = tmp_path / 'noinfo.h5'
+    with h5py.File(path, 'w') as f:
+        f.create_group('empty')
+        f.create_group('data')
+    with pytest.raises(ValueError, match='series_length'):
+        t4._read_series_length_from_hdf5(str(path), 10)
+
+
+def test_read_series_length_from_exp_info(tmp_path):
+    import h5py
+    import json as _json
+
+    path = tmp_path / 'ok.h5'
+    with h5py.File(path, 'w') as f:
+        f.attrs['exp_info'] = _json.dumps(
+            {'experiment parameters': {'series_length': 7}})
+    assert t4._read_series_length_from_hdf5(str(path), 10) == 7

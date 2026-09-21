@@ -416,10 +416,13 @@ def _read_series_length_from_hdf5(data_file: str, total_empty_count: int) -> int
     except Exception as e:
         logging.warning('Fallback series_length estimation failed: {}'.format(e))
 
-    # Последний fallback: всё делим поровну
-    fallback = max(1, total_empty_count // 2)
-    logging.warning('Using fallback series_length = {}'.format(fallback))
-    return fallback
+    # Больше догадок нет: деление empty пополам давало произвольное разбиение
+    # на initial/periodic серии и молча портило нормировку и коррекцию сдвигов.
+    raise ValueError(
+        'Не удалось определить series_length для {}: нет ни атрибута '
+        'exp_info["experiment parameters"]["series_length"], ни data-кадров '
+        'для оценки по структуре файла (всего empty-кадров: {}). '
+        'Укажите series_length вручную.'.format(data_file, total_empty_count))
 
 
 def load_tomo_data(data_file: str, tmp_dir: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1252,7 +1255,9 @@ def show_frames_with_border(data_images: np.ndarray, empty_beam: np.ndarray,
     """Показывает кадр с отмеченной областью ROI."""
     te = empty_beam
     angles_sorted_ind = np.argsort(data_angles)
-    td = np.asarray(data_images[angles_sorted_ind[image_id]])
+    # copy(): индексация скаляром возвращает view, и td[td < 1] = 1 портило бы
+    # исходный массив data_images
+    td = np.array(data_images[angles_sorted_ind[image_id]], dtype='float32')
     td[td < 1] = 1
     d = np.log(te) - np.log(td)
 
@@ -1482,9 +1487,28 @@ def reshape_volume(array_3d: np.ndarray, binning_factor: int) -> np.ndarray:
     return reshaped.mean(axis=(1, 3, 5), dtype='float32')
 
 
+def sanitize_amira_name(name: str) -> str:
+    """Имя образца, пригодное для имени файла (пробелы → подчёркивания)."""
+    return str(name).replace(' ', '_')
+
+
+def amira_raw_name(name: str, shape, reshape: int = 1) -> str:
+    """Имя raw-файла объёма: ``<name>.<d0>_<d1>_<d2>.<reshape>.raw``.
+
+    Используется и в save_amira, и при создании memmap через persistent_array,
+    чтобы .hx-скрипт ссылался на реально существующий файл.
+    """
+    return '{}.{}_{}_{}.{}.raw'.format(sanitize_amira_name(name), *shape, reshape)
+
+
 def save_amira(in_array: np.ndarray, out_path: str, name: str,
                reshape: int = 3, pixel_size: float = 9.0e-3) -> None:
     """Сохраняет объём в формате Amira raw + .hx скрипт.
+
+    При reshape == 1 raw-файл, как правило, уже создан через
+    persistent_array() под тем же именем (amira_raw_name) — тогда он не
+    переписывается. Если такого файла нет, он записывается здесь, чтобы
+    .hx-скрипт не ссылался на отсутствующий файл.
 
     Параметры
     ----------
@@ -1496,18 +1520,19 @@ def save_amira(in_array: np.ndarray, out_path: str, name: str,
     """
     data_path = str(out_path)
     os.makedirs(data_path, exist_ok=True)
-    name = name.replace(' ', '_')
+    name = sanitize_amira_name(name)
 
     if reshape != 1:
         vol = reshape_volume(in_array, reshape)
     else:
         vol = in_array
     file_shape = vol.shape
-    shape_str = '{}_{}_{}' .format(*file_shape)
-    out_name = '{}.{}.{}.raw'.format(name, shape_str, reshape)
+    out_name = amira_raw_name(name, file_shape, reshape)
+    raw_path = os.path.join(data_path, out_name)
 
-    if reshape != 1:
-        with open(os.path.join(data_path, out_name), 'wb') as f:
+    if reshape != 1 or not os.path.exists(raw_path):
+        logging.info('Writing Amira raw: {}'.format(raw_path))
+        with open(raw_path, 'wb') as f:
             vol.tofile(f)
 
     hx_path = os.path.join(data_path, 'tomo.{}.{}.hx'.format(name, reshape))
