@@ -625,22 +625,48 @@ def normalize_projections_with_timeline(
 # --- Repositioning shift measurement and correction ---
 # =============================================================================
 
+ANGLE_MATCH_TOL = 0.5  # градусы: допуск совпадения угла data и data_check
+
+
 def _find_matching_data_frame(angle: float,
                                data_angles: np.ndarray,
                                data_numbers: np.ndarray,
-                               segment_end_fnumber: int) -> int | None:
-    """Находит индекс data-кадра с ближайшим углом, снятого до segment_end_fnumber.
+                               segment_end_fnumber: int,
+                               tol: float = ANGLE_MATCH_TOL) -> int | None:
+    """Находит индекс data-кадра с тем же углом, снятого до segment_end_fnumber.
 
-    Возвращает индекс в data_angles/data_numbers или None если не найдено.
+    Драйвер снимает data_check при ТОМ ЖЕ угле, что и последний data-кадр
+    сегмента, поэтому берётся ПОСЛЕДНИЙ (ближайший по времени) кадр с углом
+    в допуске ``tol``. Простой argmin по всей истории здесь неверен: при
+    нескольких оборотах углы повторяются, и argmin вернул бы кадр из самого
+    первого оборота.
+
+    Возвращает индекс в data_angles/data_numbers или None, если до
+    segment_end_fnumber вообще нет кадров.
+
+    Raises
+    ------
+    ValueError
+        если ни один кадр не попал в допуск по углу.
     """
     # Ищем среди кадров до периодической вставки
     mask = data_numbers < segment_end_fnumber
     if not mask.any():
         return None
     candidate_indices = np.where(mask)[0]
+
     angle_diffs = np.abs(data_angles[candidate_indices] - angle) % 360
     angle_diffs = np.minimum(angle_diffs, 360 - angle_diffs)
-    best = candidate_indices[np.argmin(angle_diffs)]
+
+    in_tol = np.where(angle_diffs <= tol)[0]
+    if len(in_tol) == 0:
+        raise ValueError(
+            'Не найден data-кадр с углом {:.2f}° (допуск {:.2f}°) среди кадров '
+            'до frame_number={}; ближайший угол отличается на {:.2f}°'.format(
+                angle, tol, segment_end_fnumber, float(angle_diffs.min())))
+
+    # Последний по времени кадр с подходящим углом
+    best = candidate_indices[in_tol[-1]]
     return int(best)
 
 

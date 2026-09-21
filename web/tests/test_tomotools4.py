@@ -125,6 +125,44 @@ def test_repositioning_roundtrip_reduces_error():
     assert rms(norm[0], target) == pytest.approx(0.0, abs=1e-6)
 
 
+# =============================================================================
+# 4f — поиск data-кадра с тем же углом
+# =============================================================================
+
+def test_find_matching_data_frame_takes_last_match():
+    """При нескольких оборотах берём последний кадр с нужным углом."""
+    angles = np.array([0., 90., 180., 270., 0., 90.], dtype='float32')
+    numbers = np.array([10, 11, 12, 13, 14, 15], dtype='int64')
+
+    idx = t4._find_matching_data_frame(90.0, angles, numbers,
+                                       segment_end_fnumber=16)
+    assert idx == 5
+
+    # если ограничить историю первым оборотом — вернётся кадр первого оборота
+    idx = t4._find_matching_data_frame(90.0, angles, numbers,
+                                       segment_end_fnumber=14)
+    assert idx == 1
+
+
+def test_find_matching_data_frame_wraps_around_360():
+    angles = np.array([0., 90., 359.9], dtype='float32')
+    numbers = np.array([1, 2, 3], dtype='int64')
+    assert t4._find_matching_data_frame(0.0, angles, numbers, 10) == 2
+
+
+def test_find_matching_data_frame_raises_when_no_angle_in_tolerance():
+    angles = np.array([0., 90., 180.], dtype='float32')
+    numbers = np.array([1, 2, 3], dtype='int64')
+    with pytest.raises(ValueError, match='допуск'):
+        t4._find_matching_data_frame(45.0, angles, numbers, 10)
+
+
+def test_find_matching_data_frame_returns_none_without_candidates():
+    angles = np.array([0., 90.], dtype='float32')
+    numbers = np.array([100, 101], dtype='int64')
+    assert t4._find_matching_data_frame(0.0, angles, numbers, 10) is None
+
+
 def test_apply_repositioning_no_shifts_is_noop():
     obj = make_object()
     adv, _ = build_adv([obj], [])
