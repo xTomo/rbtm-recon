@@ -826,10 +826,16 @@ def apply_repositioning_correction(
 
     Для каждого кадра i определяет к какому сегменту он относится
     (по data_numbers[i] и periodic_empty_fnumbers), затем применяет
-    sub-pixel shift через scipy.ndimage.shift с обратным знаком.
+    sub-pixel shift через scipy.ndimage.shift.
 
     Сегмент 0 (до первого checkpoint) — без коррекции (референсная позиция).
-    Сегмент k (k >= 1) — кадры после checkpoint k-1 до checkpoint k → сдвиг shifts[k-1].
+    Сегмент k (k >= 1) — кадры после checkpoint k-1 до checkpoint k.
+
+    Знак: measure_repositioning_shifts возвращает shift из
+    ``phase_cross_correlation(reference=data, moving=data_check)``, то есть
+    такой, что ``ndi.shift(data_check, shift) ≈ data``. Кадры сегмента k+1
+    сняты в той же позиции, что и data_check checkpoint-а k, поэтому к ним
+    применяется ТОТ ЖЕ shift (без смены знака).
 
     ВАЖНО: применять ПОСЛЕ нормировки к нормированным кадрам (data_images_crop).
 
@@ -861,8 +867,8 @@ def apply_repositioning_correction(
             continue  # референсная позиция — не корректируем
 
         # Сдвиг для этого сегмента
-        sy = -shifts_y[segment - 1]
-        sx = -shifts_x[segment - 1]
+        sy = shifts_y[segment - 1]
+        sx = shifts_x[segment - 1]
 
         if abs(sy) < 1e-6 and abs(sx) < 1e-6:
             continue
