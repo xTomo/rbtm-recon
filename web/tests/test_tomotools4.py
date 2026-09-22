@@ -239,6 +239,31 @@ def test_repositioning_roundtrip_two_checkpoints():
     assert rms(norm[2 * n_per], target) < before_2
 
 
+def test_apply_repositioning_correction_treats_nan_shift_as_zero(caplog):
+    """checkpoint с неизмеренным (NaN) сдвигом не должен заражать cumsum NaN-ом
+    для всех последующих сегментов — трактуется как 0, с logging.error о том,
+    что сдвиги сегментов после него ненадёжны."""
+    obj = make_object()
+    adv, n_per = build_adv([obj, obj, obj], [[1.0, 0.0], [1.0, 0.0]])
+
+    norm = np.stack([normalize(f) for f in adv.data_images]).astype('float32')
+    shifts_y = np.array([np.nan, 3.0])
+    shifts_x = np.array([np.nan, 0.5])
+
+    with caplog.at_level(logging.ERROR):
+        t4.apply_repositioning_correction(norm, adv.data_numbers, adv, shifts_y, shifts_x)
+
+    assert not np.isnan(norm).any()
+
+    src = normalize(to_counts(obj))
+    expected_seg2 = ndi.shift(src, [3.0, 0.5], order=3, mode='nearest')
+
+    assert np.allclose(norm[0], src, atol=1e-5)                   # сегмент 0
+    assert np.allclose(norm[n_per], src, atol=1e-5)                # NaN -> 0, не сдвинут
+    assert np.allclose(norm[2 * n_per], expected_seg2, atol=1e-5)  # cumsum(0, 3.0)
+    assert any('ненадёжны' in r.message for r in caplog.records)
+
+
 def test_apply_repositioning_no_shifts_is_noop():
     obj = make_object()
     adv, _ = build_adv([obj], [])

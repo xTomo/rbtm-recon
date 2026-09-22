@@ -929,6 +929,10 @@ def apply_repositioning_correction(
 
     ВАЖНО: применять ПОСЛЕ нормировки к нормированным кадрам (data_images_crop).
 
+    NaN в shifts_y/shifts_x (checkpoint с неизмеренным сдвигом) трактуется как 0
+    для этого шага cumsum, с записью в лог через logging.error — начиная с этого
+    checkpoint-а накопленные сдвиги всех последующих сегментов не гарантированы.
+
     Параметры
     ----------
     data_images   : нормированные кадры shape (N, H, W) или (N, H_roi, W_roi),
@@ -944,9 +948,25 @@ def apply_repositioning_correction(
 
     K = len(adv_data.periodic_empty_fnumbers)
 
+    shifts_y = np.asarray(shifts_y, dtype='float64')
+    shifts_x = np.asarray(shifts_x, dtype='float64')
+
+    # Пропущенный/не измеренный checkpoint даёт shift=NaN. cumsum() распространил бы
+    # NaN на все последующие сегменты, обнулив коррекцию для них молча — вместо этого
+    # трактуем NaN как 0 (не корректируем этот конкретный шаг) и громко предупреждаем,
+    # что накопленные сдвиги для всех сегментов после него уже ненадёжны.
+    nan_mask = np.isnan(shifts_y) | np.isnan(shifts_x)
+    if nan_mask.any():
+        for k in np.where(nan_mask)[0]:
+            logging.error(
+                'apply_repositioning_correction: сдвиг checkpoint-а %d не измерен (NaN); '
+                'принимаем его за 0, но сдвиги сегментов после %d ненадёжны', k, k)
+        shifts_y = np.where(np.isnan(shifts_y), 0.0, shifts_y)
+        shifts_x = np.where(np.isnan(shifts_x), 0.0, shifts_x)
+
     # Накопленные сдвиги: cum_y[m] — смещение сегмента m относительно сегмента 0
-    cum_y = np.concatenate(([0.0], np.cumsum(np.asarray(shifts_y, dtype='float64'))))
-    cum_x = np.concatenate(([0.0], np.cumsum(np.asarray(shifts_x, dtype='float64'))))
+    cum_y = np.concatenate(([0.0], np.cumsum(shifts_y)))
+    cum_x = np.concatenate(([0.0], np.cumsum(shifts_x)))
 
     for i in tqdm(range(data_images.shape[0]), desc='apply_repositioning_correction'):
         fn = int(data_numbers[i])
