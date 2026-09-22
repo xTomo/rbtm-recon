@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 import hdf5_v2
-from convert_v1_to_v2 import convert_v1_to_v2
+from convert_v1_to_v2 import build_checkpoint_pairs, build_timeline, convert_v1_to_v2
 from helpers import FRAME_MODES, build_advanced_timeline, make_v1_file
 
 
@@ -125,3 +125,90 @@ def test_converted_matches_direct_v2_file(tmp_path):
     assert np.array_equal(*[np.asarray(x) for x in (
         hdf5_v2.get_checkpoint_mapping_v2(v2_converted)[1],
         hdf5_v2.get_checkpoint_mapping_v2(v2_direct)[1])])
+
+
+# =============================================================================
+# build_timeline / build_checkpoint_pairs: логика 1:1 со storage (unit-тесты)
+# =============================================================================
+
+def _frame(frame_number, mode, angle=0.0):
+    return {'frame_number': frame_number, 'mode': mode, 'angle': angle}
+
+
+def test_build_timeline_dark_breaks_new_segment_detection():
+    """Как и в rbtm-storage._compute_segment_id, dark обновляет last_mode —
+    если между data и empty затесался dark, новая periodic-вставка НЕ
+    засчитывается (сегмент не увеличивается), пока не появится ещё один data."""
+    frames_by_group = {
+        'dark': [_frame(0, 'dark'), _frame(3, 'dark')],
+        'empty': [_frame(1, 'empty'), _frame(4, 'empty')],
+        'data': [_frame(2, 'data', 10.0), _frame(5, 'data', 20.0)],
+        'data_check': [],
+    }
+    timeline = build_timeline(frames_by_group)
+    by_fn = {fr['frame_number']: fr for fr in timeline}
+
+    assert by_fn[0]['segment'] == -1              # dark
+    assert by_fn[1]['segment'] == 0                # initial empty
+    assert by_fn[2]['segment'] == 0                # data
+    assert by_fn[3]['segment'] == -1               # dark между data и empty
+    # dark "погасил" переход data -> empty: сегмент НЕ увеличился
+    assert by_fn[4]['segment'] == 0
+    assert by_fn[5]['segment'] == 0
+
+
+def test_build_timeline_increments_segment_without_intervening_dark():
+    """Контрольный случай: без dark между data и empty сегмент увеличивается —
+    подтверждает, что предыдущий тест проверяет именно эффект dark."""
+    frames_by_group = {
+        'dark': [],
+        'empty': [_frame(1, 'empty'), _frame(3, 'empty')],
+        'data': [_frame(2, 'data', 10.0), _frame(4, 'data', 20.0)],
+        'data_check': [],
+    }
+    timeline = build_timeline(frames_by_group)
+    by_fn = {fr['frame_number']: fr for fr in timeline}
+
+    assert by_fn[1]['segment'] == 0
+    assert by_fn[2]['segment'] == 0
+    assert by_fn[3]['segment'] == 1                # empty сразу после data -> новая вставка
+    assert by_fn[4]['segment'] == 1
+
+
+def test_build_checkpoint_pairs_does_not_scan_before_previous_segment():
+    """Обратный поиск data-кадра для checkpoint не должен заглядывать раньше
+    предыдущей periodic-вставки, даже если там случайно нашёлся бы кадр
+    с совпадающим углом (объект едет по кругу, углы периодически повторяются)."""
+    timeline = [
+        {'mode': 'data', 'angle': 45.0, 'segment': 0},   # 0: старый кадр с "совпадающим" углом
+        {'mode': 'data', 'angle': 10.0, 'segment': 0},   # 1
+        {'mode': 'empty', 'angle': 0.0, 'segment': 1},   # 2: начало сегмента 1
+        {'mode': 'data', 'angle': 20.0, 'segment': 1},   # 3: в сегменте 1 нет угла 45.0
+        {'mode': 'empty', 'angle': 0.0, 'segment': 2},   # 4: начало сегмента 2 (новая вставка)
+        {'mode': 'data_check', 'angle': 45.0, 'segment': 2},  # 5: checkpoint сегмента 2
+    ]
+
+    checkpoint_data, checkpoint_dc = build_checkpoint_pairs(timeline)
+
+    # Совпадающий кадр (индекс 0) лежит в сегменте 0, а не в предыдущем
+    # сегменте (1) для этого checkpoint-а — пара не должна быть построена.
+    assert checkpoint_data == []
+    assert checkpoint_dc == []
+
+
+def test_build_checkpoint_pairs_matches_within_previous_segment():
+    """Позитивный случай: подходящий кадр лежит в непосредственно предыдущем
+    сегменте — пара строится как обычно."""
+    timeline = [
+        {'mode': 'data', 'angle': 45.0, 'segment': 0},   # 0
+        {'mode': 'empty', 'angle': 0.0, 'segment': 1},   # 1: начало сегмента 1
+        {'mode': 'data', 'angle': 20.0, 'segment': 1},   # 2
+        {'mode': 'data', 'angle': 45.0, 'segment': 1},   # 3: угол совпадает, в предыдущем сегменте
+        {'mode': 'empty', 'angle': 0.0, 'segment': 2},   # 4: новая вставка
+        {'mode': 'data_check', 'angle': 45.0, 'segment': 2},  # 5
+    ]
+
+    checkpoint_data, checkpoint_dc = build_checkpoint_pairs(timeline)
+
+    assert checkpoint_data == [3]
+    assert checkpoint_dc == [5]

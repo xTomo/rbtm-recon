@@ -28,8 +28,11 @@ from hdf5_v2 import FRAME_MODES  # noqa
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
-# Допуск совпадения углов data и data_check при построении checkpoint-пар
-ANGLE_MATCH_TOL = 0.5
+# Допуск совпадения углов data и data_check при построении checkpoint-пар —
+# согласован с rbtm-storage.finalize_experiment_v2 (storage/hdf5_v2.py):
+# там сравнение буквально ``np.abs(angles[data_indices] - dc_angle) < 0.01``,
+# без учёта переполнения через 360° (drivers не пишут значения ровно на границе).
+ANGLE_MATCH_TOL = 0.01
 
 
 def read_v1_exp_info(h5f: h5py.File) -> dict:
@@ -82,10 +85,16 @@ def read_v1_group(h5f: h5py.File, group_name: str) -> list:
 def build_timeline(frames_by_group: dict) -> list:
     """Сливает группы в единую временную ось и проставляет segment_ids.
 
-    Семантика segment_id (как в rbtm-storage):
+    Логика 1:1 повторяет rbtm-storage._compute_segment_id() (storage/hdf5_v2.py):
       -1  — dark
        0  — начальная empty-серия и data до первой periodic-вставки
        k≥1 — k-я periodic-вставка: её empty-серия, её data_check и data после неё
+
+    Новая вставка обнаруживается по переходу data → empty: сегмент
+    увеличивается, когда очередной empty-кадр идёт СРАЗУ за data-кадром
+    (last_mode == 'data'). dark, как и в storage, тоже обновляет last_mode —
+    поэтому dark-кадр между data и empty "гасит" переход и новая вставка
+    не засчитывается, пока не появится ещё один data-кадр.
     """
     all_frames = []
     for group_frames in frames_by_group.values():
@@ -93,27 +102,17 @@ def build_timeline(frames_by_group: dict) -> list:
     all_frames.sort(key=lambda fr: fr['frame_number'])
 
     current_segment = 0
-    seen_data = False
-    prev_mode = None
+    last_mode = ''
 
     for fr in all_frames:
         mode = fr['mode']
         if mode == 'dark':
             fr['segment'] = -1
-            # dark не влияет на нумерацию сегментов и не прерывает empty-серию
-            continue
-
-        if mode == 'empty':
-            # Новая periodic-серия начинается, когда empty идёт после data/data_check
-            if seen_data and prev_mode not in ('empty', None):
+        else:
+            if mode == 'empty' and last_mode == 'data':
                 current_segment += 1
             fr['segment'] = current_segment
-        else:
-            if mode == 'data':
-                seen_data = True
-            fr['segment'] = current_segment
-
-        prev_mode = mode
+        last_mode = mode
 
     return all_frames
 
@@ -121,11 +120,25 @@ def build_timeline(frames_by_group: dict) -> list:
 def build_checkpoint_pairs(timeline: list) -> tuple:
     """Строит checkpoint-пары: одна на periodic-серию.
 
-    Первый data_check серии k сопоставляется с ПОСЛЕДНИМ предыдущим data-кадром,
-    снятым при том же угле (драйвер снимает data_check при угле последнего data).
+    Логика 1:1 повторяет rbtm-storage.finalize_experiment_v2 (storage/hdf5_v2.py):
+    первый (хронологически) data_check серии k сопоставляется с ближайшим
+    ПРЕДЫДУЩИМ data-кадром, снятым при том же угле (драйвер снимает
+    data_check при угле последнего data; допуск и способ сравнения —
+    см. ANGLE_MATCH_TOL).
+
+    Обратный поиск data-кадра ограничен предыдущим сегментом: не сканируем
+    раньше начала предыдущей periodic-вставки. Это защищает от случайного
+    совпадения с более старым кадром того же угла (объект снимается по кругу,
+    углы периодически повторяются), даже если формально данные в границах
+    сегмента отсутствуют.
     """
     checkpoint_data, checkpoint_dc = [], []
     used_segments = set()
+
+    # Индекс первого кадра каждого сегмента — нижняя граница обратного поиска
+    segment_start = {}
+    for idx, fr in enumerate(timeline):
+        segment_start.setdefault(fr['segment'], idx)
 
     for i, fr in enumerate(timeline):
         if fr['mode'] != 'data_check':
@@ -134,20 +147,22 @@ def build_checkpoint_pairs(timeline: list) -> tuple:
         if segment in used_segments:
             continue
 
+        lower_bound = segment_start.get(segment - 1, 0)
+
         match = None
-        for j in range(i - 1, -1, -1):
+        for j in range(i - 1, lower_bound - 1, -1):
             prev = timeline[j]
             if prev['mode'] != 'data':
                 continue
-            diff = abs(prev['angle'] - fr['angle']) % 360
-            diff = min(diff, 360 - diff)
-            if diff <= ANGLE_MATCH_TOL:
+            if abs(prev['angle'] - fr['angle']) < ANGLE_MATCH_TOL:
                 match = j
                 break
 
         if match is None:
-            logger.warning('data_check #%d (segment %s, angle %.2f): '
-                           'не найден data-кадр с тем же углом', i, segment, fr['angle'])
+            logger.warning(
+                'data_check #%d (segment %s, angle %.2f): не найден data-кадр '
+                'с тем же углом в пределах предыдущего сегмента (%s)',
+                i, segment, fr['angle'], segment - 1)
             continue
 
         used_segments.add(segment)
