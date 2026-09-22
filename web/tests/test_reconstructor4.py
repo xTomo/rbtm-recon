@@ -29,8 +29,26 @@ def test_notebook_imports_only_existing_tomotools4_names():
 
 
 def test_measure_repositioning_shifts_runs_without_debug():
-    assert 'debug=False' in _source()
-    assert 'debug=True)' not in _source()
+    """Автозапуск через nbconvert не должен включать подробную debug-диагностику
+    measure_repositioning_shifts (раздувает HTML-отчёт картинками на каждый
+    checkpoint). Проверяем реальный вызов через AST, а не подстроку в исходнике —
+    строковый поиск 'debug=True)' ломается от любого переформатирования и не
+    отличает настоящий вызов от упоминания в комментарии/докстринге."""
+    tree = ast.parse(_source())
+    calls = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Name)
+             and node.func.id == 'measure_repositioning_shifts']
+    assert calls, 'вызов measure_repositioning_shifts не найден в ноутбуке'
+
+    for call in calls:
+        debug_kwargs = [kw for kw in call.keywords if kw.arg == 'debug']
+        # Если debug не передан явно — используется дефолт функции (False),
+        # это тоже ок; проверяем только явно переданные значения.
+        for kw in debug_kwargs:
+            assert isinstance(kw.value, ast.Constant) and kw.value.value is False, (
+                'measure_repositioning_shifts вызван с debug != False '
+                'в автозапускаемом ноутбуке')
 
 
 def test_manual_axis_search_disabled_by_default():

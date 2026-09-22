@@ -338,10 +338,12 @@ docker-compose logs -f reconstructor
 на `mongomock`.
 
 ```bash
+pip install -r web/tests/requirements-test.txt
 python -m pytest web/tests -q
 ```
 
-Нужны: `h5py numpy scipy scikit-image pytest tqdm requests matplotlib nbformat mongomock`.
+Зависимости зафиксированы в [`web/tests/requirements-test.txt`](tests/requirements-test.txt):
+`pytest numpy scipy scikit-image h5py mongomock tqdm matplotlib requests nbformat`.
 
 ### Отладка ноутбука реконструкции
 
