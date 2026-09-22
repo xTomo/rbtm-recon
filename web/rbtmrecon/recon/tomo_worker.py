@@ -143,8 +143,12 @@ def process_once():
     elif action == 'copyfiles':
         copyfiles(rec_obj)
     else:
-        # Неизвестный/отсутствующий action не должен ронять воркер
+        # Неизвестный/отсутствующий action не должен ронять воркер, но и не должен
+        # молча оставлять запись в статусе 'waiting' — иначе get_rec_queue_next_obj
+        # будет раз за разом возвращать это же задание и очередь встанет намертво
+        # (head-of-line blocking для всех задач, поставленных после него).
         logging.error('Skipping task %s: unknown action %r', rec_obj.get('_id'), action)
+        set_object_status(rec_obj.get('obj_id'), 'error: unknown action {!r}'.format(action))
         return False
     return True
 

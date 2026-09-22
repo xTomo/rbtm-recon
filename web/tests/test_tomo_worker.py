@@ -93,19 +93,30 @@ def test_reconstruct_sets_done_when_no_errors(monkeypatch):
 
 def test_process_once_ignores_unknown_action(monkeypatch):
     calls = []
+    statuses = []
     monkeypatch.setattr(tomo_worker, 'get_rec_queue_next_obj',
                         lambda: {'obj_id': 'x', 'action': 'fly_to_the_moon'})
     monkeypatch.setattr(tomo_worker, 'reconstruct', lambda o: calls.append('rec'))
     monkeypatch.setattr(tomo_worker, 'copyfiles', lambda o: calls.append('copy'))
+    monkeypatch.setattr(tomo_worker, 'set_object_status',
+                        lambda obj_id, status: statuses.append((obj_id, status)))
 
     assert tomo_worker.process_once() is False
     assert calls == []
+    # Запись не должна оставаться в статусе 'waiting' — иначе она навсегда
+    # блокирует очередь (get_rec_queue_next_obj будет возвращать её снова и снова).
+    assert statuses == [('x', "error: unknown action 'fly_to_the_moon'")]
 
 
 def test_process_once_ignores_missing_action(monkeypatch):
+    statuses = []
     monkeypatch.setattr(tomo_worker, 'get_rec_queue_next_obj',
                         lambda: {'obj_id': 'x'})
+    monkeypatch.setattr(tomo_worker, 'set_object_status',
+                        lambda obj_id, status: statuses.append((obj_id, status)))
+
     assert tomo_worker.process_once() is False
+    assert statuses == [('x', 'error: unknown action None')]
 
 
 def test_worker_loop_survives_queue_exception(monkeypatch):
