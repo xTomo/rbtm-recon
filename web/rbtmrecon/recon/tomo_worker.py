@@ -53,8 +53,12 @@ def _notebook_auto_run(notebook):
     subprocess.check_call(args_jupytext)
 
     # Шаг 2: выполняем .ipynb через nbconvert
+    # --ServerApp.iopub_data_rate_limit относится к Jupyter Server (лимит скорости
+    # вывода по websocket) и не применим к nbconvert: тот читает iopub напрямую
+    # через jupyter_client, а не через сервер. nbconvert просто игнорирует этот
+    # флаг с предупреждением "Unrecognized config" — убран как no-op.
     args = ["jupyter", "nbconvert", "--execute", "--allow-errors",
-            "--ExecutePreprocessor.timeout=-1", "--ServerApp.iopub_data_rate_limit=1.0e10",
+            "--ExecutePreprocessor.timeout=-1",
             "--to", "notebook", '--output', notebook_ipynb, notebook_ipynb]
     subprocess.check_call(args)
 
