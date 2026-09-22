@@ -743,6 +743,13 @@ def measure_repositioning_shifts(
     checkpoint_angles : np.ndarray shape (K,) — углы checkpoint-ов
     shifts_y          : np.ndarray shape (K,) — сдвиг по Y (пикс., субпиксель)
     shifts_x          : np.ndarray shape (K,) — сдвиг по X (пикс., субпиксель)
+
+    Если для checkpoint-а k не удалось найти ни data_check кадр, ни
+    парный data кадр с подходящим углом (``_find_matching_data_frame``
+    бросает ``ValueError``), checkpoint пропускается: соответствующие
+    ``shifts_y[k]``/``shifts_x[k]`` устанавливаются в 0.0 (а не NaN — чтобы
+    cumsum в apply_repositioning_correction() не заражал NaN-ом все
+    последующие сегменты), в лог пишется warning.
     """
     K = len(adv_data.periodic_empties)
     if K == 0:
@@ -791,8 +798,15 @@ def measure_repositioning_shifts(
         dc_frame = adv_data.data_check_images[dc_idx, y_min:y_max, x_min:x_max].copy()
 
         # Ищем соответствующий data кадр до checkpoint k
-        data_idx = _find_matching_data_frame(
-            dc_angle, adv_data.data_angles, adv_data.data_numbers, fn_start)
+        try:
+            data_idx = _find_matching_data_frame(
+                dc_angle, adv_data.data_angles, adv_data.data_numbers, fn_start)
+        except ValueError as e:
+            logging.warning(f'Checkpoint {k}: {e}; skipping')
+            checkpoint_angles[k] = dc_angle
+            shifts_y[k] = 0.0
+            shifts_x[k] = 0.0
+            continue
 
         if debug:
             print(f"[DBG]   dc_angle={dc_angle:.2f}, data_idx={data_idx}, fn_start={fn_start}")
@@ -1082,8 +1096,12 @@ def analyze_repositioning_accuracy(
 
     dc_idx = dc_indices[0]
     dc_angle = float(adv_data.data_check_angles[dc_idx])
-    data_idx = _find_matching_data_frame(
-        dc_angle, adv_data.data_angles, adv_data.data_numbers, fn_start)
+    try:
+        data_idx = _find_matching_data_frame(
+            dc_angle, adv_data.data_angles, adv_data.data_numbers, fn_start)
+    except ValueError as e:
+        logging.warning(f'analyze_repositioning_accuracy: checkpoint {k}: {e}; skipping overlay')
+        return
 
     if data_idx is None:
         return

@@ -1,4 +1,6 @@
 """Тесты алгоритмов tomotools4 на синтетических данных (без GPU)."""
+import logging
+
 import numpy as np
 import pytest
 import scipy.ndimage as ndi
@@ -123,6 +125,31 @@ def test_repositioning_roundtrip_reduces_error():
     assert after < 0.5 * before
     # Сегмент 0 (референс) не трогаем
     assert rms(norm[0], target) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_measure_repositioning_shifts_skips_bad_angle_checkpoint(caplog):
+    """Один checkpoint с 'не тем' углом (ValueError из _find_matching_data_frame)
+    не должен ронять весь прогон — остальные checkpoint-ы измеряются как обычно,
+    для плохого сдвиг фиксируется как 0.0 (см. докстринг measure_repositioning_shifts)."""
+    obj = make_object()
+    d1 = [1.5, -2.0]
+    d2 = [-1.0, 1.5]
+    obj1 = ndi.shift(obj, d1, order=3, mode='nearest').astype('float32')
+    obj2 = ndi.shift(obj1, d2, order=3, mode='nearest').astype('float32')
+
+    adv, n_per = build_adv([obj, obj1, obj2], [d1, d2])
+    # Портим угол data_check checkpoint-а 0: такого угла нет среди data_angles
+    # сегмента 0 (0., 30., 60., 90.) -> _find_matching_data_frame бросит ValueError.
+    adv.data_check_angles[0] = 45.0
+
+    with caplog.at_level(logging.WARNING):
+        angles, sy, sx = t4.measure_repositioning_shifts(adv, 0, W, 0, H, debug=False)
+
+    assert len(sy) == 2
+    assert sy[0] == 0.0 and sx[0] == 0.0
+    # Второй checkpoint не задет — измерен как обычно (ненулевой сдвиг)
+    assert sy[1] != 0.0 or sx[1] != 0.0
+    assert any('допуск' in r.message for r in caplog.records)
 
 
 # =============================================================================
