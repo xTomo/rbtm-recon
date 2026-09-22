@@ -5,3 +5,4 @@ __pycache__
 .ipynb_checkpoints
 .vscode
 web/data/*
+.pytest_cache/
