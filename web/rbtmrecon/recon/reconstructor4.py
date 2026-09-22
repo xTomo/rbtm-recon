@@ -282,6 +282,10 @@ manual_axis_search = False
 ui, shift_text, angle_text = create_axis_search_widget(
     sinogram_fixed, data_images_crop, data_angles, shift_x, alfa
 )
+# display обычно доступен в Jupyter без импорта (ipykernel инжектит его в
+# user namespace), но явный импорт не помешает и не сломается в ядре —
+# защищает от NameError, если ячейка когда-нибудь выполнится вне ipykernel.
+from IPython.display import display
 display(ui)
 
 # %%
