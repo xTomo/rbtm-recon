@@ -1,4 +1,5 @@
 """Тесты вспомогательных функций веб-интерфейса."""
+import ast
 import os
 
 import storage_utils
@@ -47,10 +48,36 @@ def test_get_tomoobjects_list_survives_storage_error(monkeypatch):
     assert storage_utils.get_tomoobjects_list() == []
 
 
-def test_web_recon_sorts_with_get_timestamp():
-    """web_recon сортирует по x.get('timestamp', 0), а не по x['timestamp']."""
+def _extract_sort_key_lambda(src):
+    """Находит лямбду ``key=`` в первом вызове ``.sort(...)`` исходника и
+    компилирует её в вызываемый объект — вместо хрупкого поиска подстроки
+    в тексте, который ломается при любом косметическом изменении форматирования."""
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == 'sort'):
+            for kw in node.keywords:
+                if kw.arg == 'key' and isinstance(kw.value, ast.Lambda):
+                    expr = ast.Expression(body=kw.value)
+                    ast.fix_missing_locations(expr)
+                    return eval(compile(expr, '<web_recon.sort key>', 'eval'))
+    raise AssertionError('ключ .sort(key=lambda ...) не найден в web_recon.py')
+
+
+def test_web_recon_timestamp_sort_key_handles_missing_and_string_values():
+    """Ключ сортировки списка объектов должен переживать объекты без
+    timestamp, с timestamp=None и с timestamp-строкой (так отдаёт storage) —
+    иначе вся страница со списком падает с KeyError/TypeError при сравнении
+    разнотипных ключей."""
     web_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     src = open(os.path.join(web_dir, 'rbtmwebrecon', 'webrecon', 'web_recon.py'),
                encoding='utf8').read()
-    assert "x.get('timestamp', 0)" in src
-    assert "key=lambda x: x['timestamp']" not in src
+    key_fn = _extract_sort_key_lambda(src)
+
+    objs = [{'timestamp': 100}, {'timestamp': '50'}, {'timestamp': None}, {}]
+    objs.sort(key=key_fn, reverse=True)
+
+    keys = [key_fn(o) for o in objs]
+    assert keys == sorted(keys, reverse=True)
+    assert keys[0] == 100.0
+    assert keys[-1] == 0.0

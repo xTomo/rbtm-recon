@@ -72,8 +72,10 @@ def view_tomo_objects():
     t1 = time.time()
     logging.info(f'[PROFILE] get_tomoobjects_full_info в view: {t1 - t0:.3f}s')
     # .get(): у части объектов storage может не быть timestamp — без этого
-    # весь список страниц падал с KeyError
-    tomo_objects.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
+    # весь список страниц падал с KeyError. float(... or 0): timestamp может
+    # прийти строкой (сериализация storage) или None — сортировка смеси
+    # str/int/None валила бы TypeError при сравнении разнотипных ключей.
+    tomo_objects.sort(key=lambda x: float(x.get('timestamp') or 0), reverse=True)
 
     total = len(tomo_objects)
 
