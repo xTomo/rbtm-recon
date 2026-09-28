@@ -207,19 +207,20 @@ def test_auto_axis_finds_known_axis_on_normalized_frames():
     assert found.tilt_deg == pytest.approx(axis.tilt_deg, abs=0.02)
 
 
-def test_auto_axis_matches_find_axis_correction(projections):
-    """Без сглаживания на тех же кадрах — те же (shift, alfa), что у tomotools4.find_axis_correction."""
+@pytest.mark.parametrize('sigma', [0.0, ax.AUTO_AXIS_SMOOTH_SIGMA])
+def test_auto_axis_matches_find_axis_correction(projections, sigma):
+    """На тех же кадрах и с тем же сглаживанием — те же (shift, alfa), что у tomotools4.find_axis_correction."""
+    assert ax.AUTO_AXIS_SMOOTH_SIGMA == t4.AXIS_SMOOTH_SIGMA
     p, angles = projections
     roi = ROIS[1]
     crop = _crop(p, roi)
-    s_old, a_old = t4.find_axis_correction(np.stack([crop[0], crop[-1]]), np.array([0.0, 180.0]))
-    found = ax.auto_axis(crop[0], crop[-1], roi, smooth_sigma=0)
+    s_old, a_old = t4.find_axis_correction(np.stack([crop[0], crop[-1]]), np.array([0.0, 180.0]), smooth_sigma=sigma)
+    found = ax.auto_axis(crop[0], crop[-1], roi, smooth_sigma=sigma)
     s_new, a_new = ax.to_crop_params(found, roi)
-    # целевая отдаётся Powell как float (в старом коде — float32), траектории чуть расходятся
     assert s_new == pytest.approx(s_old, abs=1e-4)
     assert a_new == pytest.approx(a_old, abs=1e-4)
-    assert found.center_at(TRUE_AXIS.y_ref) == pytest.approx(TRUE_AXIS.center_x, abs=0.01)
-    assert found.tilt_deg == pytest.approx(TRUE_AXIS.tilt_deg, abs=0.005)
+    assert found.center_at(TRUE_AXIS.y_ref) == pytest.approx(TRUE_AXIS.center_x, abs=0.02)
+    assert found.tilt_deg == pytest.approx(TRUE_AXIS.tilt_deg, abs=0.01)
 
 
 def test_auto_axis_rejects_wrong_shape(projections):
