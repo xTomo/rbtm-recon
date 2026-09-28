@@ -40,6 +40,18 @@ def test_service_without_token_refuses(tmp_path):
     assert client.get('/health').status_code == 200
 
 
+@pytest.mark.parametrize('sent, expected', [
+    ('Алексей'.encode('utf-8').decode('latin-1'), 'Алексей'),    # rbtm-web шлёт байты UTF-8, WSGI — latin-1
+    ('robotom', 'robotom'),
+    ('Jos\xe9', 'Jos\xe9'),                                       # не UTF-8 — как пришло
+])
+def test_user_header_utf8(tmp_path, sent, expected):
+    from reconservice import auth
+    app, _, _ = make_service(tmp_path)
+    with app.test_request_context('/', headers={'X-Recon-User': sent}):
+        assert auth.current_user() == expected
+
+
 @pytest.mark.parametrize('exp_id', ['..', '.hidden', 'a/b', 'a..b', 'x' * 200])
 def test_bad_exp_id_rejected(tmp_path, exp_id):
     _, client, _ = make_service(tmp_path)

@@ -33,8 +33,15 @@ def require_token() -> None:
 
 
 def current_user() -> str:
-    """Пользователь rbtm-web, от имени которого пришёл запрос (пустая строка — не указан)."""
-    return request.headers.get(USER_HEADER, '').strip()[:150]
+    """Пользователь rbtm-web, от имени которого пришёл запрос (пустая строка — не указан).
+
+    rbtm-web передаёт имя байтами UTF-8, WSGI отдаёт заголовок строкой latin-1 — перекодируем обратно."""
+    raw = request.headers.get(USER_HEADER, '')
+    try:
+        raw = raw.encode('latin-1').decode('utf-8')
+    except UnicodeError:
+        pass
+    return raw.strip()[:150]
 
 
 def valid_exp_id(exp_id: str) -> str:
