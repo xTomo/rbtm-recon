@@ -43,7 +43,10 @@ def make_service(tmp_path, start_threads=False, mongo_client=None, **overrides):
 
 
 def write_scan(cfg: Config, exp_id: str, ss, **kw) -> str:
-    return write_h5(ss, cfg.scan_path(exp_id), exp_id=exp_id, **kw)
+    """Записать скан туда, где его ищет сервис: <exp_src>/<id>/before_processing/<id>.h5."""
+    path = cfg.scan_path(exp_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return write_h5(ss, path, exp_id=exp_id, **kw)
 
 
 def decode(response):

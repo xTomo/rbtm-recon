@@ -71,8 +71,9 @@ class Config:
     # --- пути ---------------------------------------------------------------------------------------------
 
     def scan_path(self, exp_id: str) -> str:
-        """Исходный HDF5 эксперимента (не проверяет существование)."""
-        return os.path.join(self.exp_src, exp_id + '.h5')
+        """Исходный HDF5 эксперимента (не проверяет существование): раскладка rbtm-storage
+        ``data/experiments/<id>/before_processing/<id>.h5``, смонтированная как ``/exp_src``."""
+        return os.path.join(self.exp_src, exp_id, 'before_processing', exp_id + '.h5')
 
     def fast_exp_dir(self, exp_id: str) -> str:
         """``/fast/studio/<id>`` — не внутри ``/fast/<id>/``: тот каталог принадлежит ноутбуку, который в конце

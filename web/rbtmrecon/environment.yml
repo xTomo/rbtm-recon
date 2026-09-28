@@ -21,6 +21,8 @@ dependencies:
   - scikit-image
   - h5py
   - requests
+  - flask       # recon-service (reconservice), этап 2 студии
+  - gunicorn
   - jupyter
   - jupyterlab
   - ipython

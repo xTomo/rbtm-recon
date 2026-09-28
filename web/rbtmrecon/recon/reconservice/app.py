@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import List, Optional
 
 from flask import Flask, current_app, jsonify
 from werkzeug.exceptions import HTTPException
@@ -56,6 +56,20 @@ class ServiceState:
         self.sessions.stop_reaper()
 
 
+#: состояния, созданные create_app в этом процессе (для остановки из хука gunicorn worker_exit)
+_STATES: List[ServiceState] = []
+
+
+def shutdown_all() -> None:
+    """Остановить фоновые потоки всех приложений процесса; запущенная задача прерывается."""
+    while _STATES:
+        st = _STATES.pop()
+        try:
+            st.stop()
+        except Exception:  # noqa: BLE001 — остановка не должна падать
+            logger.exception('ошибка при остановке сервиса')
+
+
 def state() -> ServiceState:
     return current_app.extensions['recon']
 
@@ -96,6 +110,7 @@ def create_app(config: Optional[Config] = None, *, mongo_client=None, start_thre
     _register_errors(app)
     if start_threads:
         st.start()
+        _STATES.append(st)
     return app
 
 
