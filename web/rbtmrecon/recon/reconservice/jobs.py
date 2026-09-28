@@ -63,6 +63,7 @@ import os
 import re
 import shutil
 import signal
+import statistics
 import subprocess
 import sys
 import threading
@@ -683,6 +684,31 @@ class JobService:
         if size > _LOG_READ_BYTES and text:
             text = text[1:]                          # первая строка обрезана
         return '\n'.join(text[-max(1, int(lines)):]) + '\n' if text else ''
+
+    def recent_rate(self, last: int = 5) -> Optional[Dict[str, float]]:
+        """Скорость по последним выполненным задачам для оценки времени новой: медиана секунд реконструкции на
+        (срез · ширина² · угол) — FBP и выравнивание растут как площадь среза и число углов; и медиана секунд
+        подготовки (dark/empty, сдвиги образца, ось). None — выполненных задач с замерами нет (или нет Mongo)."""
+        try:
+            docs = list(self.coll.find({'status': 'done', 'result.timings.recon_s': {'$exists': True}},
+                                       {'result': 1, 'recipe.fov': 1}).sort('finished', DESCENDING).limit(last))
+        except Exception:  # noqa: BLE001 — оценка не обязательна
+            return None
+        unit, prepare = [], []
+        for d in docs:
+            t = (d.get('result') or {}).get('timings') or {}
+            shape = ((d.get('result') or {}).get('volume') or {}).get('shape') or []
+            fov = (d.get('recipe') or {}).get('fov') or {}
+            try:
+                nz, w, n_ang = int(shape[0]), int(fov['x1']) - int(fov['x0']), int(t['n_angles'])
+                unit.append(float(t['recon_s']) / (nz * w * w * n_ang))
+                prepare.append(float(t.get('prepare_s', 0.0)))
+            except (KeyError, IndexError, TypeError, ValueError, ZeroDivisionError):
+                continue
+        if not unit:
+            return None
+        return {'recon_s_per_slice_px2_angle': statistics.median(unit), 'prepare_s': statistics.median(prepare),
+                'jobs': len(unit)}
 
     def summary(self) -> Dict[str, Any]:
         """Для /health: число queued, текущая задача (id, exp_id, progress, stage)."""

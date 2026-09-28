@@ -329,6 +329,7 @@ def run_recipe(r: recipe_mod.Recipe, scan_path: str, out_dir: str, cache_dir: st
     logger.info('run_recipe %s: срезы [%d, %d), слой %d строк, запас %d, объём %s, бэкенд FBP %s',
                 scan.exp_id, z0, z1, rows, m, shape, fbp.resolve_backend(backend))
     timings['slab_rows'] = rows
+    timings['n_angles'] = int(fbp.select_angles(prep.angles, r.recon['angles']).sum())   # для оценки времени
 
     writer = outputs.VolumeWriter(out_dir, base, shape, pixel_size, binning=r.outputs.get('binning', [4]))
     samples: List[np.ndarray] = []

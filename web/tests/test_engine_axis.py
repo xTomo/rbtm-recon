@@ -4,6 +4,7 @@ import math
 
 import numpy as np
 import pytest
+import scipy.ndimage as ndi
 
 import engine_phantom as ph
 import tomotools4 as t4
@@ -108,9 +109,9 @@ def test_align_rows_zero_angle_is_shift_only(projections):
         assert np.abs(out[k] - ref).max() < 1e-6
 
 
-def test_align_rows_interpolates_frame_by_frame(projections, monkeypatch):
-    """Интерполяции получают отдельные кадры слоя (s_in, w), а не склеенный (n·s_in, w): у cupyx.spline_filter1d
-    блок потоков растёт с длиной оси, и при длине > 32768 (сотни кадров × десятки строк) запуск ядра падает."""
+def test_align_rows_never_flattens_frames(projections, monkeypatch):
+    """Интерполяции получают слой (n, s_in, w), а не склеенный (n·s_in, w): у cupyx.spline_filter1d блок потоков
+    растёт с длиной оси, и при длине > 32768 (сотни кадров × десятки строк) запуск ядра падает."""
     import scipy.ndimage as ndi
     shapes = []
 
@@ -129,7 +130,7 @@ def test_align_rows_interpolates_frame_by_frame(projections, monkeypatch):
     frames = _crop(p[:3], roi)
     shift_x, alfa = ax.to_crop_params(TRUE_AXIS, roi)
     ax.align_rows(frames, 0, (10, 20), shift_x, alfa, roi.height)
-    assert shapes and all(s == (roi.height, roi.width) for s in shapes)
+    assert shapes and all(s == (3, roi.height, roi.width) for s in shapes)
 
 
 def test_align_rows_requires_margin(projections):
@@ -231,7 +232,7 @@ def test_auto_axis_rejects_wrong_shape(projections):
 
 # --- перебор центра, метрики, наклон -----------------------------------------------------------------------
 
-@pytest.mark.parametrize('metric', ['entropy', 'tv'])
+@pytest.mark.parametrize('metric', ['grad', 'entropy', 'tv'])
 def test_center_scan_minimum_at_true_center(metric):
     w = 96
     true_c = 46.3
@@ -241,6 +242,39 @@ def test_center_scan_minimum_at_true_center(metric):
     slices, metrics = ax.center_scan(sino, ANGLES, centers, (w - 1) / 2, 1.0, CPU_FBP, metric=metric)
     assert len(slices) == len(centers) and slices[0].shape == (w, w)
     assert centers[np.argmin(metrics)] == pytest.approx(true_c, abs=step)
+
+
+def test_fourier_shift_rows_matches_spline_on_smooth_rows_and_is_exact_for_integers():
+    x = np.arange(200, dtype='float64')
+    rows = np.stack([np.exp(-((x - 90) / 12.0) ** 2), np.sin(x / 15.0) * np.exp(-((x - 100) / 40.0) ** 2)])
+    for d in (0.5, -1.25, 2.7):
+        f = ax.fourier_shift_rows(rows, d, np)
+        spl = ndi.shift(rows, [0, d], order=3, mode='nearest')
+        assert np.abs(f - spl)[:, 10:-10].max() < 2e-3
+    f = ax.fourier_shift_rows(rows, 3, np)
+    assert np.abs(f[:, 13:-10] - rows[:, 10:-13]).max() < 1e-5          # целый сдвиг — просто перенос
+
+
+def test_center_scan_has_no_half_pixel_bias_on_noisy_sinogram():
+    """Сплайн-сдвиг строки сглаживает шум сильнее при полуцелых сдвигах, и метрика (здесь TV) систематически ниже в
+    полуцелых точках — перебор тянуло к ним (на реальном скане — ложный минимум в 1,5 px от оси). Фурье-сдвиг
+    (center_scan) такой периодичности не даёт."""
+    w = 96
+    true_c = 46.3
+    sino = ph.sinogram(ph.asymmetric_blobs(), ANGLES, w, zeta=2.0, center=true_c)
+    noisy = sino + 0.05 * sino.max() * np.random.default_rng(3).standard_normal(sino.shape)
+    cc = (w - 1) / 2
+    k = np.arange(-6, 7)
+    centers = true_c + 0.5 * k
+    spline = np.array([ax.center_metric(CPU_FBP(ndi.shift(noisy, [0, cc - c], order=3, mode='nearest'), ANGLES, 1.0),
+                                        'tv') for c in centers])
+    _, fourier = ax.center_scan(noisy, ANGLES, centers, cc, 1.0, CPU_FBP, metric='tv')
+    half, whole = (k % 2 == 1), (k % 2 == 0)
+
+    def gap(v):
+        return (v[half].mean() - v[whole].mean()) / v.std()
+    assert gap(spline) < -1.0                  # полуцелые центры «лучше» — артефакт интерполяции
+    assert abs(gap(fourier)) < 0.5
 
 
 def test_center_metric_edge_cases():

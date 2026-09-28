@@ -23,11 +23,14 @@ run_recipe — в разных местах; за запасом их влиян
 свободной памяти, иначе — в RAM (на GPU для каждого запроса переносится только нужный кусок строк). Нормировка
 идёт кусками кадров под свободную память и при нехватке памяти GPU повторяется с полосой в RAM.
 
-Перебор центра — как ``axis.center_scan``: строка выравнивается по базовой оси, для кандидата c строка синограммы
-сдвигается на (центр кропа − c), восстанавливается, метрика с общим для всех кандидатов диапазоном энтропии.
-Отличия (ради ≤ 2 с на сетку 3×3 на сервере): сдвиг на xp (на GPU — cupyx; scipy-сдвиг строки 800×3200 на CPU —
-0,2 с на кандидат) и метрика по показываемым фрагментам ``region`` (по полным срезам 3216² — секунды на сетку).
-При region во весь срез на CPU результат совпадает с ``axis.center_scan`` (проверяется тестом).
+Перебор центра — как ``axis.center_scan``: строка выравнивается по базовой оси и чистится от колец, для кандидата c
+сдвигается на (центр кропа − c) в частотной области (``axis.fourier_shift_rows``: сплайн сглаживал шум сильнее при
+полуцелых сдвигах, и метрика — и глаз — выбирали полуцелые центры), восстанавливается; метрика (по умолчанию
+``grad`` — энергия градиента сглаженного фрагмента) — по показываемым фрагментам ``region``, по умолчанию — квадрат
+с наибольшей энергией краёв (``structured_region``): внутри однородного образца сведений о центре нет.
+
+Смена только центра при просмотре среза идёт быстрым путём (``Context.corrected_row``): готовая строка после колец
+сдвигается в частотной области, без нового выравнивания и колец; ``exact`` — полный путь.
 """
 from __future__ import annotations
 
@@ -60,6 +63,8 @@ DEFAULT_RINGS = 'medium'
 DEFAULT_ANGLES = 'first_180'
 #: Сторона фрагмента перебора центра по умолчанию (центральный квадрат) и предел числа кандидатов.
 SCAN_REGION_PX = 256
+#: Быстрый путь смены центра (сдвиг готовой строки) — при разнице сдвигов кропа не больше стольких пикселей.
+FAST_SHIFT_MAX_PX = 16.0
 SCAN_MAX_N = 25
 
 Check = Callable[[], None]
@@ -79,6 +84,31 @@ def check_region(region: Optional[Region], width: int) -> Region:
     if not (0 <= x0 < x1 <= width and 0 <= y0 < y1 <= width):
         raise ValueError('region {},{},{},{} вне среза {}×{}'.format(x0, y0, x1, y1, width, width))
     return x0, y0, x1, y1
+
+
+def structured_region(img: np.ndarray, side: int = SCAN_REGION_PX) -> Region:
+    """Квадрат стороны min(side, w) внутри вписанного круга, где больше всего краёв (энергия градиента среза,
+    сглаженного и уменьшенного в 4 раза): фрагмент перебора центра по умолчанию. Внутри однородного образца
+    сведений о центре нет — фрагмент должен захватывать края."""
+    import scipy.ndimage as ndi  # noqa: WPS433
+    a = np.asarray(img, dtype='float32')
+    w = a.shape[0]
+    s = min(int(side), w)
+    f = 4 if w >= 512 else 1                  # на реальных срезах (~3000 px) — считать по уменьшенному
+    small = a[:w // f * f, :w // f * f].reshape(w // f, f, w // f, f).mean(axis=(1, 3)) if f > 1 else a
+    gy, gx = np.gradient(ndi.gaussian_filter(small, 1.0))
+    e = (gx * gx + gy * gy) * axis_mod._circle_mask(small)
+    k = max(1, s // f)
+    box = ndi.uniform_filter(e, size=k, mode='constant')
+    n = small.shape[0]
+    lo, hi = k // 2, n - (k - k // 2)
+    if hi < lo:
+        return central_region(w, side)
+    sub = box[lo:hi + 1, lo:hi + 1]
+    iy, ix = np.unravel_index(int(np.argmax(sub)), sub.shape)
+    x0 = min(max(0, ix * f), w - s)
+    y0 = min(max(0, iy * f), w - s)
+    return x0, y0, x0 + s, y0 + s
 
 
 def central_region(width: int, side: int = SCAN_REGION_PX) -> Region:
@@ -145,12 +175,14 @@ class Context:
         self._pair = None                         # (img0, img180) нормированные кадры пары 0°/180°, numpy
         self._pair_pos: Optional[Tuple[int, int]] = None
         self._row = None                          # (ключ, полоса, выровненная строка)
+        self._corrected = None                    # выровненная строка после колец (см. corrected_row)
 
     def release(self) -> None:
         """Отпустить кэши (закрытие сессии, новая загрузка)."""
         self._band = None
         self._pair = None
         self._row = None
+        self._corrected = None
 
     # --- строки и ось --------------------------------------------------------------------------------------
 
@@ -305,28 +337,58 @@ class Context:
         s = rings.apply(sino[None], params, xp=self.xp)
         return fbp.recon_rows(s, self.prep.angles, self.pixel_size, angle_mode=angle_mode)[0]
 
-    def slice(self, row: int, ax: Axis, preset: str = DEFAULT_RINGS, angle_mode: str = DEFAULT_ANGLES,
-              region: Optional[Region] = None, check: Check = _no_check) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Срез строки детектора row (float32, область region среза w×w) и сведения для X-Meta."""
-        t_start = time.time()
-        params = rings.resolve(preset)
-        _check_angles(angle_mode)
-        x0, y0, x1, y1 = check_region(region, self.roi.width)
+    def corrected_row(self, row: int, ax: Axis, preset: str = DEFAULT_RINGS, exact: bool = False,
+                      check: Check = _no_check) -> Tuple[Any, Dict[str, Any]]:
+        """Выровненная строка после колец, xp (n, w).
+
+        Смена только центра (та же строка, наклон и пресет колец) без ``exact`` не выравнивает и не чистит кольца
+        заново: строка, посчитанная при прежнем центре, сдвигается по x в частотной области
+        (``axis.fourier_shift_rows``) на разницу сдвигов кропа · cos(наклона) — на GPU ~1 с → ~0,2 с на срез при
+        перетаскивании центра. Приближение: поворот после сдвига уводит его и по y на δ·sin(наклона) (при наклоне
+        1° и сдвиге 2 px — 0,03 px), а кольца чистились до сдвига (полосы сдвигаются вместе со строкой).
+        ``exact`` — полный путь, как ``pipeline.process_slab``."""
+        r = self.crop_row(row)
+        shift_x, alfa = axis_mod.to_crop_params(ax, self.roi)
+        c = self._corrected
+        if (not exact and c is not None and c['key'] == (r, alfa, preset)
+                and abs(shift_x - c['shift_x']) <= FAST_SHIFT_MAX_PX):
+            d = (shift_x - c['shift_x']) * math.cos(math.radians(alfa))
+            t: Dict[str, Any] = {'band_s': 0.0, 'band_cached': True, 'align_s': 0.0, 'rings_s': 0.0,
+                                 'fast_shift_px': round(d, 4)}
+            if d == 0:
+                return c['row'], t
+            t0 = time.time()
+            s = axis_mod.fourier_shift_rows(c['row'], d, self.xp)
+            t['shift_s'] = round(time.time() - t0, 4)
+            return s, t
         sino, t = self.aligned_row(row, ax, check)
         check()
         t0 = time.time()
-        s = rings.apply(sino[None], params, xp=self.xp)
+        s = rings.apply(sino[None], rings.resolve(preset), xp=self.xp)[0]
         t['rings_s'] = round(time.time() - t0, 4)
+        self._corrected = {'key': (r, alfa, preset), 'shift_x': shift_x, 'row': s}
+        return s, t
+
+    def slice(self, row: int, ax: Axis, preset: str = DEFAULT_RINGS, angle_mode: str = DEFAULT_ANGLES,
+              region: Optional[Region] = None, check: Check = _no_check, exact: bool = False
+              ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Срез строки детектора row (float32, область region среза w×w) и сведения для X-Meta.
+        Без ``exact`` смена только центра идёт быстрым путём (см. ``corrected_row``)."""
+        t_start = time.time()
+        rings.resolve(preset)                      # неизвестный пресет — ValueError до вычислений
+        _check_angles(angle_mode)
+        x0, y0, x1, y1 = check_region(region, self.roi.width)
+        s, t = self.corrected_row(row, ax, preset, exact, check)
         check()
         t0 = time.time()
-        rec = fbp.recon_rows(s, self.prep.angles, self.pixel_size, angle_mode=angle_mode)[0]
+        rec = fbp.recon_rows(s[None], self.prep.angles, self.pixel_size, angle_mode=angle_mode)[0]
         t['fbp_s'] = round(time.time() - t0, 4)
         img = np.ascontiguousarray(rec[y0:y1, x0:x1])
         t['total_s'] = round(time.time() - t_start, 4)
         self.timings = dict(t)
         meta = {'row': int(row), 'axis': ax.to_dict(), 'rings': preset, 'angles': angle_mode,
                 'n_angles': int(fbp.select_angles(self.prep.angles, angle_mode).sum()),
-                'region': [x0, y0, x1, y1], 'timings': t}
+                'region': [x0, y0, x1, y1], 'exact': 'fast_shift_px' not in t, 'timings': t}
         return img, meta
 
     def rings_preview(self, row: int, ax: Axis, preset: str = DEFAULT_RINGS, angle_mode: str = DEFAULT_ANGLES,
@@ -345,7 +407,7 @@ class Context:
                 'region': [x0, y0, x1, y1], 'timings': t}
         return np.stack(out), meta
 
-    def center_scan(self, row: int, ax: Axis, step: float = 1.0, n: int = 9, metric: str = 'entropy',
+    def center_scan(self, row: int, ax: Axis, step: float = 1.0, n: int = 9, metric: str = 'grad',
                     region: Optional[Region] = None, preset: str = DEFAULT_RINGS,
                     angle_mode: str = DEFAULT_ANGLES, check: Check = _no_check
                     ) -> Tuple[np.ndarray, Dict[str, Any]]:
@@ -356,23 +418,27 @@ class Context:
             raise ValueError('n = {} вне [1, {}]'.format(n, SCAN_MAX_N))
         if not (math.isfinite(step) and step > 0):
             raise ValueError('step должен быть > 0, получено {}'.format(step))
-        params = rings.resolve(preset)
+        rings.resolve(preset)
         _check_angles(angle_mode)
         w = self.roi.width
-        x0, y0, x1, y1 = check_region(region if region is not None else central_region(w), w)
+        if region is not None:
+            check_region(region, w)
         t_start = time.time()
-        sino, t = self.aligned_row(row, ax, check)
-        base = rings.apply(sino[None], params, xp=self.xp)[0]
-        crop_center = (w - 1) / 2.0
+        base, t = self.corrected_row(row, ax, preset, exact=True, check=check)
         offsets = (np.arange(int(n)) - int(n) // 2) * float(step)
-        nd = gpu.ndimage(self.xp)
+
+        def recon(off: float) -> np.ndarray:
+            # как axis.center_scan: центр кропа + off ↔ сдвиг строки на −off (в частотной области)
+            s = axis_mod.fourier_shift_rows(base, -float(off), self.xp)
+            return fbp.recon_rows(s[None], self.prep.angles, self.pixel_size, angle_mode=angle_mode)[0]
+
+        check()
+        rec0 = recon(0.0)
+        x0, y0, x1, y1 = check_region(region if region is not None else structured_region(rec0), w)
         frags = []
         for off in offsets:
             check()
-            c = crop_center + float(off)
-            d = float(crop_center) - float(c)          # как axis.center_scan: сдвиг строки на (центр − c)
-            s = nd.shift(base, [0, d], order=3, mode='nearest') if d != 0 else base.copy()
-            rec = fbp.recon_rows(s[None], self.prep.angles, self.pixel_size, angle_mode=angle_mode)[0]
+            rec = rec0 if off == 0 else recon(off)
             frags.append(np.ascontiguousarray(rec[y0:y1, x0:x1], dtype='float32'))
         check()
         metrics = fragment_metrics(frags, metric)
@@ -457,16 +523,25 @@ def build_context(scan: ScanInfo, crop: CropData, pixel_size_mm: float, progress
     return Context(scan, crop, prep, pixel_size_mm, checkpoints, xp=xp)
 
 
-def estimate(r: recipe_mod.Recipe, scan: ScanInfo, ctx: Optional[Context] = None) -> Dict[str, Any]:
-    """pipeline.estimate + оценка времени по замерам превью (секунд на срез, масштабированных на ширину рецепта
-    как w² — FBP и выравнивание растут с площадью среза); без замеров — time: None."""
+def estimate(r: recipe_mod.Recipe, scan: ScanInfo, ctx: Optional[Context] = None,
+             rate: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+    """pipeline.estimate + оценка времени. rate — скорость последних выполненных задач (``JobService.recent_rate``):
+    секунд на срез · ширина² · угол и секунд подготовки; без неё — по замерам превью (секунд на срез,
+    масштабированных на ширину рецепта как w²; превью считает строку с запасом, поэтому оценка завышена);
+    без того и другого — time: None."""
     est = pipeline.estimate(r, scan)
+    n_slices = int(est['volume_shape'][0])
+    w = r.fov.width
+    if rate:
+        sps = rate['recon_s_per_slice_px2_angle'] * w * w * est['n_angles_used']
+        est['time'] = {'s_per_slice': sps, 'n_slices': n_slices, 'recon_s': sps * n_slices,
+                       'prepare_s': rate.get('prepare_s'), 'source': 'jobs', 'jobs': rate.get('jobs')}
+        return est
     sps = ctx.seconds_per_slice() if ctx is not None else None
     if sps is None:
         est['time'] = None
         return est
-    scale = (r.fov.width / float(ctx.roi.width)) ** 2
-    n_slices = int(est['volume_shape'][0])
+    scale = (w / float(ctx.roi.width)) ** 2
     est['time'] = {'s_per_slice': sps * scale, 'n_slices': n_slices, 'recon_s': sps * scale * n_slices,
                    'source': 'preview'}
     return est

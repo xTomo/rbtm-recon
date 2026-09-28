@@ -101,9 +101,15 @@ def align_rows(frames, in_row0: int, out_rows: Tuple[int, int], shift_x: float, 
     строк кропа out_rows = [r0, r1), совпадающих с transform_image на полном кропе высоты crop_height
     (в пределах интерполяции). Требует, чтобы вход покрывал out_rows ± margin_rows (иначе ValueError).
 
-    Два шага, как в transform_image: сдвиг по x (по строкам, результат строки зависит только от неё самой),
-    затем для каждого кадра ``affine_transform`` с матрицей поворота и смещением относительно центра полного
-    кропа ((crop_height−1)/2, (w−1)/2). При alfa = 0 поворот пропускается (тождественен)."""
+    Два шага, как в transform_image: сдвиг по x, затем ``affine_transform`` с матрицей поворота и смещением
+    относительно центра полного кропа ((crop_height−1)/2, (w−1)/2). При alfa = 0 поворот пропускается.
+
+    Оба шага — одним вызовом на весь слой (n, s, w), по оси кадров преобразование тождественно: координаты по ней
+    целые, а сплайн, построенный префильтром и по этой оси, в целых узлах воспроизводит данные точно — результат
+    тот же, что покадрово (до ошибок округления), без n запусков ядер (на GPU покадровый цикл по 400–800 кадрам —
+    ~0,7 с на строку превью). Склеивать кадры в (n·s, w) нельзя: cupyx.spline_filter1d выбирает блок
+    2^ceil(log2(длина оси / 32)) потоков, и при длине оси > 32768 запуск ядра падает (CUDA_ERROR_INVALID_VALUE);
+    в (n, s, w) самая длинная ось — ширина кадра."""
     xp, nd = _backend(xp)
     frames = _as_float(frames, xp)
     if frames.ndim != 3:
@@ -122,24 +128,18 @@ def align_rows(frames, in_row0: int, out_rows: Tuple[int, int], shift_x: float, 
         raise ValueError('вход [{}, {}) не покрывает строки [{}, {}) с запасом {} (нужно [{}, {}))'.format(
             in_row0, in_row0 + s_in, r0, r1, m, need0, need1))
 
-    # Покадрово, как transform_image: склеенный массив (n·s_in, w) нельзя — cupyx.spline_filter1d выбирает блок
-    # 2^ceil(log2(длина оси / 32)) потоков, и при длине оси > 32768 запуск ядра падает (CUDA_ERROR_INVALID_VALUE).
-    shifted = xp.empty((n, s_in, w), dtype=frames.dtype)
-    for i in range(n):
-        shifted[i] = nd.shift(frames[i], [0, shift_x], order=3, mode='nearest')
+    shifted = nd.shift(frames, [0, 0, shift_x], order=3, mode='nearest')
     if alfa == 0:
         return xp.ascontiguousarray(shifted[:, r0 - in_row0:r1 - in_row0, :])
 
     rot = rotation_matrix(alfa)
     c = np.array(_crop_center(crop_height, w))
     offset = rot @ (np.array([r0, 0.0]) - c) + c - np.array([in_row0, 0.0])
-    matrix = xp.asarray(rot)
-    offset = [float(offset[0]), float(offset[1])]
-    out = xp.empty((n, r1 - r0, w), dtype=shifted.dtype)
-    for i in range(n):
-        out[i] = nd.affine_transform(shifted[i], matrix, offset=offset, output_shape=(r1 - r0, w),
-                                     order=3, mode='nearest')
-    return out
+    matrix = np.eye(3)
+    matrix[1:, 1:] = rot
+    out = nd.affine_transform(shifted, xp.asarray(matrix), offset=[0.0, float(offset[0]), float(offset[1])],
+                              output_shape=(n, r1 - r0, w), order=3, mode='nearest')
+    return out.astype(frames.dtype, copy=False)
 
 
 # --- авто-ось ----------------------------------------------------------------------------------------------
@@ -195,7 +195,7 @@ def auto_axis(img0: np.ndarray, img180: np.ndarray, roi: ROI,
 
 # --- перебор центра ----------------------------------------------------------------------------------------
 
-METRICS = ('entropy', 'tv')
+METRICS = ('grad', 'entropy', 'tv')
 
 
 def _circle_mask(img: np.ndarray) -> np.ndarray:
@@ -206,10 +206,34 @@ def _circle_mask(img: np.ndarray) -> np.ndarray:
     return (yy - cy) ** 2 + (xx - cx) ** 2 <= r * r
 
 
-def center_metric(slice_img: np.ndarray, kind: str = 'entropy',
+def fourier_shift_rows(a, d: float, xp=None):
+    """Сдвиг вдоль последней оси на d пикселей в частотной области: содержимое уезжает вправо при d > 0, как
+    ``ndimage.shift(a, [..., d])``. В отличие от сплайна, не сглаживает шум по-разному при разных дробных d: при
+    переборе центра сплайн-сдвиг на полпикселя делал срез глаже, и метрики (и глаз) выбирали полуцелые центры
+    (на реальном скане — ложный минимум в 1,5 px от оси). Края продолжаются крайними значениями (дополнение до
+    степени двойки ≥ 2w поровну с обеих сторон), так что сдвиг на несколько пикселей не заворачивает строку."""
+    from .gpu import get_xp  # noqa: WPS433
+    xp = xp or get_xp()
+    a = xp.asarray(a, dtype=xp.float32)
+    if d == 0:
+        return a.copy()
+    w = a.shape[-1]
+    size = 1 << int(math.ceil(math.log2(2 * w)))
+    left = (size - w) // 2
+    pad = [(0, 0)] * (a.ndim - 1) + [(left, size - w - left)]
+    f = xp.fft.rfft(xp.pad(a, pad, mode='edge'), axis=-1)
+    k = xp.fft.rfftfreq(size)
+    f *= xp.exp(-2j * math.pi * float(d) * k)
+    return xp.fft.irfft(f, n=size, axis=-1)[..., left:left + w].astype(xp.float32)
+
+
+def center_metric(slice_img: np.ndarray, kind: str = 'grad',
                   value_range: Optional[Tuple[float, float]] = None) -> float:
     """Метрика качества среза внутри вписанного круга, меньше = лучше.
 
+    'grad' — минус средняя энергия градиента среза, сглаженного гауссом σ=1,5 (резче края — больше энергия):
+    сглаживание убирает вклад шума, иначе на однородном шумном образце метрику определяет шум, а не геометрия.
+    Фрагмент должен содержать края (внутри однородного образца сведений о центре нет).
     'entropy' — энтропия гистограммы (256 бинов) значений в диапазоне value_range (по умолчанию — процентили
     0,1…99,9 самого среза; значения за пределами прижимаются к краям). При переборе центра диапазон должен быть
     общим для всех срезов (см. center_scan), иначе сравнение нечестно.
@@ -217,6 +241,10 @@ def center_metric(slice_img: np.ndarray, kind: str = 'entropy',
     минимальна при верном центре (проверено на синтетике) — возвращается как есть."""
     img = np.asarray(slice_img, dtype='float64')
     mask = _circle_mask(img)
+    if kind == 'grad':
+        import scipy.ndimage as ndi  # noqa: WPS433
+        gy, gx = np.gradient(ndi.gaussian_filter(img, 1.5))
+        return -float((gx * gx + gy * gy)[mask].mean())
     if kind == 'entropy':
         v = img[mask]
         lo, hi = value_range if value_range is not None else np.percentile(v, [0.1, 99.9])
@@ -233,15 +261,14 @@ def center_metric(slice_img: np.ndarray, kind: str = 'entropy',
 
 
 def center_scan(sino_row: np.ndarray, angles_deg: np.ndarray, centers: Sequence[float], crop_center: float,
-                pixel_size: float, recon_fn: Callable, metric: str = 'entropy'
+                pixel_size: float, recon_fn: Callable, metric: str = 'grad'
                 ) -> Tuple[List[np.ndarray], np.ndarray]:
     """Перебор центра для одной строки. sino_row (n, w) — строка, уже выровненная по текущей оси (ось в
-    crop_center = (w−1)/2); для центра c строка сдвигается на (crop_center − c) по x и восстанавливается
+    crop_center = (w−1)/2); для центра c строка сдвигается на (crop_center − c) по x (``fourier_shift_rows`` —
+    без разного сглаживания шума при разных дробных сдвигах) и восстанавливается
     recon_fn(sino, angles, pixel_size) → (w, w). Возвращает (срезы, метрики).
 
     Для 'entropy' диапазон гистограммы общий для всех срезов (процентили 0,1…99,9 объединённых значений)."""
-    import scipy.ndimage as ndi  # noqa: WPS433
-
     from .gpu import to_numpy  # noqa: WPS433
 
     if metric not in METRICS:
@@ -250,7 +277,7 @@ def center_scan(sino_row: np.ndarray, angles_deg: np.ndarray, centers: Sequence[
     slices = []
     for c in centers:
         d = float(crop_center) - float(c)
-        s = ndi.shift(sino, [0, d], order=3, mode='nearest') if d != 0 else sino.copy()
+        s = np.asarray(fourier_shift_rows(sino, d, np))
         slices.append(np.asarray(to_numpy(recon_fn(s, angles_deg, pixel_size)), dtype='float32'))
     value_range = None
     if metric == 'entropy' and slices:

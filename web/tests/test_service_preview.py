@@ -380,3 +380,59 @@ def test_close_forgets_channels_and_releases(loaded):
     client.delete('/sessions/' + sid, headers=HEADERS)
     assert mgr.arbiter.latest((sid, 'slice')) is None and ctx._band is None
     assert client.get(url(sid, 'slice'), headers=HEADERS).status_code == 404
+
+
+# --- быстрый путь смены центра, фрагмент с краями -------------------------------------------------------------
+
+def _corr(a, b):
+    a = np.asarray(a, 'float64').ravel() - np.mean(a)
+    b = np.asarray(b, 'float64').ravel() - np.mean(b)
+    return float(a @ b / np.sqrt((a @ a) * (b @ b)))
+
+
+def test_center_change_uses_fast_shift_close_to_exact(loaded):
+    """Смена только центра: готовая строка после колец сдвигается в частотной области (без выравнивания и колец
+    заново) — срез почти тот же, что полным путём (exact=1)."""
+    app, client, cfg, ss, sid, ctx = loaded
+    row = 20
+    c = row_center(ss, row)
+    tilt = ss.tilt_deg
+    first = client.get(url(sid, 'slice', row=row, center=c, tilt=tilt, max_px=4000), headers=HEADERS)
+    assert decode(first)[1]['exact'] is True
+    for dc in (0.4, -1.3):
+        fast = client.get(url(sid, 'slice', row=row, center=c + dc, tilt=tilt, max_px=4000), headers=HEADERS)
+        img_fast, meta = decode(fast)
+        assert meta['exact'] is False and 'fast_shift_px' in meta['timings']
+        exact = client.get(url(sid, 'slice', row=row, center=c + dc, tilt=tilt, max_px=4000, exact=1),
+                           headers=HEADERS)
+        img_exact, meta_e = decode(exact)
+        assert meta_e['exact'] is True
+        assert _corr(img_fast, img_exact) > 0.999
+    # другой наклон — полный путь
+    other = client.get(url(sid, 'slice', row=row, center=c, tilt=tilt + 0.5, max_px=4000), headers=HEADERS)
+    assert decode(other)[1]['exact'] is True
+
+
+def test_structured_region_finds_edges():
+    img = np.zeros((600, 600), 'float32')
+    img[400:520, 380:470] = 1.0                   # единственный объект с краями — справа внизу
+    x0, y0, x1, y1 = preview.structured_region(img, 128)
+    assert x1 - x0 == 128 and y1 - y0 == 128
+    assert x0 < 470 and x1 > 380 and y0 < 520 and y1 > 400       # фрагмент захватывает края объекта
+
+
+def test_estimate_uses_recent_jobs_rate(loaded):
+    """С выполненными задачами оценка берётся по их фактической скорости (на срез · ширина² · угол)."""
+    app, client, _, ss, sid, ctx = loaded
+    r = make_recipe(ctx.scan, ctx.roi, true_axis(ss), ctx.pixel_size)
+    jobs = app.extensions['recon'].jobs
+    # задача: 64 среза ширины 100 по 200 углам за 32 с → 32 / (64·100²·200) с на срез·px²·угол
+    jobs.coll.insert_one({'_id': 'j1', 'status': 'done', 'finished': 1,
+                          'recipe': {'fov': {'x0': 0, 'x1': 100, 'y0': 0, 'y1': 64}},
+                          'result': {'volume': {'shape': [64, 100, 100]},
+                                     'timings': {'recon_s': 32.0, 'prepare_s': 5.0, 'n_angles': 200}}})
+    t = client.post(url(sid, 'estimate'), json={'recipe': recipe_mod.to_dict(r)}, headers=HEADERS).get_json()['time']
+    assert t['source'] == 'jobs' and t['prepare_s'] == 5.0
+    unit = 32.0 / (64 * 100 * 100 * 200)
+    assert t['s_per_slice'] == pytest.approx(unit * 68 * 68 * 60)            # ширина 68, 60 углов (first_180)
+    assert t['recon_s'] == pytest.approx(t['s_per_slice'] * 32)

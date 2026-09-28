@@ -39,7 +39,8 @@
 ``first_180``); ``max_px`` — по умолчанию ``cfg.preview_max_px``.
 
 Подробности:
-- ``axis/scan``: по умолчанию step = 1 px, n = 9, metric = ``entropy``, region — центральный квадрат 256 px;
+- ``axis/scan``: по умолчанию step = 1 px, n = 9, metric = ``grad``, region — квадрат 256 px с наибольшей
+  энергией краёв (``preview.structured_region``); кандидаты сдвигаются в частотной области;
   принимает и ``rings``, ``angles``, ``max_px``. Метрика считается по показываемым фрагментам (см. ``preview``).
   В ``axis/diff`` центр — на строке ``row`` (по умолчанию ``roi.preview_row``).
 - ``axis/tilt`` делает найденную ось текущей осью сессии (как ``axis/auto``); ``slice`` и прочие с явными
@@ -515,7 +516,7 @@ def slice_(sid):
     def fn(ctx, check):
         row, ax = _axis_args(ctx, a, check)
         return ctx.slice(row, ax, _str(a, 'rings', preview.DEFAULT_RINGS), _str(a, 'angles', preview.DEFAULT_ANGLES),
-                         _region(a), check)
+                         _region(a), check, exact=a.get('exact', '') in ('1', 'true'))
 
     img, meta = _compute(sid, 'slice', _seq(a), fn)
     return binary.array_response(img, meta=meta, max_px=_max_px(a))
@@ -533,7 +534,7 @@ def axis_scan(sid):
     def fn(ctx, check):
         row, ax = _axis_args(ctx, b, check)
         return ctx.center_scan(row, ax, step=arg_float(b, 'step', 1.0), n=arg_int(b, 'n', 9, 1, preview.SCAN_MAX_N),
-                               metric=_str(b, 'metric', 'entropy'), region=_region(b),
+                               metric=_str(b, 'metric', 'grad'), region=_region(b),
                                preset=_str(b, 'rings', preview.DEFAULT_RINGS),
                                angle_mode=_str(b, 'angles', preview.DEFAULT_ANGLES), check=check)
 
@@ -603,4 +604,5 @@ def estimate(sid):
         raise ValueError('некорректный рецепт: {!r}'.format(exc)) from None
     recipe_mod.validate(r, s.scan.height, s.scan.width)
     ctx = s.ctx() if s.state == 'ready' else None
-    return jsonify(preview.estimate(r, s.scan, ctx))
+    rate = current_app.extensions['recon'].jobs.recent_rate()
+    return jsonify(preview.estimate(r, s.scan, ctx, rate))
