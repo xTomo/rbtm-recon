@@ -10,9 +10,10 @@
 - [Компоненты](#компоненты)
 - [Быстрый старт](#быстрый-старт)
 - [Настройка](#настройка)
+- [Запуск после перезагрузки](#запуск-после-перезагрузки)
 - [Использование](#использование)
 - [Разработка](#разработка)
-- [Известные проблемы и ограничения](#известные-проблемы-и-ограничения)
+- [tomotools4 — поддержка AdvancedExperiment](#tomotools4--поддержка-advancedexperiment)
 
 ---
 
@@ -73,37 +74,59 @@ rbtmrecon (tomo_worker.py)
 |---|---|
 | `recon/tomo_worker.py` | Основной цикл: берёт задание из MongoDB, запускает реконструкцию |
 | `recon/tomo_queue.py` | Работа с MongoDB |
-| `recon/tomotools2.py` | Инструменты для стандартного эксперимента (legacy) |
+| `recon/tomotools2.py` | Инструменты для стандартного эксперимента (legacy, нужен `tomo_worker.py` и старому ноутбуку) |
 | `recon/tomotools4.py` | Расширенные инструменты: поддержка AdvancedExperiment, коррекция позиционирования, нормировка с дрейфом |
-| `recon/reconstructor4.py` | Ноутбук-шаблон реконструкции v4 (AdvancedExperiment + Standard, jupytext-формат) |
-| `recon/reconstructor-axis_search3b.py` | Устаревший ноутбук-шаблон (только Standard) |
+| `recon/hdf5_v2.py` | Читатель HDF5 v2 (timeline + mapping), автодетекция формата |
+| `recon/reconstructor4.py` | **Активный** ноутбук-шаблон реконструкции v4 (AdvancedExperiment + Standard, jupytext-формат) |
+| `recon/reconstructor-axis_search3b.py` | Устаревший ноутбук-шаблон (только Standard), оставлен для ручных запусков |
 | `recon/hdf2vtk.py` | Конвертация HDF5 → VTK (ручной запуск) |
 | `recon/tomo.ini` | Пример конфигурации одного эксперимента |
 | `environment.yml` | conda-окружение `xrecon` (Python 3.11 + CUDA 12) |
 
-**Алгоритм реконструкции (один объект, `reconstructor4.py`):**
+**Алгоритм реконструкции (один объект).** Воркер запускает ноутбук
+`NOTEBOOK_NAME` из [`tomo_worker.py`](rbtmrecon/recon/tomo_worker.py) — сейчас
+это `reconstructor4.py` (`reconstructor-axis_search3b.py` оставлен только для
+ручных запусков в JupyterLab).
 
 ```
 1. Получить метаданные эксперимента из rbtmstorage
-2. Скопировать скрипты в /storage/<experiment_id>/
-3. Скачать HDF5-файл в /fast/<experiment_id>/
+2. Скопировать скрипты в /storage/<experiment_id>/ (относительно каталога воркера)
+3. Получить HDF5-файл в /fast/<experiment_id>/
+   ├── локальная копия из /exp_src/<id>/before_processing/<id>.h5
+   └── если её нет — скачать с rbtmstorage по HTTP
+   (после копирования/скачивания размер сверяется с источником)
 4. jupytext: .py → .ipynb
-5. nbconvert: выполнить ноутбук (CUDA)
+5. nbconvert --execute --allow-errors: выполнить ноутбук (CUDA)
    ├── Автодетекция формата: is_advanced_experiment() → advanced / standard
    ├── [Advanced] load_tomo_data_advanced() — раздельная загрузка empty/data/data_check
    ├── [Advanced] analyze_source_drift() — визуализация дрейфа трубки
+   ├── [Advanced] measure_repositioning_shifts() — кросс-корреляция data vs data_check
    ├── Нормировать проекции
    │   ├── [Advanced] normalize_projections_with_timeline() — с интерполяцией empty
    │   └── [Standard] normalize_projections() — единый empty
-   ├── [Advanced] measure_repositioning_shifts() — кросс-корреляция data vs data_check
-   ├── [Advanced] apply_repositioning_correction() — sub-pixel коррекция до нормировки
+   ├── [Advanced] apply_repositioning_correction() — sub-pixel коррекция
+   │                ПОСЛЕ нормировки, накопительным сдвигом cumsum(shifts[:m])
    ├── Найти коррекцию оси вращения (метод Пауэлла)
    ├── Применить коррекцию, построить синограмму
    ├── Удалить кольцевые артефакты
    └── FBP реконструкция (astra-toolbox)
 6. nbconvert: .ipynb → HTML-отчёт
-7. Установить статус 'done' / 'error' в MongoDB
+7. Установить статус в MongoDB:
+   ├── ни одной упавшей ячейки            → 'done'
+   └── есть output с output_type=='error' → 'error: <ename>: <evalue>'
 ```
+
+> Ноутбук выполняется с `--allow-errors`, поэтому HTML-отчёт создаётся даже
+> при падении ячейки — по нему видно, на каком шаге всё сломалось. Статус при
+> этом всё равно `error: …`, а не `done`.
+
+**Прерванный эксперимент.** `rbtm-storage` пишет группу `mapping` только при
+`finalize`. Если эксперимент остановлен или упал, `mapping` в HDF5 нет —
+читатель [`hdf5_v2.py`](rbtmrecon/recon/hdf5_v2.py) в этом случае
+восстанавливает индексы кадров по `timeline/modes`. Пустые группы
+(нет `dark`, нет `data_check`) тоже допустимы: для `dark` используется нулевой
+тёмный ток с предупреждением, `data_check` даёт пустые массивы и коррекция
+позиционирования просто не выполняется.
 
 ### `database` — MongoDB 4.0
 
@@ -213,8 +236,48 @@ docker-compose build --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g)
 
 ### Очередь MongoDB
 
-MongoDB хранит данные в `./data/db` (относительно директории запуска `docker-compose`).  
-Директория создаётся автоматически.
+MongoDB хранит данные в `./data/db` — путь **относительный**, он раскрывается от
+каталога, из которого запущен `docker-compose` (обычно `rbtm-recon/web`).
+Директория создаётся автоматически, но при запуске из другого каталога Mongo
+поднимется с пустой базой и вся история очереди «исчезнет». Запускайте стек
+только из `rbtm-recon/web` (или переведите том на абсолютный путь).
+
+---
+
+## Запуск после перезагрузки
+
+Все сервисы стека (кроме одноразового `test`) объявлены с
+`restart: unless-stopped`, поэтому после перезагрузки хоста Docker поднимает их
+сам. Порядок внутри стека: `database` → healthcheck (`mongo --eval
+db.adminCommand('ping')`) → `web` (`depends_on: condition: service_healthy`).
+`reconstructor` от Mongo формально не зависит, но и не падает, если она ещё не
+готова: главный цикл воркера ловит любое исключение итерации (в том числе
+`ServerSelectionTimeoutError`), пишет его в лог и повторяет попытку через 10 с.
+
+**Внешняя сеть `rbtmstorage_default` — главная причина, по которой стек не
+поднимается.** Она создаётся стеком `rbtm-storage` и объявлена здесь как
+`external: true`. Если на storage выполнили `docker compose down`, сеть
+удаляется, и контейнеры `web`/`reconstructor` при старте падают с
+`network rbtmstorage_default not found` — restart-политика будет их
+перезапускать, но безуспешно, пока сеть не появится.
+
+Правильный порядок запуска:
+
+```bash
+# 1. Сначала storage — он создаёт сеть rbtmstorage_default
+cd rbtm-storage && docker-compose up -d
+
+# 2. Затем этот стек
+cd ../rbtm-recon/web && docker-compose up -d
+
+# Проверка
+docker network ls | grep rbtmstorage_default
+docker-compose ps            # database должна быть (healthy)
+docker-compose logs -f reconstructor
+```
+
+На storage вместо `docker compose down` лучше использовать
+`docker compose stop` / `restart` — тогда сеть не удаляется.
 
 ---
 
@@ -235,9 +298,14 @@ MongoDB хранит данные в `./data/db` (относительно ди�
 | `waiting` | 🟡 жёлтый | Ждёт в очереди |
 | `copying` | 🟡 жёлтый | Копирование файлов |
 | `reconstructing` | 🟡 жёлтый | Идёт реконструкция |
-| `done` | 🟢 зелёный | Завершено успешно |
-| `error: ...` | 🔴 красный | Ошибка (текст в статусе) |
+| `done` | 🟢 зелёный | Завершено успешно, ни одна ячейка ноутбука не упала |
+| `error: <ename>: <evalue>` | 🔴 красный | Упала ячейка ноутбука; HTML-отчёт всё равно создан |
+| `error: ...` | 🔴 красный | Ошибка самого воркера (копирование, jupytext, nbconvert) |
 | `canceled` | 🔴 красный | Отменено |
+
+Задания берутся из очереди в порядке FIFO (сортировка по `_id`). Запись
+считается актуальной, только если это самый свежий документ для своего
+`obj_id`.
 
 ### Файлы результатов
 
@@ -245,7 +313,7 @@ MongoDB хранит данные в `./data/db` (относительно ди�
 
 | Файл | Описание |
 |---|---|
-| `reconstructor-v*.html` | HTML-отчёт выполненного ноутбука |
+| `reconstructor*.html` | HTML-отчёт выполненного ноутбука |
 | `tomo_rec.h5` | Реконструированный объём (HDF5) |
 | `amira.raw` + `tomo.hx` | Объём в формате Amira |
 | `tomo.html` | Предпросмотр (если есть) |
@@ -261,6 +329,21 @@ MongoDB хранит данные в `./data/db` (относительно ди�
 |---|---|---|
 | `xrecon` | `rbtmrecon` | Python 3.11, astra-toolbox, CuPy, CIL, tomopy, Jupyter |
 | `xweb` | `rbtmwebrecon` | Python 3.11, Flask, gunicorn, pymongo |
+
+### Тесты
+
+Тесты лежат в `web/tests` и не требуют ни GPU, ни MongoDB: `conftest.py`
+подставляет заглушки `cupy`, `cupyx.scipy.ndimage`, `tomo.recon.astra_utils`,
+`tqdm.notebook` и `pylab` поверх numpy/scipy/matplotlib, а очередь тестируется
+на `mongomock`.
+
+```bash
+pip install -r web/tests/requirements-test.txt
+python -m pytest web/tests -q
+```
+
+Зависимости зафиксированы в [`web/tests/requirements-test.txt`](tests/requirements-test.txt):
+`pytest numpy scipy scikit-image h5py mongomock tqdm matplotlib requests nbformat`.
 
 ### Отладка ноутбука реконструкции
 
@@ -319,7 +402,7 @@ python tomo_worker.py
 | `load_tomo_data_advanced(data_file, tmp_dir)` | Загружает `AdvancedTomoData` (dark, initial/periodic empty, data, data_check) |
 | `analyze_source_drift(adv_data)` | График дрейфа интенсивности рентгеновской трубки по сериям empty |
 | `measure_repositioning_shifts(adv_data, ...)` | Кросс-корреляция data vs data_check для измерения сдвига позиционирования |
-| `apply_repositioning_correction(data_images, ...)` | Sub-pixel коррекция кадров in-place (ДО нормировки) |
+| `apply_repositioning_correction(data_images, ...)` | Sub-pixel коррекция кадров in-place (ПОСЛЕ нормировки, накопительным сдвигом) |
 | `analyze_repositioning_accuracy(adv_data, ...)` | Графики ошибки позиционирования по checkpoints |
 | `normalize_projections_with_timeline(data_images_crop, adv_data, ...)` | Нормировка с линейной интерполяцией empty между checkpoint-ами |
 
@@ -329,6 +412,7 @@ python tomo_worker.py
 AdvancedTomoData(
     dark_image,               # медиана dark кадров, shape (H, W)
     initial_empty,            # медиана начальной empty серии, shape (H, W)
+    initial_empty_fnumber,    # frame_number первого кадра начальной серии
     periodic_empties,         # list[np.ndarray] — медианы periodic серий
     periodic_empty_fnumbers,  # list[int] — frame_number первого кадра каждой periodic серии
     data_images,              # dark-subtracted проекции, shape (N, H, W)
@@ -353,8 +437,24 @@ data_check_numbers      = [80, 141, ...]
 
 Сегмент 0 (data seg0): data_number < 70  → референс, не корректируется
 Сегмент 1 (data seg1): data_number > 70  → смещён на shifts[0]
-Сегмент 2 (data seg2): data_number > 131 → смещён на shifts[1]
+Сегмент 2 (data seg2): data_number > 131 → смещён на shifts[0] + shifts[1]
 ```
+
+**Сдвиги накопительные.** `shifts[k]` измеряется сравнением `data_check[k]`
+(снят сразу после k-й вставки) с ПОСЛЕДНИМ data-кадром сегмента k при том же
+угле, то есть характеризует смещение сегмента k+1 *относительно сегмента k*,
+а не относительно референса. Поэтому к сегменту m применяется
+`cumsum(shifts[:m])`.
+
+**Знак.** `measure_repositioning_shifts` возвращает результат
+`phase_cross_correlation(reference=data, moving=data_check)` — такой сдвиг,
+что `ndi.shift(data_check, shift) ≈ data`. Кадры сегмента сняты в той же
+позиции, что и `data_check`, поэтому `apply_repositioning_correction`
+применяет тот же сдвиг без смены знака.
+
+**Порядок.** Коррекция позиционирования применяется **ПОСЛЕ** нормировки,
+к нормированным кадрам `data_images_crop` (иначе сдвигались бы «сырые»
+отсчёты вместе с полем засветки).
 
 ### Отладка measure_repositioning_shifts
 

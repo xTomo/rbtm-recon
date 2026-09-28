@@ -6,11 +6,12 @@ import pyvista as pv
 
 
 def save_vtk_file(file_name, data: np.ndarray):
-    grid = pv.UniformGrid()
+    # pv.UniformGrid / point_arrays удалены в pyvista >= 0.37
+    grid = pv.ImageData()
     grid.dimensions = data.shape
     grid.origin = - np.asarray(data.shape) // 2
     grid.spacing = (1, 1, 1)
-    grid.point_arrays["values"] = data.flatten(order='F')
+    grid.point_data["values"] = data.flatten(order='F')
     grid.save(file_name)
 
 

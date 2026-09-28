@@ -1,0 +1,18 @@
+# Зависимости для запуска web/tests (python -m pytest web/tests -q).
+#
+# Тесты не требуют GPU/MongoDB/Jupyter: conftest.py подставляет заглушки
+# cupy, cupyx.scipy.ndimage, tomo.recon.astra_utils, tqdm.notebook и pylab
+# поверх numpy/scipy/matplotlib, а очередь тестируется на mongomock.
+#
+# nbformat — реальная (нестабируемая) зависимость: test_tomo_worker.py
+# импортирует tomo_worker.py, который импортирует nbformat на верхнем уровне.
+pytest
+numpy
+scipy
+scikit-image
+h5py
+mongomock
+tqdm
+matplotlib
+requests
+nbformat

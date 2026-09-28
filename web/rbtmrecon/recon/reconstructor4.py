@@ -65,7 +65,7 @@ from tomotools4 import (
     preview_axis_correction, create_axis_search_widget,
     disable_output_scrolling,
     # Volume utilities
-    save_amira,
+    save_amira, amira_raw_name,
 )
 
 import ipywidgets
@@ -199,8 +199,11 @@ shifts_x = np.array([])
 
 if adv_data is not None:
     print("Измерение сдвигов позиционирования...")
+    # debug=False: автозапуск через nbconvert, подробная диагностика с
+    # картинками на каждый checkpoint раздувает HTML-отчёт. Для разбора
+    # проблем в JupyterLab поставьте debug=True.
     checkpoint_angles, shifts_y, shifts_x = measure_repositioning_shifts(
-        adv_data, x_min, x_max, y_min, y_max, debug=True)
+        adv_data, x_min, x_max, y_min, y_max, debug=False)
 
     print("\nРезультаты:")
     for k in range(len(shifts_y)):
@@ -265,23 +268,38 @@ recon_config['axis_corr'] = {'shift_x': shift_x, 'alfa': alfa}
 sinogram_fixed = apply_axis_correction(data_images_crop, shift_x, alfa)
 
 preview_axis_correction(sinogram_fixed, data_angles, remove_rings=True)
-manual_axis_search = False
 
 # %% [markdown]
 # # Ручной поиск смещения и поворота
 
 # %%
-manual_axis_search = True
+# По умолчанию False: при автозапуске через nbconvert виджет никто не трогает,
+# и повторное применение той же коррекции только тратит время GPU.
+# Для ручной работы в JupyterLab поставьте True, подберите значения виджетом
+# и выполните следующую ячейку.
+manual_axis_search = False
+
 ui, shift_text, angle_text = create_axis_search_widget(
     sinogram_fixed, data_images_crop, data_angles, shift_x, alfa
 )
+# display обычно доступен в Jupyter без импорта (ipykernel инжектит его в
+# user namespace), но явный импорт не помешает и не сломается в ядре —
+# защищает от NameError, если ячейка когда-нибудь выполнится вне ipykernel.
+from IPython.display import display
 display(ui)
 
 # %%
-if manual_axis_search:
-    shift_x, alfa = shift_text.value, angle_text.value
+new_shift_x, new_alfa = float(shift_text.value), float(angle_text.value)
+values_changed = (abs(new_shift_x - shift_x) > 1e-9) or (abs(new_alfa - alfa) > 1e-9)
+
+if manual_axis_search and values_changed:
+    shift_x, alfa = new_shift_x, new_alfa
     sinogram_fixed = apply_axis_correction(data_images_crop, shift_x, alfa)
     preview_axis_correction(sinogram_fixed, data_angles)
+else:
+    print(f"Ручная коррекция оси не применялась "
+          f"(manual_axis_search={manual_axis_search}, значения изменены: {values_changed}). "
+          f"Используем shift_x={shift_x:.4f}, alfa={alfa:.4f}")
 
 recon_config['axis_corr'] = {'shift_x': shift_x, 'alfa': alfa}
 # %xdel data_images_crop
@@ -297,13 +315,13 @@ preview_axis_correction(sinogram_fixed, data_angles, remove_rings=False)
 # # Реконструкция
 
 # %%
-raw_file_name = (f"{tomo_info['specimen']}"
-                 f".{sinogram_fixed.shape[0]}_{sinogram_fixed.shape[2]}_{sinogram_fixed.shape[2]}"
-                 f".1.raw")
+rec_shape = (sinogram_fixed.shape[0], sinogram_fixed.shape[2], sinogram_fixed.shape[2])
+# Имя должно совпадать с тем, на которое сошлётся save_amira(..., reshape=1)
+raw_file_name = amira_raw_name(tomo_info['specimen'], rec_shape, 1)
 rec_vol, _ = persistent_array(
     os.path.join(tmp_dir, raw_file_name),
     dtype=np.float32, force_create=False,
-    shape=(sinogram_fixed.shape[0], sinogram_fixed.shape[2], sinogram_fixed.shape[2]),
+    shape=rec_shape,
 )
 
 # %%

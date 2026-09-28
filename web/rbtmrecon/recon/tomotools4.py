@@ -21,7 +21,6 @@ import logging
 import os
 import shutil
 import time
-from urllib.request import urlretrieve
 
 import h5py
 import numpy as np
@@ -51,13 +50,53 @@ def mkdir_p(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+DOWNLOAD_ATTEMPTS = 5
+DOWNLOAD_TIMEOUT = (10, 600)  # (connect, read) секунд
+
+
+def _copy_local_experiment(src_file: str, data_file: str) -> None:
+    """Копирует файл эксперимента и сверяет размер с источником."""
+    logging.info('Copying local file: {}'.format(src_file))
+    shutil.copy(src_file, data_file)
+    expected = os.path.getsize(src_file)
+    actual = os.path.getsize(data_file)
+    if actual != expected:
+        os.remove(data_file)
+        raise IOError('Incomplete copy of {}: {} of {} bytes'.format(
+            src_file, actual, expected))
+
+
+def _download_experiment(hdf5_url: str, data_file: str) -> None:
+    """Скачивает файл эксперимента потоком и сверяет размер с Content-Length."""
+    logging.info('Downloading file: {}'.format(hdf5_url))
+    with requests.get(hdf5_url, stream=True, timeout=DOWNLOAD_TIMEOUT) as resp:
+        resp.raise_for_status()
+        expected = resp.headers.get('Content-Length')
+        with open(data_file, 'wb') as f:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+
+    actual = os.path.getsize(data_file)
+    if expected is not None and actual != int(expected):
+        os.remove(data_file)
+        raise IOError('Incomplete download of {}: {} of {} bytes'.format(
+            hdf5_url, actual, int(expected)))
+    logging.info('Successfully downloaded: {} ({} bytes)'.format(hdf5_url, actual))
+
+
 def get_experiment_hdf5(experiment_id: str, output_dir: str,
                         experiment_files_dir: str | None = None,
                         storage_server: str = STORAGE_SERVER) -> str:
     """Возвращает путь к локальному HDF5-файлу эксперимента.
 
     Если файл уже существует и читается — возвращает его.
-    Иначе копирует из ``experiment_files_dir`` или скачивает с сервера.
+    Иначе копирует из ``experiment_files_dir``; если локального файла там нет
+    (или каталог не задан) — скачивает с сервера хранилища по HTTP.
+
+    После копирования/скачивания размер сверяется с источником
+    (os.path.getsize / Content-Length); при расхождении файл удаляется и
+    попытка повторяется.
     """
     data_file = os.path.join(output_dir, experiment_id + '.h5')
     logging.info('Output experiment HDF5 file: {}'.format(data_file))
@@ -69,40 +108,39 @@ def get_experiment_hdf5(experiment_id: str, output_dir: str,
         except OSError:
             logging.info('Deleting damaged file: {}'.format(data_file))
             os.remove(data_file)
-        except Exception as e:
-            raise e
         else:
             logging.info('File exists. Use local copy')
             return data_file
 
-    if experiment_files_dir is None:
-        hdf5_url = storage_server + 'storage/experiments/{}.h5'.format(experiment_id)
-        logging.info('Downloading file: {}'.format(hdf5_url))
-        remaining_download_tries = 5
-        last_exception = None
-        while remaining_download_tries > 0:
-            try:
-                urlretrieve(hdf5_url, filename=data_file)
-                logging.info('Successfully downloaded: {}'.format(hdf5_url))
-                time.sleep(0.1)
-            except Exception as e:
-                last_exception = e
-                logging.warning("error downloading {} on trial no {}: {}".format(
-                    hdf5_url, 6 - remaining_download_tries, e))
-                remaining_download_tries -= 1
-                continue
-            else:
-                break
-        else:
-            raise RuntimeError(
-                'Failed to download {} after 5 attempts'.format(hdf5_url)
-            ) from last_exception
-    else:
-        src_file = os.path.join(experiment_files_dir, experiment_id + '.h5')
-        logging.info('Copying local file: {}'.format(src_file))
-        shutil.copy(src_file, data_file)
+    src_file = (os.path.join(experiment_files_dir, experiment_id + '.h5')
+                if experiment_files_dir is not None else None)
+    use_local = src_file is not None and os.path.isfile(src_file)
+    if src_file is not None and not use_local:
+        logging.warning('Local file {} not found, falling back to HTTP'.format(src_file))
 
-    return data_file
+    hdf5_url = storage_server + 'storage/experiments/{}.h5'.format(experiment_id)
+    last_exception = None
+
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        try:
+            if use_local:
+                _copy_local_experiment(src_file, data_file)
+            else:
+                _download_experiment(hdf5_url, data_file)
+        except Exception as e:
+            last_exception = e
+            logging.warning('error fetching {} on trial no {}: {}'.format(
+                src_file if use_local else hdf5_url, attempt, e))
+            if os.path.exists(data_file):
+                os.remove(data_file)
+            time.sleep(0.1)
+        else:
+            return data_file
+
+    raise RuntimeError(
+        'Failed to fetch experiment {} after {} attempts'.format(
+            experiment_id, DOWNLOAD_ATTEMPTS)
+    ) from last_exception
 
 
 def get_tomoobject_info(experiment_id: str, storage_server: str = STORAGE_SERVER) -> dict:
@@ -258,6 +296,8 @@ class AdvancedTomoData:
     ----
     dark_image               : медиана dark кадров минус нуль, shape (H, W)
     initial_empty            : медиана начальной empty серии (dark-subtracted), shape (H, W)
+    initial_empty_fnumber    : глобальный frame_number первого кадра начальной
+                               empty серии (нужен для интерполяции empty)
     periodic_empties         : list из K np.ndarray shape (H, W) — медианы periodic серий
     periodic_empty_fnumbers  : list из K int — глобальный frame_number первого кадра
                                каждой periodic серии
@@ -280,6 +320,7 @@ class AdvancedTomoData:
     data_check_angles:        np.ndarray
     data_check_numbers:       np.ndarray
     series_length:            int
+    initial_empty_fnumber:    int = 0
 
 
 def load_tomo_data_advanced(data_file: str, tmp_dir: str) -> AdvancedTomoData:
@@ -329,6 +370,7 @@ def load_tomo_data_advanced(data_file: str, tmp_dir: str) -> AdvancedTomoData:
     # Начальная серия
     initial_empty_frames = empty_images[:series_length]
     initial_empty = np.median(initial_empty_frames, axis=0).astype('float32')
+    initial_empty_fnumber = int(empty_fnums[0]) if len(empty_fnums) else 0
 
     # Периодические серии
     periodic_empties = []
@@ -368,6 +410,7 @@ def load_tomo_data_advanced(data_file: str, tmp_dir: str) -> AdvancedTomoData:
     return AdvancedTomoData(
         dark_image=dark_image,
         initial_empty=initial_empty,
+        initial_empty_fnumber=initial_empty_fnumber,
         periodic_empties=periodic_empties,
         periodic_empty_fnumbers=periodic_empty_fnumbers,
         data_images=data_images,
@@ -411,10 +454,13 @@ def _read_series_length_from_hdf5(data_file: str, total_empty_count: int) -> int
     except Exception as e:
         logging.warning('Fallback series_length estimation failed: {}'.format(e))
 
-    # Последний fallback: всё делим поровну
-    fallback = max(1, total_empty_count // 2)
-    logging.warning('Using fallback series_length = {}'.format(fallback))
-    return fallback
+    # Больше догадок нет: деление empty пополам давало произвольное разбиение
+    # на initial/periodic серии и молча портило нормировку и коррекцию сдвигов.
+    raise ValueError(
+        'Не удалось определить series_length для {}: нет ни атрибута '
+        'exp_info["experiment parameters"]["series_length"], ни data-кадров '
+        'для оценки по структуре файла (всего empty-кадров: {}). '
+        'Укажите series_length вручную.'.format(data_file, total_empty_count))
 
 
 def load_tomo_data(data_file: str, tmp_dir: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -541,40 +587,41 @@ def _interpolate_empty(adv_data: AdvancedTomoData,
     """Возвращает интерполированный empty_crop для кадра с заданным frame_number.
 
     Линейно интерполирует между ближайшими empty сериями по frame_number.
-    Для кадров до первой periodic вставки использует initial_empty.
-    Для кадров после последней periodic вставки использует последнюю periodic.
+    Начальная серия участвует в интерполяции наравне с periodic: её опорный
+    frame_number — ``adv_data.initial_empty_fnumber`` (первый кадр начальной
+    empty-серии).
+
+      * frame_number <= initial_empty_fnumber        → initial_empty (константа)
+      * initial_empty_fnumber < fn < periodic[0]     → интерполяция initial ↔ periodic[0]
+      * между periodic сериями                       → интерполяция соседних
+      * frame_number >= последней periodic           → последняя periodic (константа)
     """
     # Список (frame_number, empty_image) всех серий по возрастанию
-    all_fnums = [-1] + adv_data.periodic_empty_fnumbers  # -1 = initial (до всех data)
-    all_empties = [adv_data.initial_empty] + adv_data.periodic_empties
+    all_fnums = ([int(adv_data.initial_empty_fnumber)]
+                 + [int(fn) for fn in adv_data.periodic_empty_fnumbers])
+    all_empties = [adv_data.initial_empty] + list(adv_data.periodic_empties)
 
-    # Находим, между какими двумя сериями находится данный frame_number
-    # Ищем i такое, что all_fnums[i] <= frame_number < all_fnums[i+1]
-    idx = 0
-    for i in range(len(all_fnums) - 1):
-        if all_fnums[i + 1] <= frame_number:
-            idx = i + 1
-        else:
-            break
-
-    # Если кадр после последней вставки — используем последний empty
-    if idx >= len(all_empties) - 1:
-        e = all_empties[-1][y_min:y_max, x_min:x_max].copy()
+    def _crop(empty_image):
+        e = np.asarray(empty_image)[y_min:y_max, x_min:x_max].astype('float32').copy()
         e[e < 1] = 1
         return e
 
-    # Если кадр до первой вставки — используем initial
-    if idx == 0 and (len(adv_data.periodic_empty_fnumbers) == 0
-                     or frame_number < adv_data.periodic_empty_fnumbers[0]):
-        e = adv_data.initial_empty[y_min:y_max, x_min:x_max].copy()
-        e[e < 1] = 1
-        return e
+    # До начальной серии (или вообще нет periodic) — initial константой
+    if len(all_fnums) == 1 or frame_number <= all_fnums[0]:
+        return _crop(all_empties[0])
 
-    # Линейная интерполяция
+    # После последней periodic вставки — последний empty константой
+    if frame_number >= all_fnums[-1]:
+        return _crop(all_empties[-1])
+
+    # Интервал, в который попал кадр: all_fnums[idx] <= fn < all_fnums[idx + 1]
+    idx = int(np.searchsorted(np.asarray(all_fnums), frame_number, side='right')) - 1
+    idx = min(max(idx, 0), len(all_fnums) - 2)
+
     fn0 = all_fnums[idx]
     fn1 = all_fnums[idx + 1]
-    e0 = all_empties[idx][y_min:y_max, x_min:x_max].astype('float32')
-    e1 = all_empties[idx + 1][y_min:y_max, x_min:x_max].astype('float32')
+    e0 = _crop(all_empties[idx])
+    e1 = _crop(all_empties[idx + 1])
 
     w = float(frame_number - fn0) / float(fn1 - fn0) if fn1 != fn0 else 0.0
     e_interp = ((1.0 - w) * e0 + w * e1).astype('float32')
@@ -620,22 +667,48 @@ def normalize_projections_with_timeline(
 # --- Repositioning shift measurement and correction ---
 # =============================================================================
 
+ANGLE_MATCH_TOL = 0.5  # градусы: допуск совпадения угла data и data_check
+
+
 def _find_matching_data_frame(angle: float,
                                data_angles: np.ndarray,
                                data_numbers: np.ndarray,
-                               segment_end_fnumber: int) -> int | None:
-    """Находит индекс data-кадра с ближайшим углом, снятого до segment_end_fnumber.
+                               segment_end_fnumber: int,
+                               tol: float = ANGLE_MATCH_TOL) -> int | None:
+    """Находит индекс data-кадра с тем же углом, снятого до segment_end_fnumber.
 
-    Возвращает индекс в data_angles/data_numbers или None если не найдено.
+    Драйвер снимает data_check при ТОМ ЖЕ угле, что и последний data-кадр
+    сегмента, поэтому берётся ПОСЛЕДНИЙ (ближайший по времени) кадр с углом
+    в допуске ``tol``. Простой argmin по всей истории здесь неверен: при
+    нескольких оборотах углы повторяются, и argmin вернул бы кадр из самого
+    первого оборота.
+
+    Возвращает индекс в data_angles/data_numbers или None, если до
+    segment_end_fnumber вообще нет кадров.
+
+    Raises
+    ------
+    ValueError
+        если ни один кадр не попал в допуск по углу.
     """
     # Ищем среди кадров до периодической вставки
     mask = data_numbers < segment_end_fnumber
     if not mask.any():
         return None
     candidate_indices = np.where(mask)[0]
+
     angle_diffs = np.abs(data_angles[candidate_indices] - angle) % 360
     angle_diffs = np.minimum(angle_diffs, 360 - angle_diffs)
-    best = candidate_indices[np.argmin(angle_diffs)]
+
+    in_tol = np.where(angle_diffs <= tol)[0]
+    if len(in_tol) == 0:
+        raise ValueError(
+            'Не найден data-кадр с углом {:.2f}° (допуск {:.2f}°) среди кадров '
+            'до frame_number={}; ближайший угол отличается на {:.2f}°'.format(
+                angle, tol, segment_end_fnumber, float(angle_diffs.min())))
+
+    # Последний по времени кадр с подходящим углом
+    best = candidate_indices[in_tol[-1]]
     return int(best)
 
 
@@ -654,8 +727,10 @@ def measure_repositioning_shifts(
       4. Измеряем сдвиг фазовой кросс-корреляцией (субпиксель, upsample_factor=10).
 
     Сдвиги характеризуют каждый checkpoint k: насколько объект сместился
-    при возврате на стол. Кадры из сегмента k+1 (после checkpoint k до
-    следующего checkpoint k+1) нужно скорректировать на shifts[k].
+    при возврате на стол ОТНОСИТЕЛЬНО ПРЕДЫДУЩЕГО СЕГМЕНТА (data_check
+    сравнивается с последним data-кадром сегмента k, снятым до вставки).
+    Поэтому сдвиги накопительные: кадры сегмента m нужно скорректировать
+    на cumsum(shifts[:m]) — это и делает apply_repositioning_correction().
 
     Параметры
     ----------
@@ -668,6 +743,13 @@ def measure_repositioning_shifts(
     checkpoint_angles : np.ndarray shape (K,) — углы checkpoint-ов
     shifts_y          : np.ndarray shape (K,) — сдвиг по Y (пикс., субпиксель)
     shifts_x          : np.ndarray shape (K,) — сдвиг по X (пикс., субпиксель)
+
+    Если для checkpoint-а k не удалось найти ни data_check кадр, ни
+    парный data кадр с подходящим углом (``_find_matching_data_frame``
+    бросает ``ValueError``), checkpoint пропускается: соответствующие
+    ``shifts_y[k]``/``shifts_x[k]`` устанавливаются в 0.0 (а не NaN — чтобы
+    cumsum в apply_repositioning_correction() не заражал NaN-ом все
+    последующие сегменты), в лог пишется warning.
     """
     K = len(adv_data.periodic_empties)
     if K == 0:
@@ -716,8 +798,15 @@ def measure_repositioning_shifts(
         dc_frame = adv_data.data_check_images[dc_idx, y_min:y_max, x_min:x_max].copy()
 
         # Ищем соответствующий data кадр до checkpoint k
-        data_idx = _find_matching_data_frame(
-            dc_angle, adv_data.data_angles, adv_data.data_numbers, fn_start)
+        try:
+            data_idx = _find_matching_data_frame(
+                dc_angle, adv_data.data_angles, adv_data.data_numbers, fn_start)
+        except ValueError as e:
+            logging.warning(f'Checkpoint {k}: {e}; skipping')
+            checkpoint_angles[k] = dc_angle
+            shifts_y[k] = 0.0
+            shifts_x[k] = 0.0
+            continue
 
         if debug:
             print(f"[DBG]   dc_angle={dc_angle:.2f}, data_idx={data_idx}, fn_start={fn_start}")
@@ -821,12 +910,28 @@ def apply_repositioning_correction(
 
     Для каждого кадра i определяет к какому сегменту он относится
     (по data_numbers[i] и periodic_empty_fnumbers), затем применяет
-    sub-pixel shift через scipy.ndimage.shift с обратным знаком.
+    sub-pixel shift через scipy.ndimage.shift.
 
     Сегмент 0 (до первого checkpoint) — без коррекции (референсная позиция).
-    Сегмент k (k >= 1) — кадры после checkpoint k-1 до checkpoint k → сдвиг shifts[k-1].
+    Сегмент k (k >= 1) — кадры после checkpoint k-1 до checkpoint k.
+
+    НАКОПЛЕНИЕ: shifts[k] измеряется сравнением data_check checkpoint-а k с
+    последним data-кадром ПРЕДЫДУЩЕГО сегмента, то есть характеризует смещение
+    сегмента k+1 ОТНОСИТЕЛЬНО СЕГМЕНТА k, а не относительно референса.
+    Смещение сегмента m относительно сегмента 0 — сумма всех предыдущих шагов,
+    поэтому к сегменту m применяется ``cumsum(shifts[:m])``.
+
+    Знак: measure_repositioning_shifts возвращает shift из
+    ``phase_cross_correlation(reference=data, moving=data_check)``, то есть
+    такой, что ``ndi.shift(data_check, shift) ≈ data``. Кадры сегмента k+1
+    сняты в той же позиции, что и data_check checkpoint-а k, поэтому к ним
+    применяется ТОТ ЖЕ shift (без смены знака).
 
     ВАЖНО: применять ПОСЛЕ нормировки к нормированным кадрам (data_images_crop).
+
+    NaN в shifts_y/shifts_x (checkpoint с неизмеренным сдвигом) трактуется как 0
+    для этого шага cumsum, с записью в лог через logging.error — начиная с этого
+    checkpoint-а накопленные сдвиги всех последующих сегментов не гарантированы.
 
     Параметры
     ----------
@@ -843,6 +948,26 @@ def apply_repositioning_correction(
 
     K = len(adv_data.periodic_empty_fnumbers)
 
+    shifts_y = np.asarray(shifts_y, dtype='float64')
+    shifts_x = np.asarray(shifts_x, dtype='float64')
+
+    # Пропущенный/не измеренный checkpoint даёт shift=NaN. cumsum() распространил бы
+    # NaN на все последующие сегменты, обнулив коррекцию для них молча — вместо этого
+    # трактуем NaN как 0 (не корректируем этот конкретный шаг) и громко предупреждаем,
+    # что накопленные сдвиги для всех сегментов после него уже ненадёжны.
+    nan_mask = np.isnan(shifts_y) | np.isnan(shifts_x)
+    if nan_mask.any():
+        for k in np.where(nan_mask)[0]:
+            logging.error(
+                'apply_repositioning_correction: сдвиг checkpoint-а %d не измерен (NaN); '
+                'принимаем его за 0, но сдвиги сегментов после %d ненадёжны', k, k)
+        shifts_y = np.where(np.isnan(shifts_y), 0.0, shifts_y)
+        shifts_x = np.where(np.isnan(shifts_x), 0.0, shifts_x)
+
+    # Накопленные сдвиги: cum_y[m] — смещение сегмента m относительно сегмента 0
+    cum_y = np.concatenate(([0.0], np.cumsum(shifts_y)))
+    cum_x = np.concatenate(([0.0], np.cumsum(shifts_x)))
+
     for i in tqdm(range(data_images.shape[0]), desc='apply_repositioning_correction'):
         fn = int(data_numbers[i])
 
@@ -855,9 +980,16 @@ def apply_repositioning_correction(
         if segment == 0:
             continue  # референсная позиция — не корректируем
 
-        # Сдвиг для этого сегмента
-        sy = -shifts_y[segment - 1]
-        sx = -shifts_x[segment - 1]
+        if segment >= len(cum_y):
+            logging.warning(
+                'apply_repositioning_correction: сегмент %d вне диапазона '
+                'измеренных сдвигов (K=%d), используем последний накопленный',
+                segment, len(shifts_y))
+            segment = len(cum_y) - 1
+
+        # Накопленный сдвиг для этого сегмента
+        sy = cum_y[segment]
+        sx = cum_x[segment]
 
         if abs(sy) < 1e-6 and abs(sx) < 1e-6:
             continue
@@ -880,7 +1012,6 @@ def analyze_source_drift(adv_data: 'AdvancedTomoData') -> None:
     ----------
     adv_data : AdvancedTomoData
     """
-    all_fnums = [-1] + adv_data.periodic_empty_fnumbers
     all_empties = [adv_data.initial_empty] + adv_data.periodic_empties
     labels = ['initial'] + [f'periodic {k+1}' for k in range(len(adv_data.periodic_empties))]
 
@@ -985,8 +1116,12 @@ def analyze_repositioning_accuracy(
 
     dc_idx = dc_indices[0]
     dc_angle = float(adv_data.data_check_angles[dc_idx])
-    data_idx = _find_matching_data_frame(
-        dc_angle, adv_data.data_angles, adv_data.data_numbers, fn_start)
+    try:
+        data_idx = _find_matching_data_frame(
+            dc_angle, adv_data.data_angles, adv_data.data_numbers, fn_start)
+    except ValueError as e:
+        logging.warning(f'analyze_repositioning_accuracy: checkpoint {k}: {e}; skipping overlay')
+        return
 
     if data_idx is None:
         return
@@ -1072,9 +1207,14 @@ def find_axis_correction(data_images_crop: np.ndarray,
     im0 = data_0_orig / (data_0_orig ** 2).sum() ** 0.5
     im1 = data_180_orig / (data_180_orig ** 2).sum() ** 0.5
 
+    # center_of_mass возвращает (row, col) = (Y, X). transform_image сдвигает
+    # по горизонтали (ось X = столбцы), поэтому начальное приближение берётся
+    # из X-компоненты центра масс, а не из Y (по Y разность тождественно ~0).
+    # Минимум достигается при im1 == shift(im0, 2 * shift_x), то есть
+    # cm1.x - cm0.x = 2 * shift_x.
     cm0 = ndi.center_of_mass(im0)  # type: ignore[assignment]
     cm1 = ndi.center_of_mass(im1)  # type: ignore[assignment]
-    initial_shift = (float(cm0[0]) - float(cm1[0])) / 2  # type: ignore[arg-type]
+    initial_shift = (float(cm1[1]) - float(cm0[1])) / 2  # type: ignore[arg-type]
 
     def _objective(shift_angle, img0, img1):
         s, a = shift_angle
@@ -1191,7 +1331,9 @@ def show_frames_with_border(data_images: np.ndarray, empty_beam: np.ndarray,
     """Показывает кадр с отмеченной областью ROI."""
     te = empty_beam
     angles_sorted_ind = np.argsort(data_angles)
-    td = np.asarray(data_images[angles_sorted_ind[image_id]])
+    # copy(): индексация скаляром возвращает view, и td[td < 1] = 1 портило бы
+    # исходный массив data_images
+    td = np.array(data_images[angles_sorted_ind[image_id]], dtype='float32')
     td[td < 1] = 1
     d = np.log(te) - np.log(td)
 
@@ -1355,19 +1497,46 @@ def create_axis_search_widget(sinogram_fixed: np.ndarray,
 # --- Volume utilities ---
 # =============================================================================
 
-def get_angles_at_180_deg(uniq_angles: np.ndarray) -> tuple[list[int], list[int]]:
-    """Находит пары кадров под углами 0° и 180°.
+def get_angles_at_180_deg(uniq_angles: np.ndarray,
+                          tol: float | None = None) -> tuple[list[int], list[int]]:
+    """Находит пары кадров, различающихся на 180°.
+
+    Сравнение ведётся с допуском: углы хранятся как float32, и точное
+    равенство ``== 0`` почти никогда не выполняется. По умолчанию допуск —
+    половина минимального шага по углам, но не меньше 1e-3 градуса.
 
     Возвращает (position_0, position_180) — списки индексов.
+
+    Raises
+    ------
+    ValueError
+        если ни одной пары 0°/180° не нашлось (например, эксперимент прерван
+        и снят меньше чем на полоборота).
     """
-    t = np.subtract.outer(uniq_angles, uniq_angles) % 360
-    pos = np.argwhere(np.abs(t - 180) % 360 == 0)
+    angles = np.asarray(uniq_angles, dtype='float64')
+
+    if tol is None:
+        uniq = np.unique(angles)
+        min_step = float(np.min(np.diff(uniq))) if uniq.size > 1 else 0.0
+        tol = max(min_step / 2.0, 1e-3)
+
+    # t ∈ [0, 360), поэтому |t - 180| — это и есть круговое расстояние до 180°
+    t = np.subtract.outer(angles, angles) % 360.0
+    pos = np.argwhere(np.abs(t - 180.0) <= tol)
+
     position_0, position_180 = [], []
-    for tpos in pos:
-        p0, p180 = tpos
+    for p0, p180 in pos:
         if p0 < p180:
-            position_0.append(p0)
-            position_180.append(p180)
+            position_0.append(int(p0))
+            position_180.append(int(p180))
+
+    if not position_0:
+        raise ValueError(
+            'Не найдено ни одной пары кадров с разностью углов 180° '
+            '(допуск {:.4f}°). Диапазон углов: {:.2f}°..{:.2f}°, кадров: {}. '
+            'Коррекция оси вращения требует съёмки минимум на 180°.'.format(
+                tol, float(angles.min()), float(angles.max()), angles.size))
+
     return position_0, position_180
 
 
@@ -1394,9 +1563,28 @@ def reshape_volume(array_3d: np.ndarray, binning_factor: int) -> np.ndarray:
     return reshaped.mean(axis=(1, 3, 5), dtype='float32')
 
 
+def sanitize_amira_name(name: str) -> str:
+    """Имя образца, пригодное для имени файла (пробелы → подчёркивания)."""
+    return str(name).replace(' ', '_')
+
+
+def amira_raw_name(name: str, shape, reshape: int = 1) -> str:
+    """Имя raw-файла объёма: ``<name>.<d0>_<d1>_<d2>.<reshape>.raw``.
+
+    Используется и в save_amira, и при создании memmap через persistent_array,
+    чтобы .hx-скрипт ссылался на реально существующий файл.
+    """
+    return '{}.{}_{}_{}.{}.raw'.format(sanitize_amira_name(name), *shape, reshape)
+
+
 def save_amira(in_array: np.ndarray, out_path: str, name: str,
                reshape: int = 3, pixel_size: float = 9.0e-3) -> None:
     """Сохраняет объём в формате Amira raw + .hx скрипт.
+
+    При reshape == 1 raw-файл, как правило, уже создан через
+    persistent_array() под тем же именем (amira_raw_name) — тогда он не
+    переписывается. Если такого файла нет, он записывается здесь, чтобы
+    .hx-скрипт не ссылался на отсутствующий файл.
 
     Параметры
     ----------
@@ -1408,18 +1596,19 @@ def save_amira(in_array: np.ndarray, out_path: str, name: str,
     """
     data_path = str(out_path)
     os.makedirs(data_path, exist_ok=True)
-    name = name.replace(' ', '_')
+    name = sanitize_amira_name(name)
 
     if reshape != 1:
         vol = reshape_volume(in_array, reshape)
     else:
         vol = in_array
     file_shape = vol.shape
-    shape_str = '{}_{}_{}' .format(*file_shape)
-    out_name = '{}.{}.{}.raw'.format(name, shape_str, reshape)
+    out_name = amira_raw_name(name, file_shape, reshape)
+    raw_path = os.path.join(data_path, out_name)
 
-    if reshape != 1:
-        with open(os.path.join(data_path, out_name), 'wb') as f:
+    if reshape != 1 or not os.path.exists(raw_path):
+        logging.info('Writing Amira raw: {}'.format(raw_path))
+        with open(raw_path, 'wb') as f:
             vol.tofile(f)
 
     hx_path = os.path.join(data_path, 'tomo.{}.{}.hx'.format(name, reshape))

@@ -23,25 +23,58 @@ FRAME_MODES = {
 MODE_NAMES = {v: k for k, v in FRAME_MODES.items()}
 
 
+def _is_v2_open(f: h5py.File) -> bool:
+    """Проверка формата v2 на уже открытом файле (без повторного открытия)."""
+    if 'timeline' not in f:
+        return False
+    # Дополнительная проверка версии в metadata
+    if 'metadata' in f and 'format_version' in f['metadata']:
+        raw = f['metadata']['format_version'][()]
+        version = raw.decode('utf8') if isinstance(raw, bytes) else str(raw)
+        return version == 'v2'
+    return True
+
+
 def is_hdf5_v2(filepath: str) -> bool:
     """
     Определяет версию HDF5-файла.
-    
+
     Returns:
         True если файл формата v2 (имеет группу /timeline и format_version='v2'),
         False иначе.
     """
     try:
         with h5py.File(filepath, 'r') as f:
-            if 'timeline' not in f:
-                return False
-            # Дополнительная проверка версии в metadata
-            if 'metadata' in f and 'format_version' in f['metadata']:
-                version = str(f['metadata']['format_version'][()], 'utf8')
-                return version == 'v2'
-            return True
+            return _is_v2_open(f)
     except Exception:
         return False
+
+
+def _check_v2(f: h5py.File, data_file: str) -> None:
+    """Бросает ValueError, если уже открытый файл не формата v2."""
+    if not _is_v2_open(f):
+        raise ValueError(f'File {data_file} is not HDF5 v2 format')
+
+
+def _group_indices(f: h5py.File, group_name: str) -> np.ndarray:
+    """Возвращает индексы кадров группы в images/all.
+
+    Берёт их из ``mapping/<group>_indices``, а если группы mapping ещё нет
+    (эксперимент прерван и не прошёл finalize) — восстанавливает по
+    ``timeline/modes``.
+    """
+    if group_name not in FRAME_MODES:
+        raise ValueError(f'Unknown frame group: {group_name!r}')
+
+    mapping = f.get('mapping')
+    if mapping is not None and f'{group_name}_indices' in mapping:
+        return np.asarray(mapping[f'{group_name}_indices'][:])
+
+    logger.warning(
+        'mapping/%s_indices отсутствует (эксперимент не был finalized) — '
+        'восстанавливаем индексы по timeline/modes', group_name)
+    modes = f['timeline/modes'][:]
+    return np.where(modes == FRAME_MODES[group_name])[0]
 
 
 def get_experiment_info_v2(data_file: str) -> Dict[str, Any]:
@@ -55,9 +88,8 @@ def get_experiment_info_v2(data_file: str) -> Dict[str, Any]:
         Dict с метаданными
     """
     with h5py.File(data_file, 'r') as f:
-        if not is_hdf5_v2(data_file):
-            raise ValueError(f'File {data_file} is not HDF5 v2 format')
-        
+        _check_v2(f, data_file)
+
         metadata = f['metadata']
         
         info = {
@@ -124,36 +156,38 @@ def get_frame_group_v2(
 
     Возвращает
     ----------
-    images       : np.ndarray, shape (N, H, W)
+    images       : np.ndarray, shape (N, H, W)  — при пустой группе (0, H, W)
     angles       : np.ndarray, shape (N,)
     frame_numbers: np.ndarray, shape (N,)  — только если return_frame_numbers=True
     """
-    import logging
-    logger = logging.getLogger(__name__)
-    
     rdcc_nbytes = hdf5_cache_mb * 1024 * 1024
-    
+
     with h5py.File(data_file, 'r', rdcc_nbytes=rdcc_nbytes) as f:
-        if not is_hdf5_v2(data_file):
-            raise ValueError(f'File {data_file} is not HDF5 v2 format')
-        
-        # Получаем индексы из mapping
-        mapping = f['mapping']
-        indices = mapping[f'{group_name}_indices'][:]
-        
-        logger.info(f'Loading {group_name}: {len(indices)} frames from indices {indices[:3]}...{indices[-3:]}')
-        
-        if len(indices) == 0:
-            # Пустая группа
-            return (np.array([]), np.array([]), np.array([])) if return_frame_numbers else (np.array([]), np.array([]))
-        
-        # Читаем кадры batch'ами (последовательно — h5py оптимизирует chunk-чтение)
+        _check_v2(f, data_file)
+
+        # Индексы из mapping, а при его отсутствии — из timeline/modes
+        indices = _group_indices(f, group_name)
+
         images_all = f['images/all']
-        logger.info(f'Reading {len(indices)} frames from images/all (shape={images_all.shape}, dtype={images_all.dtype})')
-        
         H, W = images_all.shape[1], images_all.shape[2]
+
+        if len(indices) == 0:
+            # Пустая группа: сохраняем форму (0, H, W), чтобы вызывающий код
+            # мог рассчитывать на трёхмерность массива
+            logger.warning(f'Frame group {group_name!r} is empty')
+            empty_images = np.empty((0, H, W), dtype='float32')
+            empty_angles = np.empty((0,), dtype='float32')
+            if return_frame_numbers:
+                return empty_images, empty_angles, np.empty((0,), dtype='int64')
+            return empty_images, empty_angles
+
+        logger.info(f'Loading {group_name}: {len(indices)} frames from indices {indices[:3]}...{indices[-3:]}')
+
+        # Читаем кадры batch'ами (последовательно — h5py оптимизирует chunk-чтение)
+        logger.info(f'Reading {len(indices)} frames from images/all (shape={images_all.shape}, dtype={images_all.dtype})')
+
         images = np.empty((len(indices), H, W), dtype=images_all.dtype)
-        
+
         from tqdm.auto import tqdm
         batch_size = 5  # плавный прогресс-бар (больше шагов)
         for start in tqdm(range(0, len(indices), batch_size), desc=f'Reading {group_name}'):
@@ -191,12 +225,11 @@ def load_tomo_data_v2(data_file: str, tmp_dir: str) -> Tuple[np.ndarray, np.ndar
     logger.info(f'load_tomo_data_v2: starting for {data_file}')
     
     with h5py.File(data_file, 'r') as f:
-        if not is_hdf5_v2(data_file):
-            raise ValueError(f'File {data_file} is not HDF5 v2 format')
-        
+        _check_v2(f, data_file)
+
         is_advanced = bool(f['metadata/is_advanced'][()])
         logger.info(f'Experiment type: {"advanced" if is_advanced else "simple"}')
-        
+
         # Читаем dark
         logger.info('Loading dark frames...')
         dark_images, _ = get_frame_group_v2(data_file, 'dark', tmp_dir)
@@ -210,14 +243,10 @@ def load_tomo_data_v2(data_file: str, tmp_dir: str) -> Tuple[np.ndarray, np.ndar
         empty_images, _ = get_frame_group_v2(data_file, 'empty', tmp_dir)
         if len(empty_images) == 0:
             raise ValueError('No empty frames found')
-        
-        if is_advanced:
-            # Advanced: усредняем все empty (initial + periodic)
-            empty_image = np.median(empty_images, axis=0).astype('float32')
-        else:
-            # Simple: медиана всех empty
-            empty_image = np.median(empty_images, axis=0).astype('float32')
-        
+
+        # И для advanced (initial + periodic), и для simple — медиана всех empty
+        empty_image = np.median(empty_images, axis=0).astype('float32')
+
         # Вычитаем dark
         empty_image -= dark_image
         empty_image[empty_image < 1] = 1
@@ -246,36 +275,42 @@ def load_tomo_data_advanced_v2(data_file: str, tmp_dir: str) -> 'AdvancedTomoDat
     ----------
     AdvancedTomoData
     """
-    from dataclasses import dataclass
-    
     with h5py.File(data_file, 'r') as f:
-        if not is_hdf5_v2(data_file):
-            raise ValueError(f'File {data_file} is not HDF5 v2 format')
-        
+        _check_v2(f, data_file)
+
         if not bool(f['metadata/is_advanced'][()]):
             raise ValueError(f'File {data_file} is not an advanced experiment')
-        
+
         series_length = int(f['metadata/series_length'][()])
-        
+
         # Читаем dark
         dark_images, _ = get_frame_group_v2(data_file, 'dark', tmp_dir)
-        dark_image = np.median(dark_images, axis=0).astype('float32')
-        
+        if len(dark_images) == 0:
+            # Прерванный эксперимент может не содержать dark-серии
+            logger.warning('No dark frames found — using zero dark image')
+            _shape = f['images/all'].shape
+            dark_image = np.zeros((_shape[1], _shape[2]), dtype='float32')
+        else:
+            dark_image = np.median(dark_images, axis=0).astype('float32')
+
         # Читаем empty с frame_numbers
         empty_images, empty_angles, empty_fnums = get_frame_group_v2(
             data_file, 'empty', tmp_dir, return_frame_numbers=True)
-        
+        if len(empty_images) == 0:
+            raise ValueError('No empty frames found — cannot normalize projections')
+
         # Сортируем по frame_numbers
         sort_idx = np.argsort(empty_fnums)
         empty_images = empty_images[sort_idx]
         empty_fnums = empty_fnums[sort_idx]
-        
+
         # Вычитаем dark
         empty_images = empty_images.astype('float32') - dark_image
-        
+
         # Разделяем на initial и periodic
         initial_empty = np.median(empty_images[:series_length], axis=0).astype('float32')
-        
+        initial_empty_fnumber = int(empty_fnums[0])
+
         periodic_empties = []
         periodic_empty_fnumbers = []
         
@@ -315,6 +350,7 @@ def load_tomo_data_advanced_v2(data_file: str, tmp_dir: str) -> 'AdvancedTomoDat
         return AdvancedTomoData(
             dark_image=dark_image,
             initial_empty=initial_empty,
+            initial_empty_fnumber=initial_empty_fnumber,
             periodic_empties=periodic_empties,
             periodic_empty_fnumbers=periodic_empty_fnumbers,
             data_images=data_images,
@@ -341,15 +377,14 @@ def get_checkpoint_mapping_v2(data_file: str) -> Tuple[np.ndarray, np.ndarray]:
         ValueError если файл не v2 или не advanced
     """
     with h5py.File(data_file, 'r') as f:
-        if not is_hdf5_v2(data_file):
-            raise ValueError(f'File {data_file} is not HDF5 v2 format')
-        
+        _check_v2(f, data_file)
+
         if not bool(f['metadata/is_advanced'][()]):
             raise ValueError(f'File {data_file} is not an advanced experiment')
-        
-        mapping = f['mapping']
-        
-        if 'checkpoint_data_indices' not in mapping:
+
+        mapping = f.get('mapping')
+
+        if mapping is None or 'checkpoint_data_indices' not in mapping:
             raise ValueError('No checkpoint mapping found — experiment may not be finalized')
         
         data_indices = mapping['checkpoint_data_indices'][:]
