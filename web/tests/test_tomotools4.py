@@ -127,6 +127,24 @@ def test_repositioning_roundtrip_reduces_error():
     assert rms(norm[0], target) == pytest.approx(0.0, abs=1e-6)
 
 
+def test_measure_repositioning_shifts_fractional_shift_on_smooth_noisy_object():
+    """Дробный сдвиг гладкого объекта с шумом: фазовая нормировка спектра ошибалась здесь на десятые доли
+    пикселя, взаимная корреляция без неё (normalization=None) — точна."""
+    yy, xx = np.mgrid[0:H, 0:W]
+    obj = (0.8 * np.exp(-(((yy - 30) ** 2 + (xx - 32) ** 2) / 120.0))
+           + 0.4 * np.exp(-(((yy - 18) ** 2 + (xx - 45) ** 2) / 40.0))).astype('float32')
+    true_shift = [1.3, -0.8]
+    moved = ndi.shift(obj, true_shift, order=3, mode='nearest').astype('float32')
+    adv, _ = build_adv([obj, moved], [true_shift])
+    rng = np.random.default_rng(0)
+    adv.data_images = (adv.data_images * (1 + 0.003 * rng.standard_normal(adv.data_images.shape))).astype('float32')
+    adv.data_check_images = (adv.data_check_images
+                             * (1 + 0.003 * rng.standard_normal(adv.data_check_images.shape))).astype('float32')
+    _, sy, sx = t4.measure_repositioning_shifts(adv, 0, W, 0, H, debug=False)
+    assert sy[0] == pytest.approx(-1.3, abs=0.11)
+    assert sx[0] == pytest.approx(0.8, abs=0.11)
+
+
 def test_measure_repositioning_shifts_skips_bad_angle_checkpoint(caplog):
     """Один checkpoint с 'не тем' углом (ValueError из _find_matching_data_frame)
     не должен ронять весь прогон — остальные checkpoint-ы измеряются как обычно,
@@ -398,6 +416,20 @@ def test_find_axis_correction_recovers_known_shift(s_true):
     shift_x, alfa = t4.find_axis_correction(images, angles)
     assert shift_x == pytest.approx(s_true, abs=0.05)
     assert alfa == pytest.approx(0.0, abs=0.01)
+
+
+def test_find_axis_correction_smoothing_on_noisy_frames():
+    """На шумных кадрах сглаживание перед сравнением даёт сдвиг оси не хуже, чем без него."""
+    errs = {0: [], t4.AXIS_SMOOTH_SIGMA: []}
+    for seed, s_true in enumerate((2.3, -1.7, 0.6)):
+        images, angles = _axis_pair(s_true)
+        rng = np.random.default_rng(seed)
+        noisy = (images + 0.05 * rng.standard_normal(images.shape)).astype('float32')
+        for sigma in errs:
+            shift_x, _ = t4.find_axis_correction(noisy, angles, smooth_sigma=sigma)
+            errs[sigma].append(abs(shift_x - s_true))
+    assert max(errs[t4.AXIS_SMOOTH_SIGMA]) < 0.25
+    assert np.mean(errs[t4.AXIS_SMOOTH_SIGMA]) <= np.mean(errs[0]) + 0.02
 
 
 def test_initial_shift_uses_x_component():
