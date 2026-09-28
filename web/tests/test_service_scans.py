@@ -85,7 +85,8 @@ def test_info(svc, storage):
     # storage недоступен: размер пикселя из HDF5 (модель детектора неизвестна) и предупреждение
     ps = body['pixel_size']
     assert ps['value_mm'] == 0.009 and ps['source'] == 'hdf5'
-    assert any('storage' in w for w in ps['warnings'])
+    assert any('нет связи со storage' in w for w in ps['warnings'])
+    assert not any('Error' in w for w in ps['warnings'])      # текст исключения — только в лог
     # запрос к storage — как в ноутбуке, но JSON и с таймаутом; неудача кэшируется (второй /info без запроса)
     url, kw = storage.calls[0]
     assert url == cfg.storage_server + 'storage/experiments/get'

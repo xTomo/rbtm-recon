@@ -338,10 +338,16 @@ class ScanRegistry:
                     doc = body
                 else:
                     err = 'в storage нет документа эксперимента'
+                    logger.warning('документ %s из storage: %s', exp_id, err)
             except Exception as exc:  # noqa: BLE001 — storage недоступен/ответ не JSON: работаем без документа
-                err = '{}: {}'.format(type(exc).__name__, exc)
-            if err:
-                logger.warning('документ %s из storage: %s', exp_id, err)
+                # пользователю — коротко (текст идёт в предупреждение размера пикселя), подробности — в лог
+                logger.warning('документ %s из storage: %s: %s', exp_id, type(exc).__name__, exc)
+                if isinstance(exc, requests.HTTPError) and exc.response is not None:
+                    err = 'storage ответил {}'.format(exc.response.status_code)
+                elif isinstance(exc, requests.RequestException):
+                    err = 'нет связи со storage'
+                else:
+                    err = 'некорректный ответ storage'
             with self._lock:
                 self._docs[exp_id] = (time.monotonic(), doc, err)
         return doc, err
