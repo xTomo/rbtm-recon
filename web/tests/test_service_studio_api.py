@@ -45,3 +45,16 @@ def test_recipe_from_session_defaults_and_overrides(loaded):
 
     for bad in ({'slices': [0, 100]}, {'rings': 'ultra'}, {'angles': 'all'}, {'slices': [5]}):
         assert client.post(url(sid, 'recipe'), json=bad, headers=HEADERS).status_code == 400
+
+
+def test_recipe_binning(loaded):
+    _, client, _, _, sid, _ = loaded
+    d = client.post(url(sid, 'recipe'), json={}, headers=HEADERS).get_json()
+    assert d['outputs']['binning'] == [4]                                   # по умолчанию — как у ноутбука
+    d = client.post(url(sid, 'recipe'), json={'binning': [8, 2, 2]}, headers=HEADERS).get_json()
+    assert d['outputs']['binning'] == [2, 8]
+    est = client.post(url(sid, 'estimate'), json={'recipe': d}, headers=HEADERS).get_json()
+    assert sorted(int(k) for k in est['binned_bytes']) == [2, 8]
+    assert client.post(url(sid, 'recipe'), json={'binning': []}, headers=HEADERS).get_json()['outputs']['binning'] == []
+    for bad in ([1], [64], 'x', [2.5], [True], 4):
+        assert client.post(url(sid, 'recipe'), json={'binning': bad}, headers=HEADERS).status_code == 400, bad
