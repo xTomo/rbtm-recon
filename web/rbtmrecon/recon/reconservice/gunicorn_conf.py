@@ -8,7 +8,7 @@ worker_class = 'gthread'
 threads = 8
 timeout = 600              # перебор центра на CPU и отдача файлов — секунды и минуты
 graceful_timeout = 60      # на остановку: задача получает SIGTERM и удаляет начатый объём
-accesslog = '-'
+accesslog = None           # без журнала запросов: студия опрашивает сессию и задачу раз в 1–1,5 с (журнал есть у Apache rbtm-web)
 errorlog = '-'
 loglevel = 'info'
 

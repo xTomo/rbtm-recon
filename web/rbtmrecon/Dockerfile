@@ -33,6 +33,10 @@ ENV CUDA_PATH=/usr/local/cuda
 
 RUN /opt/conda/bin/conda env create -f environment.yml  && /opt/conda/bin/conda clean -y --all
 
+# recon-service (студия реконструкции): отдельным слоем через pip, а не в environment.yml — правка environment.yml
+# пересобирает всё окружение conda, и cupy/astra могут прийти в версиях без поддержки Maxwell (GTX 980 Ti, sm_52)
+RUN /opt/conda/envs/xrecon/bin/pip install --no-cache-dir 'flask>=3,<4' 'gunicorn>=22,<24'
+
 COPY . /rbtm
 
 VOLUME /fast
