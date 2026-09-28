@@ -6,67 +6,260 @@
 кропа ``((h−1)/2, (w−1)/2)``, order=3, mode='nearest'): после преобразования ось вертикальна и проходит через
 столбец ``(w−1)/2`` кропа — на этом держится и старый ноутбук, и FBP без смещения центра.
 
+Геометрия (кроп h×w, центр (cy, cx) = ((h−1)/2, (w−1)/2), координаты массива: строка y вниз, столбец x вправо):
+
+- ``shift(im, [0, shift_x])``: S(y, x) = im(y, x − shift_x) — содержимое уезжает вправо на shift_x;
+- ``rotate(S, alfa, reshape=False)`` (scipy/cupyx, axes=(1, 0)) — выход o берёт вход в точке
+  ``(y, x) = R·(o − c) + c``, ``R = [[cos α, sin α], [−sin α, cos α]]``; на экране (строка 0 сверху) положительный
+  alfa поворачивает картинку ПРОТИВ часовой стрелки (точка справа от центра уходит вверх — проверено тестом);
+- выходной столбец cx берёт вход на прямой ``x = cx − shift_x − tan α · (y − cy)`` — это и есть ось в кропе.
+
+Отсюда в координатах детектора (кроп начинается в (roi.y0, roi.x0)):
+
+    tilt_deg = −alfa,  center_x (на строке y_ref = roi.y0 + cy) = roi.x0 + cx − shift_x,
+    shift_x = roi.x0 + cx − axis.center_at(roi.y0 + cy),  alfa = −axis.tilt_deg.
+
 Выравнивание слоя строк (``align_rows``) — то же преобразование, но только для нужных выходных строк: из-за
-наклона выходная строка берёт данные из входных строк в пределах ``margin_rows``.
+наклона выходная строка берёт данные из входных строк в пределах ``margin_rows``. Реализация повторяет два шага
+transform_image (сдвиг по x кубическим сплайном, затем поворот ``affine_transform`` с той же матрицей и смещением,
+пересчитанным к центру ПОЛНОГО кропа), поэтому совпадает с transform_image на полном кропе до ошибок округления
+и влияния границы слоя на префильтр сплайна (затухает как 0,27^d по расстоянию d от края слоя; при запасе
+``extra`` = 8 строк — ~1e-5 от перепада яркости).
 """
 from __future__ import annotations
 
-from typing import Dict, List, Sequence, Tuple
+import logging
+import math
+from typing import Callable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from .model import Axis, ROI
 
+logger = logging.getLogger(__name__)
+
+
+# --- геометрия ---------------------------------------------------------------------------------------------
+
+def _crop_center(height: int, width: int) -> Tuple[float, float]:
+    return (height - 1) / 2.0, (width - 1) / 2.0
+
 
 def to_crop_params(axis: Axis, roi: ROI) -> Tuple[float, float]:
     """(shift_x, alfa) для transform_image на кропе roi, эквивалентные оси axis."""
-    raise NotImplementedError
+    cy, cx = _crop_center(roi.height, roi.width)
+    shift_x = roi.x0 + cx - axis.center_at(roi.y0 + cy)
+    return float(shift_x), float(-axis.tilt_deg)
 
 
 def from_crop_params(shift_x: float, alfa: float, roi: ROI, method: str = 'auto') -> Axis:
     """Обратное преобразование: Axis в координатах детектора (y_ref — строка центра кропа)."""
-    raise NotImplementedError
+    cy, cx = _crop_center(roi.height, roi.width)
+    return Axis(center_x=float(roi.x0 + cx - shift_x), y_ref=float(roi.y0 + cy), tilt_deg=float(-alfa),
+                method=method)
+
+
+def rotation_matrix(alfa: float) -> np.ndarray:
+    """Матрица ``scipy.ndimage.rotate`` (axes=(1, 0)) для угла alfa в градусах: вход = R·(выход − c) + c."""
+    from scipy import special  # noqa: WPS433 — cosdg/sindg точны на кратных 90°, как в scipy.rotate
+    c, s = float(special.cosdg(alfa)), float(special.sindg(alfa))
+    return np.array([[c, s], [-s, c]])
 
 
 def margin_rows(alfa: float, width: int, extra: int = 8) -> int:
     """Запас входных строк сверху и снизу для align_rows при повороте на alfa: ceil(width/2·|tan alfa|) + extra."""
-    raise NotImplementedError
+    return int(math.ceil(width / 2.0 * abs(math.tan(math.radians(alfa))))) + int(extra)
+
+
+# --- преобразования изображений ----------------------------------------------------------------------------
+
+def _backend(xp):
+    from .gpu import get_xp, ndimage  # noqa: WPS433
+    xp = xp or get_xp()
+    return xp, ndimage(xp)
+
+
+def _as_float(a, xp):
+    a = xp.asarray(a)
+    if a.dtype.kind != 'f':
+        a = a.astype(xp.float32)
+    return a
+
+
+def transform_image(im, shift_x: float, alfa: float, xp=None):
+    """Порт ``tomotools4.transform_image`` на xp: сдвиг по x на shift_x (order=3, 'nearest'), затем поворот на
+    alfa градусов вокруг центра массива (order=3, reshape=False, 'nearest'). Возвращает xp-массив."""
+    xp, nd = _backend(xp)
+    a = _as_float(im, xp)
+    a = nd.shift(a, [0, shift_x], order=3, mode='nearest')
+    return nd.rotate(a, alfa, order=3, reshape=False, mode='nearest')
 
 
 def align_rows(frames, in_row0: int, out_rows: Tuple[int, int], shift_x: float, alfa: float,
                crop_height: int, xp=None):
     """Выровнять слой: frames (n, s_in, w) — строки кропа [in_row0, in_row0 + s_in); вернуть (n, s_out, w) для
     строк кропа out_rows = [r0, r1), совпадающих с transform_image на полном кропе высоты crop_height
-    (в пределах интерполяции). Требует, чтобы вход покрывал out_rows ± margin_rows (иначе ValueError)."""
-    raise NotImplementedError
+    (в пределах интерполяции). Требует, чтобы вход покрывал out_rows ± margin_rows (иначе ValueError).
 
+    Два шага, как в transform_image: сдвиг по x (по строкам, результат строки зависит только от неё самой),
+    затем для каждого кадра ``affine_transform`` с матрицей поворота и смещением относительно центра полного
+    кропа ((crop_height−1)/2, (w−1)/2). При alfa = 0 поворот пропускается (тождественен)."""
+    xp, nd = _backend(xp)
+    frames = _as_float(frames, xp)
+    if frames.ndim != 3:
+        raise ValueError('ожидается слой кадров (n, s, w), получено {}'.format(frames.shape))
+    n, s_in, w = frames.shape
+    r0, r1 = int(out_rows[0]), int(out_rows[1])
+    in_row0 = int(in_row0)
+    if not (0 <= r0 < r1 <= crop_height):
+        raise ValueError('выходные строки [{}, {}) вне кропа высотой {}'.format(r0, r1, crop_height))
+    if in_row0 < 0 or in_row0 + s_in > crop_height:
+        raise ValueError('входные строки [{}, {}) вне кропа высотой {}'.format(in_row0, in_row0 + s_in,
+                                                                              crop_height))
+    m = margin_rows(alfa, w)
+    need0, need1 = max(0, r0 - m), min(crop_height, r1 + m)
+    if in_row0 > need0 or in_row0 + s_in < need1:
+        raise ValueError('вход [{}, {}) не покрывает строки [{}, {}) с запасом {} (нужно [{}, {}))'.format(
+            in_row0, in_row0 + s_in, r0, r1, m, need0, need1))
+
+    shifted = nd.shift(frames.reshape(n * s_in, w), [0, shift_x], order=3, mode='nearest').reshape(n, s_in, w)
+    if alfa == 0:
+        return xp.ascontiguousarray(shifted[:, r0 - in_row0:r1 - in_row0, :])
+
+    rot = rotation_matrix(alfa)
+    c = np.array(_crop_center(crop_height, w))
+    offset = rot @ (np.array([r0, 0.0]) - c) + c - np.array([in_row0, 0.0])
+    matrix = xp.asarray(rot)
+    offset = [float(offset[0]), float(offset[1])]
+    out = xp.empty((n, r1 - r0, w), dtype=shifted.dtype)
+    for i in range(n):
+        out[i] = nd.affine_transform(shifted[i], matrix, offset=offset, output_shape=(r1 - r0, w),
+                                     order=3, mode='nearest')
+    return out
+
+
+# --- авто-ось ----------------------------------------------------------------------------------------------
 
 def auto_axis(img0: np.ndarray, img180: np.ndarray, roi: ROI) -> Axis:
     """Авто-ось по нормированным кадрам кропа при ~0° и ~180° (img180 НЕ отражён): поиск (shift, alfa)
     как ``tomotools4.find_axis_correction`` (Powell от начального приближения по X центра масс, целевая —
-    ‖T(im0, s, a) − T(flip(im180), −s, −a)‖²), результат переводится в Axis."""
-    raise NotImplementedError
+    ‖T(im0, s, a) − T(flip(im180), −s, −a)‖²), результат переводится в Axis.
+
+    Кадры нормируются на L2-норму (float32, как в старом коде). Преобразования считаются на выбранном
+    бэкенде (cupy на GPU)."""
+    import scipy.ndimage as ndi  # noqa: WPS433
+    import scipy.optimize as optimize  # noqa: WPS433
+
+    from .gpu import to_numpy  # noqa: WPS433
+
+    a0 = np.asarray(to_numpy(img0), dtype='float32')
+    a1 = np.fliplr(np.asarray(to_numpy(img180), dtype='float32'))
+    if a0.shape != a1.shape or a0.shape != (roi.height, roi.width):
+        raise ValueError('кадры {} и {} не совпадают с кропом {}×{}'.format(
+            a0.shape, a1.shape, roi.height, roi.width))
+    im0 = a0 / (a0 ** 2).sum() ** 0.5
+    im1 = a1 / (a1 ** 2).sum() ** 0.5
+    cm0 = ndi.center_of_mass(im0)
+    cm1 = ndi.center_of_mass(im1)
+    initial_shift = (float(cm1[1]) - float(cm0[1])) / 2
+
+    xp, _ = _backend(None)
+    g0, g1 = xp.asarray(im0), xp.asarray(im1)
+
+    def _objective(shift_angle):
+        s, a = shift_angle
+        diff = transform_image(g0, s, a, xp) - transform_image(g1, -s, -a, xp)
+        return float((diff ** 2).sum())
+
+    result = optimize.minimize(_objective, np.array([initial_shift, 0.0]), method='Powell')
+    shift_x, alfa = (float(v) for v in result.x)
+    logger.info('auto_axis: shift_x=%.3f alfa=%.4f (оценок целевой: %s)', shift_x, alfa, result.nfev)
+    return from_crop_params(shift_x, alfa, roi, method='auto')
 
 
-def center_metric(slice_img: np.ndarray, kind: str = 'entropy') -> float:
-    """Метрика резкости среза внутри вписанного круга: 'entropy' (энтропия гистограммы, меньше — лучше) или
-    'tv' (полная вариация, больше — резче). Возвращает значение, у которого меньше = лучше."""
-    raise NotImplementedError
+# --- перебор центра ----------------------------------------------------------------------------------------
+
+METRICS = ('entropy', 'tv')
+
+
+def _circle_mask(img: np.ndarray) -> np.ndarray:
+    h, w = img.shape
+    cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
+    r = (min(h, w) - 1) / 2.0
+    yy, xx = np.ogrid[0:h, 0:w]
+    return (yy - cy) ** 2 + (xx - cx) ** 2 <= r * r
+
+
+def center_metric(slice_img: np.ndarray, kind: str = 'entropy',
+                  value_range: Optional[Tuple[float, float]] = None) -> float:
+    """Метрика качества среза внутри вписанного круга, меньше = лучше.
+
+    'entropy' — энтропия гистограммы (256 бинов) значений в диапазоне value_range (по умолчанию — процентили
+    0,1…99,9 самого среза; значения за пределами прижимаются к краям). При переборе центра диапазон должен быть
+    общим для всех срезов (см. center_scan), иначе сравнение нечестно.
+    'tv' — полная вариация (сумма модуля градиента): неверный центр добавляет дуги и двоения краёв, поэтому TV
+    минимальна при верном центре (проверено на синтетике) — возвращается как есть."""
+    img = np.asarray(slice_img, dtype='float64')
+    mask = _circle_mask(img)
+    if kind == 'entropy':
+        v = img[mask]
+        lo, hi = value_range if value_range is not None else np.percentile(v, [0.1, 99.9])
+        lo, hi = float(lo), float(hi)
+        if not hi > lo:
+            return 0.0
+        hist, _ = np.histogram(np.clip(v, lo, hi), bins=256, range=(lo, hi))
+        p = hist[hist > 0] / float(hist.sum())
+        return float(-(p * np.log(p)).sum())
+    if kind == 'tv':
+        gy, gx = np.gradient(img)
+        return float(np.sqrt(gx ** 2 + gy ** 2)[mask].sum())
+    raise ValueError('неизвестная метрика: {} (допустимы {})'.format(kind, ', '.join(METRICS)))
 
 
 def center_scan(sino_row: np.ndarray, angles_deg: np.ndarray, centers: Sequence[float], crop_center: float,
-                pixel_size: float, recon_fn, metric: str = 'entropy') -> Tuple[List[np.ndarray], np.ndarray]:
+                pixel_size: float, recon_fn: Callable, metric: str = 'entropy'
+                ) -> Tuple[List[np.ndarray], np.ndarray]:
     """Перебор центра для одной строки. sino_row (n, w) — строка, уже выровненная по текущей оси (ось в
     crop_center = (w−1)/2); для центра c строка сдвигается на (crop_center − c) по x и восстанавливается
-    recon_fn(sino, angles, pixel_size) → (w, w). Возвращает (срезы, метрики)."""
-    raise NotImplementedError
+    recon_fn(sino, angles, pixel_size) → (w, w). Возвращает (срезы, метрики).
+
+    Для 'entropy' диапазон гистограммы общий для всех срезов (процентили 0,1…99,9 объединённых значений)."""
+    import scipy.ndimage as ndi  # noqa: WPS433
+
+    from .gpu import to_numpy  # noqa: WPS433
+
+    if metric not in METRICS:
+        raise ValueError('неизвестная метрика: {} (допустимы {})'.format(metric, ', '.join(METRICS)))
+    sino = np.asarray(to_numpy(sino_row), dtype='float32')
+    slices = []
+    for c in centers:
+        d = float(crop_center) - float(c)
+        s = ndi.shift(sino, [0, d], order=3, mode='nearest') if d != 0 else sino.copy()
+        slices.append(np.asarray(to_numpy(recon_fn(s, angles_deg, pixel_size)), dtype='float32'))
+    value_range = None
+    if metric == 'entropy' and slices:
+        mask = _circle_mask(slices[0])
+        pooled = np.concatenate([s[mask] for s in slices])
+        value_range = tuple(np.percentile(pooled, [0.1, 99.9]))
+    metrics = np.array([center_metric(s, metric, value_range) for s in slices], dtype='float64')
+    return slices, metrics
 
 
 def tilt_from_centers(y_top: float, c_top: float, y_bottom: float, c_bottom: float, method: str = 'tilt') -> Axis:
-    """Ось по центрам на двух строках детектора."""
-    raise NotImplementedError
+    """Ось по центрам на двух строках детектора: наклон tan(tilt) = (c_bottom − c_top) / (y_bottom − y_top),
+    y_ref — середина между строками, center_x — середина между центрами."""
+    dy = float(y_bottom) - float(y_top)
+    if dy == 0:
+        raise ValueError('строки для наклона совпадают: {}'.format(y_top))
+    tilt = math.degrees(math.atan((float(c_bottom) - float(c_top)) / dy))
+    return Axis(center_x=(float(c_top) + float(c_bottom)) / 2.0, y_ref=(float(y_top) + float(y_bottom)) / 2.0,
+                tilt_deg=tilt, method=method)
 
 
 def diff_view(img0: np.ndarray, img180: np.ndarray, shift_x: float, alfa: float) -> np.ndarray:
     """Вспомогательный вид: T(img0, s, a) − flip(T(img180, s, a)) (как «Показать совмещение» в ноутбуке)."""
-    raise NotImplementedError
+    from .gpu import to_numpy  # noqa: WPS433
+    xp, _ = _backend(None)
+    t0 = transform_image(to_numpy(img0), shift_x, alfa, xp)
+    t1 = transform_image(to_numpy(img180), shift_x, alfa, xp)
+    return np.asarray(to_numpy(t0 - xp.flip(t1, axis=1)))
