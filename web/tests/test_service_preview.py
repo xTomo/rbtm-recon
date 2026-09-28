@@ -219,6 +219,28 @@ def test_axis_tilt_sets_session_axis(loaded):
     assert client.post(url(sid, 'axis/tilt'), json={'y_top': 10}, headers=HEADERS).status_code == 400
 
 
+def test_axis_set_manual_axis_used_by_recipe_until_auto(loaded):
+    _, client, _, _, sid, ctx = loaded
+    r = client.post(url(sid, 'axis/set'), json={'center': 35.25, 'tilt': 0.5, 'row': 20}, headers=HEADERS)
+    assert r.status_code == 200
+    ax = Axis.from_dict(r.get_json()['axis'])
+    assert (ax.center_x, ax.y_ref, ax.tilt_deg, ax.method) == (35.25, 20.0, 0.5, 'manual')
+    assert ctx.axis == ax
+    # ось сессии: восстановление страницы и рецепт без center/tilt
+    assert client.get('/sessions/' + sid, headers=HEADERS).get_json()['axis']['method'] == 'manual'
+    rec = client.post(url(sid, 'recipe'), json={}, headers=HEADERS).get_json()
+    assert rec['axis']['center_x'] == 35.25 and rec['axis']['tilt_deg'] == 0.5
+    assert rec['provenance']['steps']['axis'] == 'checked'
+    # ошибки ввода
+    assert client.post(url(sid, 'axis/set'), json={'tilt': 0.5}, headers=HEADERS).status_code == 400
+    assert client.post(url(sid, 'axis/set'), json={'center': 35, 'tilt': 60}, headers=HEADERS).status_code == 400
+    assert client.post(url(sid, 'axis/set'), json={'center': 35, 'tilt': 0, 'row': 10 ** 6},
+                       headers=HEADERS).status_code == 400
+    # сброс — авто-ось
+    assert client.post(url(sid, 'axis/auto'), headers=HEADERS).get_json()['axis']['method'] == 'auto'
+    assert ctx.axis.method == 'auto'
+
+
 def test_center_scan_finds_true_center(loaded):
     _, client, _, ss, sid, _ = loaded
     row = 20

@@ -167,7 +167,7 @@ class Context:
         self.pixel_size = float(pixel_size_mm)
         self.checkpoints = checkpoints            # {'angles', 'sy', 'sx'} измеренные (advanced) или None
         self.xp = xp or gpu.get_xp()
-        self.axis: Optional[Axis] = None          # текущая ось сессии (авто или заданная через axis/tilt)
+        self.axis: Optional[Axis] = None          # текущая ось сессии (авто или заданная через axis/tilt, axis/set)
         self.warnings: List[str] = list(prep.warnings)
         self.timings: Dict[str, float] = {}       # последнего среза
         self._full_timings: Dict[str, float] = {}  # последнего среза полным путём (выравнивание + кольца) — для оценки

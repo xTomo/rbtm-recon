@@ -29,6 +29,7 @@
 | POST .../axis/auto                             | JSON: axis, shift_x, alfa, углы пары 0°/180° |
 | POST .../axis/scan {row, center?, tilt?, step, n, metric, region, seq} | binary uint16 (n, th, tw): фрагменты среза при центрах center + (i − n//2)·step, общее окно квантования; X-Meta: centers, metrics, best |
 | POST .../axis/tilt {y_top, c_top, y_bottom, c_bottom} | JSON: axis (``axis.tilt_from_centers``) |
+| POST .../axis/set {center, tilt, row?}         | JSON: axis — ось, заданная вручную (method ``manual``) |
 | GET  .../axis/diff?center&tilt&max_px          | binary uint16: ``axis.diff_view`` пары 0°/180° |
 | GET  .../rings/preview?row&center&tilt&preset&region&max_px&seq | binary uint16 (2, h, w): без колец и с пресетом, общее окно |
 | GET  .../repositioning                         | JSON: применимость, checkpoint-ы (угол, sy, sx), накопленные сдвиги, предупреждения |
@@ -44,7 +45,8 @@
   энергией краёв (``preview.structured_region``); кандидаты сдвигаются в частотной области;
   принимает и ``rings``, ``angles``, ``max_px``. Метрика считается по показываемым фрагментам (см. ``preview``).
   В ``axis/diff`` центр — на строке ``row`` (по умолчанию ``roi.preview_row``).
-- ``axis/tilt`` делает найденную ось текущей осью сессии (как ``axis/auto``); ``slice`` и прочие с явными
+- ``axis/tilt`` и ``axis/set`` делают ось текущей осью сессии (как ``axis/auto``; её же берёт ``recipe`` без
+  center/tilt и отдаёт ``GET /sessions/<sid>`` при восстановлении страницы); ``slice`` и прочие с явными
   center/tilt текущую ось не меняют.
 - ``estimate`` не требует ``ready``: без замеров превью ``time: null``.
 
@@ -559,6 +561,22 @@ def axis_tilt(sid):
         ctx.axis = ax
         return {'axis': ax.to_dict(), 'shift_x': axis_mod.to_crop_params(ax, ctx.roi)[0],
                 'alfa': axis_mod.to_crop_params(ax, ctx.roi)[1]}
+
+    return jsonify(_compute(sid, None, None, fn))
+
+
+@bp.post('/<sid>/axis/set')
+def axis_set(sid):
+    """Ось, заданная вручную: ``{center, tilt, row}`` — столбец оси на строке детектора row и наклон, градусы.
+    Становится осью сессии (превью без center/tilt, рецепт, восстановление страницы); сброс — ``axis/auto``."""
+    b = _body()
+    if arg_float(b, 'center') is None or arg_float(b, 'tilt', lo=-45.0, hi=45.0) is None:
+        raise ValueError('нужны center и tilt')
+
+    def fn(ctx, check):
+        _, ax = _axis_args(ctx, b, check)
+        ctx.axis = ax
+        return {'axis': ax.to_dict()}
 
     return jsonify(_compute(sid, None, None, fn))
 
