@@ -2,7 +2,8 @@
 
     python -m reconengine suggest <scan> [--out recipe.json] [--pixel-size-mm X]
     python -m reconengine migrate <scan> --ini rec_config.ini [--out recipe.json]
-    python -m reconengine run <scan> --recipe recipe.json --out DIR [--cache DIR] [--name ИМЯ]
+    python -m reconengine run <scan> --recipe recipe.json --out DIR [--cache DIR] [--name ИМЯ] [--slices Z0 Z1]
+    python -m reconengine compare <ноутбук .1.raw> <каталог результата> [--step 16]
 
 ``<scan>`` — путь к файлу HDF5 v2 или id эксперимента (тогда файл ищется как ``<src-dir>/<id>.h5``,
 по умолчанию ``$RECON_EXP_SRC`` или ``/exp_src``). Прогресс пишется в stderr, итог — JSON в stdout.
@@ -95,6 +96,8 @@ def _cmd_migrate(args) -> int:
 def _cmd_run(args) -> int:
     path = resolve_scan_path(args.scan, args.src_dir)
     r = recipe_mod.load(args.recipe)
+    if args.slices:
+        r.recon['slices'] = [int(args.slices[0]), int(args.slices[1])]
     cache = args.cache or os.path.join(args.out, '.cache')
     cancel = threading.Event()
     with gpu.gpu_lock(args.gpu_lock):
@@ -109,6 +112,18 @@ def _cmd_run(args) -> int:
     summary = {k: doc[k] for k in ('run_id', 'volume', 'binned', 'timings', 'warnings')}
     json.dump(summary, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write('\n')
+    return 0
+
+
+def _cmd_compare(args) -> int:
+    from . import compare  # noqa: WPS433
+    rows = compare.compare(args.old_raw, args.result, args.step)
+    if not rows:
+        sys.stderr.write('нет общих срезов\n')
+        return 1
+    for z, c, ratio in rows:
+        sys.stdout.write('строка {:5d}: корреляция {:.5f}, среднее движок/ноутбук {:.4f}\n'.format(z, c, ratio))
+    sys.stdout.write('минимум корреляции {:.5f} по {} срезам\n'.format(min(c for _, c, _ in rows), len(rows)))
     return 0
 
 
@@ -145,10 +160,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--cache', help='каталог кэша кропа (по умолчанию <out>/.cache)')
     sp.add_argument('--name', help='имя образца для файлов Amira (по умолчанию id эксперимента)')
     sp.add_argument('--backend', choices=('auto', 'astra', 'cpu'), default='auto', help='FBP')
+    sp.add_argument('--slices', type=int, nargs=2, metavar=('Z0', 'Z1'),
+                    help='строки детектора [Z0, Z1) вместо recon.slices рецепта (для пробного запуска)')
     sp.add_argument('--slab-rows', type=int, help='строк в слое (по умолчанию по памяти GPU)')
     sp.add_argument('--workers', type=int, default=data.DEFAULT_WORKERS, help='потоков распаковки')
     sp.add_argument('--gpu-lock', help='файл блокировки GPU (flock), общий с Jupyter')
     sp.set_defaults(func=_cmd_run)
+
+    sp = sub.add_parser('compare', help='сравнить объём движка с объёмом ноутбука по общим срезам')
+    sp.add_argument('old_raw', help='raw ноутбука полного разрешения (<имя>.<nz>_<ny>_<nx>.1.raw)')
+    sp.add_argument('result', help='каталог результата движка или его result.json')
+    sp.add_argument('--step', type=int, default=16, help='шаг по срезам')
+    sp.set_defaults(func=_cmd_compare)
     return p
 
 

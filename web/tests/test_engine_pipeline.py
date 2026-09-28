@@ -303,3 +303,27 @@ def test_cli_migrate_rec_config_ini(tmp_path, capsys):
     assert r.axis.tilt_deg == pytest.approx(ss.tilt_deg)
     assert r.pixel_size == {'value_mm': 0.009, 'source': 'hdf5', 'user_edited': False}
     assert r.repositioning['enabled'] is False
+
+
+def test_cli_run_slices_and_compare(tmp_path, capsys):
+    """Пробный запуск части срезов (--slices) сравнивается с полным объёмом по тем же строкам детектора."""
+    ss = simple_scan()
+    path = write_h5(ss, tmp_path / 'scan.h5')
+    scan = data.open_scan(path)
+    rpath = tmp_path / 'recipe.json'
+    recipe_mod.save(make_recipe(scan, ROI(3, 69, 2, 38), Axis(ss.center_x, ss.y_ref, ss.tilt_deg)), rpath)
+    cache = str(tmp_path / 'cache')
+    assert cli.main(['run', path, '--recipe', str(rpath), '--out', str(tmp_path / 'full'), '--cache', cache,
+                     '--backend', 'cpu']) == 0
+    assert cli.main(['run', path, '--recipe', str(rpath), '--out', str(tmp_path / 'part'), '--cache', cache,
+                     '--backend', 'cpu', '--slices', '10', '20', '--slab-rows', '3']) == 0
+    capsys.readouterr()
+    full = json.loads((tmp_path / 'full' / 'result.json').read_text(encoding='utf-8'))
+    old_raw = str(tmp_path / 'full' / full['volume']['file'])
+
+    from reconengine import compare
+    rows = compare.compare(old_raw, str(tmp_path / 'part'), step=1)
+    assert [z for z, _, _ in rows] == list(range(10, 20))
+    assert all(c > 0.99999 and abs(ratio - 1) < 1e-4 for _, c, ratio in rows)
+    assert cli.main(['compare', old_raw, str(tmp_path / 'part'), '--step', '4']) == 0
+    assert 'минимум корреляции' in capsys.readouterr().out
