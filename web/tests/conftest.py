@@ -24,6 +24,10 @@ for _p in (RECON_DIR, WEBRECON_DIR, SCRIPTS_DIR, HERE):
         sys.path.insert(0, _p)
 
 
+def pytest_configure(config):
+    config.addinivalue_line('markers', 'slow: тесты на реальном скане (путь в RECON_REAL_H5)')
+
+
 def _make_module(name):
     mod = types.ModuleType(name)
     sys.modules[name] = mod
