@@ -108,6 +108,30 @@ def test_align_rows_zero_angle_is_shift_only(projections):
         assert np.abs(out[k] - ref).max() < 1e-6
 
 
+def test_align_rows_interpolates_frame_by_frame(projections, monkeypatch):
+    """Интерполяции получают отдельные кадры слоя (s_in, w), а не склеенный (n·s_in, w): у cupyx.spline_filter1d
+    блок потоков растёт с длиной оси, и при длине > 32768 (сотни кадров × десятки строк) запуск ядра падает."""
+    import scipy.ndimage as ndi
+    shapes = []
+
+    class Spy:
+        def __getattr__(self, name):
+            fn = getattr(ndi, name)
+
+            def wrapper(a, *args, **kwargs):
+                shapes.append(np.shape(a))
+                return fn(a, *args, **kwargs)
+            return wrapper
+
+    monkeypatch.setattr(ax, '_backend', lambda xp: (np, Spy()))
+    p, _ = projections
+    roi = ROIS[0]
+    frames = _crop(p[:3], roi)
+    shift_x, alfa = ax.to_crop_params(TRUE_AXIS, roi)
+    ax.align_rows(frames, 0, (10, 20), shift_x, alfa, roi.height)
+    assert shapes and all(s == (roi.height, roi.width) for s in shapes)
+
+
 def test_align_rows_requires_margin(projections):
     p, _ = projections
     roi = ROIS[0]
@@ -184,12 +208,12 @@ def test_auto_axis_finds_known_axis_on_normalized_frames():
 
 
 def test_auto_axis_matches_find_axis_correction(projections):
-    """На тех же кадрах — те же (shift, alfa), что у tomotools4.find_axis_correction."""
+    """Без сглаживания на тех же кадрах — те же (shift, alfa), что у tomotools4.find_axis_correction."""
     p, angles = projections
     roi = ROIS[1]
     crop = _crop(p, roi)
     s_old, a_old = t4.find_axis_correction(np.stack([crop[0], crop[-1]]), np.array([0.0, 180.0]))
-    found = ax.auto_axis(crop[0], crop[-1], roi)
+    found = ax.auto_axis(crop[0], crop[-1], roi, smooth_sigma=0)
     s_new, a_new = ax.to_crop_params(found, roi)
     # целевая отдаётся Powell как float (в старом коде — float32), траектории чуть расходятся
     assert s_new == pytest.approx(s_old, abs=1e-4)
@@ -251,3 +275,23 @@ def test_diff_view_matches_notebook(projections):
     ref = t4.transform_image(crop[0], 3.0, 0.4) - np.fliplr(t4.transform_image(crop[-1], 3.0, 0.4))
     assert isinstance(dv, np.ndarray)
     np.testing.assert_allclose(dv, ref, atol=1e-7)
+
+
+def test_auto_axis_smoothing_is_not_worse_on_noisy_frames():
+    """Сглаживание перед сравнением 0°/180° не ухудшает точность на зашумлённых кадрах с известной осью."""
+    axis = Axis(center_x=61.3, y_ref=63.5, tilt_deg=0.7)
+    errs = {0: [], ax.AUTO_AXIS_SMOOTH_SIGMA: []}
+    for seed in range(4):
+        blobs = ph.make_blobs(seed=seed + 10, n=16, r_max=28, z_range=(-45, 45), sigma_range=(2.5, 4.0))
+        ss = ph.make_synthetic_scan([0.0, 180.0], height=128, width=W, center_x=axis.center_x, y_ref=axis.y_ref,
+                                    tilt_deg=axis.tilt_deg, blobs=blobs, noise=0.5, seed=seed)
+        roi = ROI(20, 116, 8, 120)
+        crop = ph.make_crop(ss.frames, roi)
+        de = pp.dark_empty_from_crop(ss.scan, crop)
+        idx = ss.scan.data_idx
+        norm = pp.normalize_slab(crop.frames[idx], ss.scan.frame_numbers[idx], de, xp=np)
+        for sigma in errs:
+            found = ax.auto_axis(norm[0], norm[1], roi, smooth_sigma=sigma)
+            errs[sigma].append(abs(found.center_at(axis.y_ref) - axis.center_x))
+    assert max(errs[ax.AUTO_AXIS_SMOOTH_SIGMA]) < 0.25
+    assert np.mean(errs[ax.AUTO_AXIS_SMOOTH_SIGMA]) <= np.mean(errs[0]) + 0.02

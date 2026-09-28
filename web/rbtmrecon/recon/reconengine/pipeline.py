@@ -32,12 +32,14 @@ logger = logging.getLogger(__name__)
 
 #: Дополнительный запас строк на затухание префильтра сплайна при сдвиге образца (см. axis.align_rows).
 _SHIFT_EXTRA_ROWS = 8
-#: Доля свободной памяти GPU, которую можно занять слоем, и число «копий» слоя в пике
-#: (исходные uint16→float32, нормировка, сдвиг, поворот, кольца, временные буферы).
-_GPU_MEM_FRACTION = 0.5
-_GPU_COPIES = 10
+#: Модель памяти GPU слоя в единицах «строка × все кадры × float32» (n·w·4 байт):
+#: на входную строку — слой float32, копия (медиана или сдвиг) и маска; на выходную — выровненная синограмма;
+#: кольца и FBP идут кусками по _RING_CHUNK строк, remove_all_stripe держит ~8 копий куска.
+_GPU_MEM_FRACTION = 0.6
+_IN_COPIES, _OUT_COPIES, _RING_COPIES = 2.25, 1.0, 8.0
+_RING_CHUNK = 16
 _CPU_SLAB_ROWS = 16
-_MIN_SLAB_ROWS, _MAX_SLAB_ROWS = 4, 64
+_MIN_SLAB_ROWS, _MAX_SLAB_ROWS = 4, 256
 #: Доли общего прогресса по стадиям.
 _P_CROP, _P_PREPARE = 0.3, 0.35
 
@@ -180,6 +182,14 @@ def margin(prep: Prepared, width: int) -> int:
     return axis_mod.margin_rows(prep.alfa, width) + int(math.ceil(max_sy)) + extra
 
 
+def slab_rows_for_memory(free_bytes: int, n_frames: int, width: int, margin_rows: int) -> int:
+    """Выходных строк слоя, помещающихся в free_bytes по модели памяти (см. _IN_COPIES и др.)."""
+    unit = max(1, n_frames * width * 4)
+    budget = free_bytes * _GPU_MEM_FRACTION / unit
+    rows = (budget - _IN_COPIES * 2 * margin_rows - _RING_COPIES * _RING_CHUNK) / (_IN_COPIES + _OUT_COPIES)
+    return int(min(_MAX_SLAB_ROWS, max(_MIN_SLAB_ROWS, rows)))
+
+
 def auto_slab_rows(n_frames: int, width: int, margin_rows: int, xp=None) -> int:
     """Число выходных строк слоя по свободной памяти GPU (на CPU — фиксированное)."""
     xp = xp or gpu.get_xp()
@@ -188,15 +198,18 @@ def auto_slab_rows(n_frames: int, width: int, margin_rows: int, xp=None) -> int:
     info = gpu.mem_info()
     if info is None:
         return _CPU_SLAB_ROWS
-    per_row = max(1, n_frames * width * 4 * _GPU_COPIES)
-    rows_in = int(info[0] * _GPU_MEM_FRACTION // per_row)
-    return int(min(_MAX_SLAB_ROWS, max(_MIN_SLAB_ROWS, rows_in - 2 * margin_rows)))
+    return slab_rows_for_memory(info[0], n_frames, width, margin_rows)
+
+
+def _is_gpu_oom(exc: BaseException) -> bool:
+    return type(exc).__name__ == 'OutOfMemoryError'      # cupy.cuda.memory.OutOfMemoryError без импорта cupy
 
 
 def process_slab(crop: CropData, prep: Prepared, out_rows: Tuple[int, int], m: int, ring_params,
                  xp=None) -> Any:
     """Синограммы (s, n, w) выходных строк кропа out_rows = [r0, r1): нормировка, сдвиг образца,
-    выравнивание оси, кольца. Возвращает xp-массив."""
+    выравнивание оси, кольца (кусками по _RING_CHUNK строк — память колец не растёт со слоем).
+    Возвращает xp-массив."""
     xp = xp or gpu.get_xp()
     h = crop.roi.height
     r0, r1 = out_rows
@@ -209,7 +222,10 @@ def process_slab(crop: CropData, prep: Prepared, out_rows: Tuple[int, int], m: i
     del slab
     sino = xp.ascontiguousarray(xp.swapaxes(aligned, 0, 1))
     del aligned
-    return rings.apply(sino, ring_params, xp=xp)
+    if ring_params:
+        for c in range(0, sino.shape[0], _RING_CHUNK):
+            sino[c:c + _RING_CHUNK] = rings.apply(sino[c:c + _RING_CHUNK], ring_params, xp=xp)
+    return sino
 
 
 def output_window(r: recipe_mod.Recipe) -> Tuple[Tuple[int, int, int, int], Optional[np.ndarray]]:
@@ -312,22 +328,38 @@ def run_recipe(r: recipe_mod.Recipe, scan_path: str, out_dir: str, cache_dir: st
     base = name or scan.exp_id
     logger.info('run_recipe %s: срезы [%d, %d), слой %d строк, запас %d, объём %s, бэкенд FBP %s',
                 scan.exp_id, z0, z1, rows, m, shape, fbp.resolve_backend(backend))
+    timings['slab_rows'] = rows
 
     writer = outputs.VolumeWriter(out_dir, base, shape, pixel_size, binning=r.outputs.get('binning', [4]))
     samples: List[np.ndarray] = []
     try:
-        for a in range(c0, c1, rows):
+        a = c0
+        while a < c1:
             check_cancel(cancel)
             b = min(a + rows, c1)
-            sino = process_slab(crop, prep, (a, b), m, ring_params, xp=xp)
-            rec = fbp.recon_rows(sino, prep.angles, pixel_size, backend=backend, angle_mode=r.recon['angles'])
+            try:
+                sino = process_slab(crop, prep, (a, b), m, None, xp=xp)
+            except Exception as exc:  # noqa: BLE001 — нехватка памяти GPU: слой вдвое меньше и заново
+                if not _is_gpu_oom(exc) or rows <= _MIN_SLAB_ROWS:
+                    raise
+                gpu.free_memory()
+                rows = max(_MIN_SLAB_ROWS, rows // 2)
+                logger.warning('нехватка памяти GPU: слой уменьшен до %d строк', rows)
+                continue
+            # кольца и FBP кусками: память колец и объём среза в RAM не растут со слоем
+            for c in range(0, b - a, _RING_CHUNK):
+                part = rings.apply(sino[c:c + _RING_CHUNK], ring_params, xp=xp)
+                rec = fbp.recon_rows(part, prep.angles, pixel_size, backend=backend, angle_mode=r.recon['angles'])
+                del part
+                rec = rec[:, wy0:wy1, wx0:wx1]
+                if circle is not None:
+                    rec = np.where(circle[None], rec, np.float32(0))
+                writer.write(a - c0 + c, rec)
+                if c == 0:
+                    samples.append(rec[rec.shape[0] // 2, ::4, ::4].copy())
             del sino
-            rec = rec[:, wy0:wy1, wx0:wx1]
-            if circle is not None:
-                rec = np.where(circle[None], rec, np.float32(0))
-            writer.write(a - c0, rec)
-            samples.append(rec[(b - a) // 2, ::4, ::4].copy())
             progress(_P_PREPARE + (1 - _P_PREPARE) * (b - c0) / (c1 - c0), 'recon')
+            a = b
         files = writer.close()
     except BaseException:
         writer.abort()

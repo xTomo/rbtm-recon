@@ -327,3 +327,39 @@ def test_cli_run_slices_and_compare(tmp_path, capsys):
     assert all(c > 0.99999 and abs(ratio - 1) < 1e-4 for _, c, ratio in rows)
     assert cli.main(['compare', old_raw, str(tmp_path / 'part'), '--step', '4']) == 0
     assert 'минимум корреляции' in capsys.readouterr().out
+
+
+def test_slab_rows_for_memory():
+    n, w = 400, 3216
+    six_gb = pipeline.slab_rows_for_memory(int(5.8e9), n, w, 43)
+    eight_gb = pipeline.slab_rows_for_memory(int(7.5e9), n, w, 43)
+    assert 40 <= six_gb < eight_gb <= 256                     # на 6 ГБ — десятки строк, с ростом памяти — больше
+    assert pipeline.slab_rows_for_memory(int(0.5e9), n, w, 43) == 4          # не меньше минимума
+    assert pipeline.slab_rows_for_memory(int(80e9), n, w, 43) == 256         # не больше максимума
+
+
+def test_run_recipe_retries_slab_on_gpu_oom(tmp_path, monkeypatch):
+    """Нехватка памяти GPU на слое — слой вдвое меньше и заново; объём тот же, что без сбоя."""
+    ss = simple_scan()
+    path = write_h5(ss, tmp_path / 'scan.h5')
+    scan = data.open_scan(path)
+    r = make_recipe(scan, ROI(3, 69, 2, 38), Axis(ss.center_x, ss.y_ref, ss.tilt_deg))
+    ref = pipeline.run_recipe(r, path, str(tmp_path / 'ref'), str(tmp_path / 'cache'), backend='cpu', slab_rows=16)
+
+    class OutOfMemoryError(MemoryError):
+        pass
+
+    real = pipeline.process_slab
+    calls = []
+
+    def flaky(crop, prep, out_rows, *args, **kwargs):
+        calls.append(out_rows)
+        if len(calls) == 1:
+            raise OutOfMemoryError('out of memory allocating')
+        return real(crop, prep, out_rows, *args, **kwargs)
+
+    monkeypatch.setattr(pipeline, 'process_slab', flaky)
+    res = pipeline.run_recipe(r, path, str(tmp_path / 'oom'), str(tmp_path / 'cache'), backend='cpu', slab_rows=16)
+    assert calls[0] == (0, 16) and calls[1] == (0, 8)
+    vol = [np.fromfile(os.path.join(x.out_dir, x.result['volume']['file']), '<f4') for x in (ref, res)]
+    assert np.allclose(vol[0], vol[1], atol=1e-6 * np.abs(vol[0]).max())

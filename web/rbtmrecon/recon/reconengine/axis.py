@@ -122,7 +122,11 @@ def align_rows(frames, in_row0: int, out_rows: Tuple[int, int], shift_x: float, 
         raise ValueError('вход [{}, {}) не покрывает строки [{}, {}) с запасом {} (нужно [{}, {}))'.format(
             in_row0, in_row0 + s_in, r0, r1, m, need0, need1))
 
-    shifted = nd.shift(frames.reshape(n * s_in, w), [0, shift_x], order=3, mode='nearest').reshape(n, s_in, w)
+    # Покадрово, как transform_image: склеенный массив (n·s_in, w) нельзя — cupyx.spline_filter1d выбирает блок
+    # 2^ceil(log2(длина оси / 32)) потоков, и при длине оси > 32768 запуск ядра падает (CUDA_ERROR_INVALID_VALUE).
+    shifted = xp.empty((n, s_in, w), dtype=frames.dtype)
+    for i in range(n):
+        shifted[i] = nd.shift(frames[i], [0, shift_x], order=3, mode='nearest')
     if alfa == 0:
         return xp.ascontiguousarray(shifted[:, r0 - in_row0:r1 - in_row0, :])
 
@@ -140,13 +144,22 @@ def align_rows(frames, in_row0: int, out_rows: Tuple[int, int], shift_x: float, 
 
 # --- авто-ось ----------------------------------------------------------------------------------------------
 
-def auto_axis(img0: np.ndarray, img180: np.ndarray, roi: ROI) -> Axis:
+AUTO_AXIS_SMOOTH_SIGMA = 1.5
+
+
+def auto_axis(img0: np.ndarray, img180: np.ndarray, roi: ROI,
+              smooth_sigma: float = AUTO_AXIS_SMOOTH_SIGMA) -> Axis:
     """Авто-ось по нормированным кадрам кропа при ~0° и ~180° (img180 НЕ отражён): поиск (shift, alfa)
     как ``tomotools4.find_axis_correction`` (Powell от начального приближения по X центра масс, целевая —
     ‖T(im0, s, a) − T(flip(im180), −s, −a)‖²), результат переводится в Axis.
 
-    Кадры нормируются на L2-норму (float32, как в старом коде). Преобразования считаются на выбранном
-    бэкенде (cupy на GPU)."""
+    Два отличия от старого кода, оба из-за шума реальных кадров:
+    - кадры перед сравнением сглаживаются гауссом ``smooth_sigma`` px (0 — без сглаживания). Иначе целевую
+      определяет то, как интерполяция дробного сдвига сглаживает шум: на однородном образце она изрезана с
+      периодом меньше пикселя, и Powell останавливается в случайном локальном минимуме (на реальном скане
+      изрезанность падает в ~17 раз, ответ перестаёт зависеть от старта);
+    - сумма квадратов считается в float64: у старой float32-суммы Powell останавливался раньше минимума.
+    Кадры нормируются на L2-норму. Преобразования считаются на выбранном бэкенде (cupy на GPU)."""
     import scipy.ndimage as ndi  # noqa: WPS433
     import scipy.optimize as optimize  # noqa: WPS433
 
@@ -157,19 +170,22 @@ def auto_axis(img0: np.ndarray, img180: np.ndarray, roi: ROI) -> Axis:
     if a0.shape != a1.shape or a0.shape != (roi.height, roi.width):
         raise ValueError('кадры {} и {} не совпадают с кропом {}×{}'.format(
             a0.shape, a1.shape, roi.height, roi.width))
-    im0 = a0 / (a0 ** 2).sum() ** 0.5
-    im1 = a1 / (a1 ** 2).sum() ** 0.5
+    if smooth_sigma and smooth_sigma > 0:
+        a0 = ndi.gaussian_filter(a0, smooth_sigma, mode='nearest')
+        a1 = ndi.gaussian_filter(a1, smooth_sigma, mode='nearest')
+    im0 = a0 / (a0.astype('float64') ** 2).sum() ** 0.5
+    im1 = a1 / (a1.astype('float64') ** 2).sum() ** 0.5
     cm0 = ndi.center_of_mass(im0)
     cm1 = ndi.center_of_mass(im1)
     initial_shift = (float(cm1[1]) - float(cm0[1])) / 2
 
     xp, _ = _backend(None)
-    g0, g1 = xp.asarray(im0), xp.asarray(im1)
+    g0, g1 = xp.asarray(im0, dtype=xp.float32), xp.asarray(im1, dtype=xp.float32)
 
     def _objective(shift_angle):
         s, a = shift_angle
         diff = transform_image(g0, s, a, xp) - transform_image(g1, -s, -a, xp)
-        return float((diff ** 2).sum())
+        return float(xp.sum(diff * diff, dtype=xp.float64))
 
     result = optimize.minimize(_objective, np.array([initial_shift, 0.0]), method='Powell')
     shift_x, alfa = (float(v) for v in result.x)
