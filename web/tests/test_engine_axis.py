@@ -85,7 +85,7 @@ def test_margin_rows():
 
 # --- выравнивание слоя -------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize('rows', [(0, 12), (30, 45), (60, 72)])
+@pytest.mark.parametrize('rows', [(0, 12), (30, 45), (60, 72), (20, 21), (40, 44)])  # покадрово и батчем
 def test_align_rows_matches_transform_image(projections, rows):
     p, _ = projections
     roi = ROIS[0]
@@ -129,8 +129,9 @@ def test_align_rows_never_flattens_frames(projections, monkeypatch):
     roi = ROIS[0]
     frames = _crop(p[:3], roi)
     shift_x, alfa = ax.to_crop_params(TRUE_AXIS, roi)
-    ax.align_rows(frames, 0, (10, 20), shift_x, alfa, roi.height)
-    assert shapes and all(s == (3, roi.height, roi.width) for s in shapes)
+    ax.align_rows(frames, 0, (10, 20), shift_x, alfa, roi.height)          # покадрово
+    ax.align_rows(frames, 0, (10, 14), shift_x, alfa, roi.height)          # батчем
+    assert shapes and all(s in ((roi.height, roi.width), (3, roi.height, roi.width)) for s in shapes)
 
 
 def test_align_rows_requires_margin(projections):

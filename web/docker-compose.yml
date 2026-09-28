@@ -23,6 +23,9 @@ services:
       - CUDA_VISIBLE_DEVICES=1
       - RECON_JOB_GPU=0
       - RECON_GPU_LOCK=/fast/.gpu0.lock
+      # Скомпилированные ядра cupy переживают пересборку контейнера: иначе первый запрос превью после
+      # рестарта ждёт компиляции (кольца — ~10 с)
+      - CUPY_CACHE_DIR=/fast/.cupy-kernel-cache
     expose:
       - "5560"
     stop_grace_period: 90s   # задача получает SIGTERM и удаляет начатый объём (graceful_timeout 60 с)
@@ -43,6 +46,7 @@ services:
       # Jupyter — на GPU 0 вместе с задачами реконструкции; GPU 1 остаётся интерактивной студии
       - CUDA_DEVICE_ORDER=PCI_BUS_ID
       - CUDA_VISIBLE_DEVICES=0
+      - CUPY_CACHE_DIR=/fast/.cupy-kernel-cache
     volumes:
       - /diskmnt/fast/robotom:/fast
       - /diskmnt/a/makov/robotom/:/storage

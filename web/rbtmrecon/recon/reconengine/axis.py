@@ -66,6 +66,10 @@ def rotation_matrix(alfa: float) -> np.ndarray:
     return np.array([[c, s], [-s, c]])
 
 
+#: До стольких выходных строк align_rows выравнивает слой одним вызовом (превью), больше — покадрово (задача).
+BATCH_MAX_OUT_ROWS = 8
+
+
 def margin_rows(alfa: float, width: int, extra: int = 8) -> int:
     """Запас входных строк сверху и снизу для align_rows при повороте на alfa: ceil(width/2·|tan alfa|) + extra."""
     return int(math.ceil(width / 2.0 * abs(math.tan(math.radians(alfa))))) + int(extra)
@@ -104,12 +108,12 @@ def align_rows(frames, in_row0: int, out_rows: Tuple[int, int], shift_x: float, 
     Два шага, как в transform_image: сдвиг по x, затем ``affine_transform`` с матрицей поворота и смещением
     относительно центра полного кропа ((crop_height−1)/2, (w−1)/2). При alfa = 0 поворот пропускается.
 
-    Оба шага — одним вызовом на весь слой (n, s, w), по оси кадров преобразование тождественно: координаты по ней
-    целые, а сплайн, построенный префильтром и по этой оси, в целых узлах воспроизводит данные точно — результат
-    тот же, что покадрово (до ошибок округления), без n запусков ядер (на GPU покадровый цикл по 400–800 кадрам —
-    ~0,7 с на строку превью). Склеивать кадры в (n·s, w) нельзя: cupyx.spline_filter1d выбирает блок
-    2^ceil(log2(длина оси / 32)) потоков, и при длине оси > 32768 запуск ядра падает (CUDA_ERROR_INVALID_VALUE);
-    в (n, s, w) самая длинная ось — ширина кадра."""
+    До ``BATCH_MAX_OUT_ROWS`` выходных строк (превью) оба шага — одним вызовом на слой (n, s, w): по оси кадров
+    преобразование тождественно (координаты целые, а сплайн, построенный префильтром и по этой оси, в целых узлах
+    воспроизводит данные точно) — результат тот же, что покадрово, без n запусков ядер (на GPU покадровый цикл по
+    360 кадрам — 0,7 с на строку превью, батч — 1,5 мс). Для слоёв задачи — покадрово (батч там медленнее, см.
+    код). Склеивать кадры в (n·s, w) нельзя: cupyx.spline_filter1d выбирает блок 2^ceil(log2(длина оси / 32))
+    потоков, и при длине оси > 32768 запуск ядра падает (CUDA_ERROR_INVALID_VALUE)."""
     xp, nd = _backend(xp)
     frames = _as_float(frames, xp)
     if frames.ndim != 3:
@@ -128,18 +132,31 @@ def align_rows(frames, in_row0: int, out_rows: Tuple[int, int], shift_x: float, 
         raise ValueError('вход [{}, {}) не покрывает строки [{}, {}) с запасом {} (нужно [{}, {}))'.format(
             in_row0, in_row0 + s_in, r0, r1, m, need0, need1))
 
-    shifted = nd.shift(frames, [0, 0, shift_x], order=3, mode='nearest')
-    if alfa == 0:
-        return xp.ascontiguousarray(shifted[:, r0 - in_row0:r1 - in_row0, :])
-
     rot = rotation_matrix(alfa)
     c = np.array(_crop_center(crop_height, w))
     offset = rot @ (np.array([r0, 0.0]) - c) + c - np.array([in_row0, 0.0])
-    matrix = np.eye(3)
-    matrix[1:, 1:] = rot
-    out = nd.affine_transform(shifted, xp.asarray(matrix), offset=[0.0, float(offset[0]), float(offset[1])],
-                              output_shape=(n, r1 - r0, w), order=3, mode='nearest')
-    return out.astype(frames.dtype, copy=False)
+    if r1 - r0 <= BATCH_MAX_OUT_ROWS:
+        # несколько выходных строк (превью): один вызов на слой вместо n запусков ядер
+        shifted = nd.shift(frames, [0, 0, shift_x], order=3, mode='nearest')
+        if alfa == 0:
+            return xp.ascontiguousarray(shifted[:, r0 - in_row0:r1 - in_row0, :])
+        matrix = np.eye(3)
+        matrix[1:, 1:] = rot
+        out = nd.affine_transform(shifted, xp.asarray(matrix), offset=[0.0, float(offset[0]), float(offset[1])],
+                                  output_shape=(n, r1 - r0, w), order=3, mode='nearest')
+        return out.astype(frames.dtype, copy=False)
+    # слои задачи: покадрово — префильтр сплайна по оси кадров (шаг по памяти s·w) и лишние проходы по всему
+    # слою делали батч на GPU в 2,4 раза медленнее (замер: 360 кадров × 257 строк × 3216)
+    out = xp.empty((n, r1 - r0, w), dtype=frames.dtype)
+    matrix = xp.asarray(rot)
+    for i in range(n):
+        s = nd.shift(frames[i], [0, shift_x], order=3, mode='nearest')
+        if alfa == 0:
+            out[i] = s[r0 - in_row0:r1 - in_row0]
+        else:
+            out[i] = nd.affine_transform(s, matrix, offset=[float(offset[0]), float(offset[1])],
+                                         output_shape=(r1 - r0, w), order=3, mode='nearest')
+    return out
 
 
 # --- авто-ось ----------------------------------------------------------------------------------------------
