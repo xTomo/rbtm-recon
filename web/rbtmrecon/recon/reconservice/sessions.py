@@ -32,6 +32,7 @@
 | GET  .../axis/diff?center&tilt&max_px          | binary uint16: ``axis.diff_view`` пары 0°/180° |
 | GET  .../rings/preview?row&center&tilt&preset&region&max_px&seq | binary uint16 (2, h, w): без колец и с пресетом, общее окно |
 | GET  .../repositioning                         | JSON: применимость, checkpoint-ы (угол, sy, sx), накопленные сдвиги, предупреждения |
+| POST .../recipe {center?, tilt?, row?, rings?, angles?, slices?, xy_roi?, pixel_size_mm?} | JSON: полный рецепт по состоянию сессии (ROI кропа, ось, размер пикселя) — для POST /jobs |
 | POST .../estimate {recipe}                     | JSON: ``pipeline.estimate`` + оценка времени, с/срез по замерам превью |
 
 ``region`` — ``x0,y0,x1,y1`` в пикселях среза (w×w, w — ширина ROI), для увеличенного фрагмента; ``rings`` —
@@ -65,7 +66,7 @@ from typing import Any, Dict, Optional
 from flask import Blueprint, current_app, jsonify, request
 
 from reconengine import axis as axis_mod
-from reconengine import data, gpu
+from reconengine import data, fbp, gpu, rings
 from reconengine import recipe as recipe_mod
 from reconengine.model import Cancelled, CropData, ROI, ScanInfo, check_cancel
 
@@ -591,6 +592,56 @@ def rings_preview(sid):
 def repositioning(sid):
     s = _mgr().get(sid, _user())
     return jsonify(_ready(s).repositioning_info())
+
+
+@bp.post('/<sid>/recipe')
+def make_recipe(sid):
+    """Полный рецепт по состоянию сессии — для ``POST /jobs`` (браузеру не нужно знать схему рецепта).
+
+    Тело (всё необязательно): ``center``/``tilt``/``row`` — ось (как у slice; без них — текущая ось сессии, при
+    первом запросе авто-ось), ``rings`` — пресет, ``angles`` — режим углов, ``slices`` — [z0, z1) строк детектора
+    (по умолчанию весь ROI), ``xy_roi``, ``pixel_size_mm`` — размер пикселя, введённый пользователем (иначе
+    найденный для скана, с источником). ROI — загруженного кропа. Рецепт проверяется по кадру скана."""
+    b = _body()
+    s = _mgr().get(sid, _user())
+    preset = _str(b, 'rings', preview.DEFAULT_RINGS)
+    if preset not in rings.PRESETS:
+        raise ValueError('неизвестный пресет колец: {}'.format(preset))
+    angles = _str(b, 'angles', preview.DEFAULT_ANGLES)
+    if angles not in fbp.ANGLE_MODES:
+        raise ValueError('неизвестный режим углов: {}'.format(angles))
+    user_ps = arg_float(b, 'pixel_size_mm', None, lo=1e-6, hi=10.0)
+
+    def fn(ctx, check):
+        if b.get('center') is None and b.get('tilt') is None:
+            ax = ctx.current_axis(check)
+        else:
+            _, ax = _axis_args(ctx, b, check)
+        ps = s.extra['pixel_size']
+        r = recipe_mod.default_recipe(s.exp_id, s.scan.fingerprint, ctx.roi, user_ps or ps.value_mm,
+                                      'user' if user_ps else ps.source, s.scan.is_advanced)
+        r.pixel_size['user_edited'] = user_ps is not None
+        r.author = s.owner
+        r.axis = ax
+        r.rings = {'preset': preset, 'params': None}
+        r.recon['angles'] = angles
+        if b.get('slices') is not None:
+            z = b['slices']
+            if not (isinstance(z, (list, tuple)) and len(z) == 2):
+                raise ValueError('slices: нужно [z0, z1]')
+            r.recon['slices'] = [int(z[0]), int(z[1])]
+        if b.get('xy_roi') is not None:
+            r.recon['xy_roi'] = dict(b['xy_roi'])
+        r.provenance['steps'] = {'fov': 'checked',
+                                 'axis': 'auto' if ax.method == 'auto' else 'checked',
+                                 'rings': 'checked' if 'rings' in b else 'auto',
+                                 'run': 'checked'}
+        d = recipe_mod.to_dict(r)
+        r = recipe_mod.from_dict(d)                      # проверка типов (xy_roi, slices из тела)
+        recipe_mod.validate(r, s.scan.height, s.scan.width)
+        return recipe_mod.to_dict(r)
+
+    return jsonify(_compute(sid, None, None, fn))
 
 
 @bp.post('/<sid>/estimate')

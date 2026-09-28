@@ -9,6 +9,7 @@
 |---------------------------------------|-------|
 | GET /scans/<id>/info                  | JSON: форма, число кадров по режимам, advanced, диапазон углов, размер пикселя с источником и предупреждениями, fingerprint |
 | GET /scans/<id>/overview              | JSON: предложенный ROI (координаты детектора), углы, где объект выходит за ROI, биннинг, форма обзора, углы выборки, размер пикселя |
+| GET /scans/<id>/outside?x0&x1&y0&y1  | JSON: углы выборки, на которых объект выходит за столбцы рамки (для рамки, подвинутой пользователем) |
 | GET /scans/<id>/envelope              | binary uint16 (h/b, w/b): огибающая max(−ln T) по углам выборки |
 | GET /scans/<id>/thumbs                | binary uint16 (k, h/b, w/b): −ln T кадров выборки; X-Meta: angles, indices |
 | GET /scans/<id>/sample/<k>            | binary uint16 (h/b, w/b): k-й кадр выборки (−ln T) |
@@ -431,6 +432,23 @@ def overview(exp_id):
         'window': [float(v) for v in od.window],
         'pixel_size': pixel_size_json(reg.pixel_size(exp_id)),
     })
+
+
+@bp.get('/<exp_id>/outside')
+def outside(exp_id):
+    """Углы выборки обзора, на которых объект выходит за столбцы ROI (в строках ROI) — для рамки, которую
+    пользователь подвинул: ``?x0&x1&y0&y1`` в координатах полного кадра (``n``, ``bin`` — как у обзора)."""
+    exp_id = auth.valid_exp_id(exp_id)
+    _, od = _overview_args(exp_id)
+    ov = od.overview
+    a = request.args
+    roi = ROI(arg_int(a, 'x0', od.roi.x0), arg_int(a, 'x1', od.roi.x1), arg_int(a, 'y0', od.roi.y0),
+              arg_int(a, 'y1', od.roi.y1))
+    roi.validate(ov.full_height, ov.full_width)
+    angles = [float(v) for v in preprocess.angles_outside(ov, roi)]
+    hit = set(angles)
+    return jsonify({'roi': roi.to_dict(), 'angles_outside': angles,
+                    'indices': [k for k, v in enumerate(ov.sample_angles) if float(v) in hit]})
 
 
 @bp.get('/<exp_id>/envelope')
