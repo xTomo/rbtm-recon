@@ -724,7 +724,8 @@ def measure_repositioning_shifts(
       1. Берём data_check кадр из группы data_check_images, привязанный к checkpoint k.
       2. Находим data кадр при том же угле из сегмента ДО checkpoint k.
       3. Нормируем оба кадра ОДНИМ empty (periodic_empties[k]) для устранения фона и дрейфа.
-      4. Измеряем сдвиг фазовой кросс-корреляцией (субпиксель, upsample_factor=10).
+      4. Измеряем сдвиг взаимной корреляцией (субпиксель, upsample_factor=10, без фазовой
+         нормировки спектра — она неустойчива на гладких объектах с шумом).
 
     Сдвиги характеризуют каждый checkpoint k: насколько объект сместился
     при возврате на стол ОТНОСИТЕЛЬНО ПРЕДЫДУЩЕГО СЕГМЕНТА (data_check
@@ -884,9 +885,11 @@ def measure_repositioning_shifts(
             plt.tight_layout()
             plt.show()
 
-        # Фазовая кросс-корреляция
+        # Взаимная корреляция без фазовой нормировки спектра (normalization=None): фазовая
+        # нормировка раздувает шум на высоких частотах, и на гладком объекте с шумом дробный
+        # сдвиг измерялся с ошибкой до 0,5–0,95 px (обычная корреляция — 0,00–0,10 px).
         shift, _error, _phasediff = phase_cross_correlation(
-            data_norm, dc_norm, upsample_factor=10)
+            data_norm, dc_norm, upsample_factor=10, normalization=None)
         shifts_y[k] = float(shift[0])
         shifts_x[k] = float(shift[1])
 
@@ -1184,16 +1187,29 @@ def transform_image(im: np.ndarray, shift_x: float, angle: float) -> np.ndarray:
     return imcu.get()
 
 
+AXIS_SMOOTH_SIGMA = 1.5
+
+
 def find_axis_correction(data_images_crop: np.ndarray,
-                         data_angles: np.ndarray) -> tuple[float, float]:
+                         data_angles: np.ndarray,
+                         smooth_sigma: float = AXIS_SMOOTH_SIGMA) -> tuple[float, float]:
     """Автоматически определяет поправку оси вращения методом Пауэлла.
 
     Минимизирует L2-норму разности трансформированных кадров 0° и 180°.
+
+    Кадры перед сравнением сглаживаются гауссом ``smooth_sigma`` px (0 — без
+    сглаживания): иначе на шумных данных целевую определяет то, как
+    интерполяция дробного сдвига сглаживает шум, — она изрезана с периодом
+    меньше пикселя, и Powell останавливается в случайном локальном минимуме
+    (на реальном скане ошибка оси доходила до ~1 px). Сумма квадратов
+    считается в float64: с float32-суммой Powell останавливался раньше
+    минимума.
 
     Параметры
     ----------
     data_images_crop : нормированные кадры, shape (N, H, W)
     data_angles      : углы в градусах, shape (N,)
+    smooth_sigma     : σ гауссова сглаживания кадров, px
 
     Возвращает
     ----------
@@ -1201,11 +1217,14 @@ def find_axis_correction(data_images_crop: np.ndarray,
     alfa    : float — угол наклона оси вращения в градусах
     """
     position_0, position_180 = get_angles_at_180_deg(data_angles)
-    data_0_orig = data_images_crop[position_0[0]]
-    data_180_orig = np.fliplr(data_images_crop[position_180[0]])
+    data_0_orig = np.asarray(data_images_crop[position_0[0]], dtype='float32')
+    data_180_orig = np.fliplr(np.asarray(data_images_crop[position_180[0]], dtype='float32'))
+    if smooth_sigma and smooth_sigma > 0:
+        data_0_orig = ndi.gaussian_filter(data_0_orig, smooth_sigma, mode='nearest')
+        data_180_orig = ndi.gaussian_filter(data_180_orig, smooth_sigma, mode='nearest')
 
-    im0 = data_0_orig / (data_0_orig ** 2).sum() ** 0.5
-    im1 = data_180_orig / (data_180_orig ** 2).sum() ** 0.5
+    im0 = (data_0_orig / (data_0_orig.astype('float64') ** 2).sum() ** 0.5).astype('float32')
+    im1 = (data_180_orig / (data_180_orig.astype('float64') ** 2).sum() ** 0.5).astype('float32')
 
     # center_of_mass возвращает (row, col) = (Y, X). transform_image сдвигает
     # по горизонтали (ось X = столбцы), поэтому начальное приближение берётся
@@ -1219,7 +1238,7 @@ def find_axis_correction(data_images_crop: np.ndarray,
     def _objective(shift_angle, img0, img1):
         s, a = shift_angle
         diff = transform_image(img0, s, a) - transform_image(img1, -s, -a)
-        return (diff ** 2).sum()
+        return float(np.sum(np.square(diff, dtype='float64')))
 
     result = optimize.minimize(
         _objective,
