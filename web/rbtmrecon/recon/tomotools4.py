@@ -1397,7 +1397,6 @@ def preview_axis_correction(sinogram_mem: np.ndarray, angles: np.ndarray,
     for slice_idx in tqdm(range(n_slices)):
         slice_numb = start_slice * slice_idx
         sino2d = sinogram_mem[slice_numb]
-        print(sino2d.shape)
         if remove_rings:
             sino2d = remove_all_stripe(cp.asanyarray(sino2d[:, None, :])).get()
             sino2d = np.squeeze(sino2d)
@@ -1473,14 +1472,21 @@ def create_axis_search_widget(sinogram_fixed: np.ndarray,
                                layout=widgets.Layout(width='220px'))
     btn_apply = widgets.Button(description='Применить + реконструкция', button_style='primary',
                                 layout=widgets.Layout(width='250px'))
+    # Вывод обработчиков кнопок (графики, print, tqdm) не привязан к ячейке:
+    # без Output-виджета JupyterLab отправляет его в Log Console, а не в ноутбук.
+    output = widgets.Output(layout=widgets.Layout(border='none'))
 
     def on_show_click(b):
-        _show_alignment(shift_slider.value, angle_slider.value)
+        with output:
+            output.clear_output(wait=True)
+            _show_alignment(shift_slider.value, angle_slider.value)
 
     def on_apply_click(b):
-        print(f"Применяем коррекцию: shift={shift_slider.value:.2f}, angle={angle_slider.value:.3f}")
-        _apply_and_reconstruct(shift_slider.value, angle_slider.value)
-        print("Готово!")
+        with output:
+            output.clear_output(wait=True)
+            print(f"Применяем коррекцию: shift={shift_slider.value:.2f}, angle={angle_slider.value:.3f}")
+            _apply_and_reconstruct(shift_slider.value, angle_slider.value)
+            print("Готово!")
 
     btn_show.on_click(on_show_click)
     btn_apply.on_click(on_apply_click)
@@ -1489,6 +1495,7 @@ def create_axis_search_widget(sinogram_fixed: np.ndarray,
         widgets.HBox([shift_slider, shift_text]),
         widgets.HBox([angle_slider, angle_text]),
         widgets.HBox([btn_show, btn_apply]),
+        output,
     ])
     return ui, shift_text, angle_text
 

@@ -611,3 +611,21 @@ def test_get_experiment_hdf5_reuses_readable_local_copy(tmp_path, monkeypatch):
 
     monkeypatch.setattr(t4.requests, 'get', boom)
     assert t4.get_experiment_hdf5('exp1', str(out_dir)) == str(out_dir / 'exp1.h5')
+
+
+def test_axis_search_widget_renders_into_output_widget():
+    """Вывод кнопок ручной коррекции оси идёт в Output-виджет под кнопками.
+
+    Без Output JupyterLab отправляет графики из обработчиков on_click в Log Console,
+    а не в ноутбук (так было в tomotools4 до исправления; в tomotools2 Output был).
+    """
+    widgets = pytest.importorskip('ipywidgets')
+    angles = np.arange(0, 360, 90, dtype='float32')          # 0, 90, 180, 270
+    images = np.random.default_rng(0).random((4, 8, 10)).astype('float32')
+    sinogram = np.zeros((8, 4, 10), dtype='float32')
+
+    ui, shift_text, angle_text = t4.create_axis_search_widget(sinogram, images, angles, 0.0, 0.0)
+
+    assert isinstance(ui.children[-1], widgets.Output)
+    show_button = ui.children[2].children[0]
+    show_button.click()  # обработчик не падает и рисует внутри with output:

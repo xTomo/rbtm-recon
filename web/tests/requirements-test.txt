@@ -16,3 +16,4 @@ tqdm
 matplotlib
 requests
 nbformat
+ipywidgets
