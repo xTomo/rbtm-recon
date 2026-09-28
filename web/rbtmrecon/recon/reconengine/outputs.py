@@ -288,6 +288,7 @@ def result_document(recipe_dict: Dict[str, Any], recipe_sha: str, files: Optiona
         'recipe': recipe_dict,
         'volume': {
             'file': full.get('raw'),
+            'hx': full.get('hx'),
             'shape': list(shape),
             'dtype': 'float32',
             'byteorder': 'little',

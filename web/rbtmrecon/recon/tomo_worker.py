@@ -40,6 +40,20 @@ def format_notebook_error(error):
     return 'error: {}: {}'.format(ename, evalue)
 
 
+def _subprocess_env():
+    """Окружение подпроцессов ноутбука (jupytext, nbconvert и ядро, которое он запускает).
+
+    Воркер работает внутри recon-service, процесс которого видит только GPU интерактивной сессии студии;
+    ноутбук должен считать на GPU задач — ``CUDA_VISIBLE_DEVICES = RECON_JOB_GPU``, если переменная задана
+    (иначе окружение наследуется как есть, как у отдельного воркера).
+    """
+    env = dict(os.environ)
+    job_gpu = os.environ.get('RECON_JOB_GPU')
+    if job_gpu:
+        env['CUDA_VISIBLE_DEVICES'] = job_gpu
+    return env
+
+
 def _notebook_auto_run(notebook):
     """Execute a notebook via nbconvert and collect output.
        Сначала конвертирует .py (jupytext) -> .ipynb, затем выполняет через nbconvert.
@@ -49,8 +63,9 @@ def _notebook_auto_run(notebook):
     """
     # Шаг 1: конвертируем .py (jupytext-формат) в .ipynb
     notebook_ipynb = notebook.replace('.py', '.ipynb')
+    env = _subprocess_env()
     args_jupytext = ["jupytext", "--to", "notebook", notebook, "--output", notebook_ipynb]
-    subprocess.check_call(args_jupytext)
+    subprocess.check_call(args_jupytext, env=env)
 
     # Шаг 2: выполняем .ipynb через nbconvert
     # --ServerApp.iopub_data_rate_limit относится к Jupyter Server (лимит скорости
@@ -60,11 +75,11 @@ def _notebook_auto_run(notebook):
     args = ["jupyter", "nbconvert", "--execute", "--allow-errors",
             "--ExecutePreprocessor.timeout=-1",
             "--to", "notebook", '--output', notebook_ipynb, notebook_ipynb]
-    subprocess.check_call(args)
+    subprocess.check_call(args, env=env)
 
     # Шаг 3: конвертируем выполненный ноутбук в HTML
     args = ["jupyter", "nbconvert", "--to", "html", notebook_ipynb]
-    subprocess.check_call(args)
+    subprocess.check_call(args, env=env)
 
     nb = nbformat.read(notebook_ipynb, nbformat.current_nbformat)
     return nb, find_notebook_errors(nb)

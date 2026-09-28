@@ -3,37 +3,102 @@
     python -m reconengine suggest <scan> [--out recipe.json] [--pixel-size-mm X]
     python -m reconengine migrate <scan> --ini rec_config.ini [--out recipe.json]
     python -m reconengine run <scan> --recipe recipe.json --out DIR [--cache DIR] [--name ИМЯ] [--slices Z0 Z1]
+                              [--progress-json] [--run-id ID] [--gpu-lock ФАЙЛ]
     python -m reconengine compare <ноутбук .1.raw> <каталог результата> [--step 16]
 
-``<scan>`` — путь к файлу HDF5 v2 или id эксперимента (тогда файл ищется как ``<src-dir>/<id>.h5``,
-по умолчанию ``$RECON_EXP_SRC`` или ``/exp_src``). Прогресс пишется в stderr, итог — JSON в stdout.
+``<scan>`` — путь к файлу HDF5 v2 или id эксперимента (тогда файл ищется в раскладке rbtm-storage
+``<src-dir>/<id>/before_processing/<id>.h5``, затем как ``<src-dir>/<id>.h5``; по умолчанию ``src-dir`` —
+``$RECON_EXP_SRC`` или ``/exp_src``). Прогресс пишется в stderr, итог — JSON в stdout.
+
+``run`` для recon-service: ``--progress-json`` — прогресс строками JSON ``{"progress": f, "stage": s}`` (не чаще
+двух раз в секунду и при смене стадии); SIGTERM/SIGINT (на Windows ещё Ctrl+Break) отменяют запуск — начатый
+объём удаляется, код выхода 130.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
+import re
+import signal
 import sys
 import threading
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-from . import data, gpu, pipeline, pixelsize, preprocess
+from . import data, gpu, outputs, pipeline, pixelsize, preprocess
 from . import recipe as recipe_mod
 from .model import Cancelled
 
 logger = logging.getLogger(__name__)
 
+#: код выхода отменённого запуска (как у процесса, прерванного Ctrl+C в shell)
+EXIT_CANCELLED = 130
+#: сигналы отмены; SIGBREAK — Ctrl+Break на Windows (его recon-service шлёт группе процесса задачи)
+_CANCEL_SIGNALS = ('SIGTERM', 'SIGINT', 'SIGBREAK')
+_RUN_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
+
 
 def resolve_scan_path(scan: str, src_dir: Optional[str]) -> str:
+    """Путь к HDF5: сам ``scan``, если это файл; иначе id эксперимента — сначала раскладка rbtm-storage
+    ``<base>/<id>/before_processing/<id>.h5``, затем плоская ``<base>/<id>.h5`` (ручные копии)."""
     if os.path.isfile(scan):
         return scan
     base = src_dir or os.environ.get('RECON_EXP_SRC', '/exp_src')
-    path = os.path.join(base, scan + '.h5')
-    if not os.path.isfile(path):
-        raise FileNotFoundError('нет файла скана: {} (и {})'.format(scan, path))
-    return path
+    candidates = [os.path.join(base, scan, 'before_processing', scan + '.h5'), os.path.join(base, scan + '.h5')]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    raise FileNotFoundError('нет файла скана: {} (искали {} и {})'.format(scan, *candidates))
+
+
+def _json_progress_printer(stream=None, min_interval: float = 0.5):
+    """Прогресс для recon-service: строки ``{"progress": f, "stage": s}`` в stderr — не чаще раза в min_interval
+    секунд, при смене стадии и по завершении (frac ≥ 1). Поток берётся при вызове (подмена sys.stderr в тестах)."""
+    state = {'t': 0.0, 'stage': None}
+
+    def progress(frac: float, stage: str) -> None:
+        now = time.monotonic()
+        if stage != state['stage'] or now - state['t'] >= min_interval or frac >= 1.0:
+            state['t'], state['stage'] = now, stage
+            out = stream or sys.stderr
+            out.write(json.dumps({'progress': round(float(frac), 4), 'stage': str(stage)}) + '\n')
+            out.flush()
+    return progress
+
+
+@contextlib.contextmanager
+def _cancel_on_signals(cancel: threading.Event, waiting_lock: Dict[str, bool]):
+    """На время запуска SIGTERM/SIGINT/SIGBREAK выставляют ``cancel``: конвейер бросает Cancelled на ближайшей
+    проверке и удаляет начатый объём. Пока процесс ждёт блокировку GPU (``waiting_lock['on']``), обработчик бросает
+    Cancelled сам: flock после сигнала перезапускается (PEP 475) и иначе ждал бы Jupyter до конца.
+    Обработчики ставятся только в главном потоке (иначе signal.signal нельзя) и снимаются на выходе."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    # без логирования: блокировки logging не реентерабельны, а сигнал может прийти посреди записи в лог
+    def handler(signum, frame):  # noqa: ARG001 — сигнатура обработчика сигнала
+        cancel.set()
+        if waiting_lock.get('on'):
+            raise Cancelled()
+
+    previous = {}
+    for name in _CANCEL_SIGNALS:
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            previous[sig] = signal.signal(sig, handler)
+        except (OSError, ValueError):   # сигнал недоступен на этой платформе
+            continue
+    try:
+        yield
+    finally:
+        for sig, old in previous.items():
+            signal.signal(sig, old if old is not None else signal.SIG_DFL)
 
 
 def _progress_printer(stream=sys.stderr, min_interval: float = 1.0):
@@ -93,6 +158,12 @@ def _cmd_migrate(args) -> int:
     return 0
 
 
+def _run_id(value: str) -> str:
+    if not _RUN_ID_RE.match(value):
+        raise argparse.ArgumentTypeError('run_id: латиница, цифры, «_», «-», до 64 символов')
+    return value
+
+
 def _cmd_run(args) -> int:
     path = resolve_scan_path(args.scan, args.src_dir)
     r = recipe_mod.load(args.recipe)
@@ -100,14 +171,24 @@ def _cmd_run(args) -> int:
         r.recon['slices'] = [int(args.slices[0]), int(args.slices[1])]
     cache = args.cache or os.path.join(args.out, '.cache')
     cancel = threading.Event()
-    with gpu.gpu_lock(args.gpu_lock):
-        try:
-            res = pipeline.run_recipe(r, path, args.out, cache, name=args.name, progress=_progress_printer(),
-                                      cancel=cancel, backend=args.backend, slab_rows=args.slab_rows,
-                                      workers=args.workers)
-        except Cancelled:
-            sys.stderr.write('отменено\n')
-            return 130
+    progress = _json_progress_printer() if args.progress_json else _progress_printer()
+    waiting_lock = {'on': True}
+    try:
+        with _cancel_on_signals(cancel, waiting_lock):
+            if args.gpu_lock and gpu.lock_busy(args.gpu_lock):
+                progress(0.0, 'wait_gpu')           # GPU занят Jupyter или старой очередью
+            with gpu.gpu_lock(args.gpu_lock):
+                waiting_lock['on'] = False
+                res = pipeline.run_recipe(r, path, args.out, cache, name=args.name, progress=progress,
+                                          cancel=cancel, backend=args.backend, slab_rows=args.slab_rows,
+                                          workers=args.workers)
+    except Cancelled:
+        sys.stderr.write('отменено\n')
+        return EXIT_CANCELLED
+    if args.run_id:
+        # id запуска задаёт recon-service: им названы каталог запуска и задача, по нему же — history/<run_id>
+        res.result['run_id'] = args.run_id
+        outputs.write_json(os.path.join(args.out, 'result.json'), res.result)
     doc = res.result
     summary = {k: doc[k] for k in ('run_id', 'volume', 'binned', 'timings', 'warnings')}
     json.dump(summary, sys.stdout, ensure_ascii=False, indent=2)
@@ -165,6 +246,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--slab-rows', type=int, help='строк в слое (по умолчанию по памяти GPU)')
     sp.add_argument('--workers', type=int, default=data.DEFAULT_WORKERS, help='потоков распаковки')
     sp.add_argument('--gpu-lock', help='файл блокировки GPU (flock), общий с Jupyter')
+    sp.add_argument('--progress-json', action='store_true',
+                    help='прогресс строками JSON {"progress": f, "stage": s} в stderr (для recon-service)')
+    sp.add_argument('--run-id', type=_run_id, help='id запуска в result.json (по умолчанию случайный)')
     sp.set_defaults(func=_cmd_run)
 
     sp = sub.add_parser('compare', help='сравнить объём движка с объёмом ноутбука по общим срезам')

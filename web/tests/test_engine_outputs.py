@@ -220,7 +220,7 @@ def test_result_document_schema_and_fields():
     assert doc['recipe_sha256'] == 'deadbeef'
     assert doc['recipe'] == recipe_dict
     assert doc['volume'] == {
-        'file': 'vol.4_5_6.1.raw', 'shape': [4, 5, 6], 'dtype': 'float32',
+        'file': 'vol.4_5_6.1.raw', 'hx': 'tomo.vol.1.hx', 'shape': [4, 5, 6], 'dtype': 'float32',
         'byteorder': 'little', 'voxel_mm': 0.009, 'units': '1/mm',
     }
     assert doc['binned'] == files['binned']

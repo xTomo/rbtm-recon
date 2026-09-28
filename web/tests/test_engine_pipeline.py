@@ -234,11 +234,20 @@ def test_cli_suggest_and_run(tmp_path, capsys):
 
 
 def test_cli_resolves_exp_id_in_src_dir(tmp_path):
+    """id эксперимента: раскладка rbtm-storage <src>/<id>/before_processing/<id>.h5, затем плоская <src>/<id>.h5."""
     ss = simple_scan()
     write_h5(ss, tmp_path / 'abc.h5')
     assert cli.resolve_scan_path('abc', str(tmp_path)) == os.path.join(str(tmp_path), 'abc.h5')
-    with pytest.raises(FileNotFoundError):
+    storage_layout = tmp_path / 'abc' / 'before_processing'
+    storage_layout.mkdir(parents=True)
+    write_h5(ss, storage_layout / 'abc.h5')
+    assert cli.resolve_scan_path('abc', str(tmp_path)) == str(storage_layout / 'abc.h5')     # приоритет
+    # путь к файлу — как есть
+    assert cli.resolve_scan_path(str(tmp_path / 'abc.h5'), None) == str(tmp_path / 'abc.h5')
+    with pytest.raises(FileNotFoundError) as exc:
         cli.resolve_scan_path('nope', str(tmp_path))
+    assert os.path.join('nope', 'before_processing', 'nope.h5') in str(exc.value)
+    assert os.path.join(str(tmp_path), 'nope.h5') in str(exc.value)
 
 
 def test_cli_migrate_rec_config_ini(tmp_path, capsys):
