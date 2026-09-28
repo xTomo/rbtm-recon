@@ -29,11 +29,16 @@
   │
   └─► :5551  reconstructor-jupyter  (JupyterLab — ручная реконструкция)
 
-rbtmrecon (tomo_worker.py)
-  ├─► :27017  MongoDB                (читает очередь, пишет статус)
-  ├─► :5006   rbtmstorage            (скачивает HDF5-файлы)
-  └─► GPU (CUDA 12.1)               (вычисления)
+rbtm-web (Django) ──► :5560 recon-service (reconstructor, порт не публикуется, токен RECON_TOKEN)
+  ├─► :27017  MongoDB                (очередь задач autotom.jobs, статусы в tomoobjects, старая очередь)
+  ├─► :5006   rbtmstorage            (метаданные: размер пикселя)
+  ├─► /exp_src                       (исходные HDF5, чтение без копирования)
+  ├─► GPU 1                          (интерактивная сессия студии)
+  └─► GPU 0 под /fast/.gpu0.lock     (задачи: python -m reconengine run; старая очередь ноутбуков)
 ```
+
+До этапа 7 студии recon-service обслуживает и старую очередь `tomoobjects` (кнопки на странице
+`:5550`) — тем же ноутбуком `reconstructor4.py` через nbconvert, что и раньше `tomo_worker.py`.
 
 Контейнеры используют **две сети Docker**:
 - `default` — внутренняя сеть стека `web`
@@ -68,11 +73,19 @@ rbtmrecon (tomo_worker.py)
 | `/tomo_objects` | GET | JSON-список объектов (REST API) |
 | `/tomo_object/<id>` | GET | JSON-карточка объекта (REST API) |
 
-### `rbtmrecon` — воркер реконструкции
+### `rbtmrecon` — recon-service и воркер реконструкции
+
+Контейнер `reconstructor` запускает **recon-service** (`recon/reconservice/`, gunicorn на порту 5560): API
+студии реконструкции для rbtm-web и очередь задач. Вычисления — пакет **reconengine** (`recon/reconengine/`,
+`python -m reconengine suggest|migrate|run|compare`): чтение HDF5 без распаковки лишнего, конвейер по слоям
+строк, рецепт `recipe.json` и `result.json`. Подробности — в докстрингах `reconservice/__init__.py` и
+`reconengine/__init__.py`.
 
 | Файл | Описание |
 |---|---|
-| `recon/tomo_worker.py` | Основной цикл: берёт задание из MongoDB, запускает реконструкцию |
+| `recon/reconservice/` | recon-service: сканы и обзор, интерактивная сессия, задачи, результаты; `/health` без токена |
+| `recon/reconengine/` | движок реконструкции (используется сервисом, CLI и — с этапа 6 — ноутбуком) |
+| `recon/tomo_worker.py` | Шаг старой очереди (`process_once`): ноутбук через nbconvert; вызывается recon-service |
 | `recon/tomo_queue.py` | Работа с MongoDB |
 | `recon/tomotools2.py` | Инструменты для стандартного эксперимента (legacy, нужен `tomo_worker.py` и старому ноутбуку) |
 | `recon/tomotools4.py` | Расширенные инструменты: поддержка AdvancedExperiment, коррекция позиционирования, нормировка с дрейфом |
@@ -165,6 +178,9 @@ rbtmrecon (tomo_worker.py)
 
 ### Сборка и запуск
 
+Перед первым запуском создайте `web/.env` с общим токеном recon-service и rbtm-web (образец —
+`web/.env.example`; тот же `RECON_TOKEN` задаётся в окружении rbtm-web). Без токена сервис отвечает 503.
+
 ```bash
 cd rbtm-recon/web
 docker-compose build
@@ -182,8 +198,11 @@ bash restart.sh
 # Статус контейнеров
 docker-compose ps
 
-# Логи воркера
+# Логи recon-service и очереди
 docker-compose logs -f reconstructor
+
+# recon-service жив: GPU, сессия, очередь, занятость GPU 0
+docker exec web_reconstructor_1 wget -qO- http://localhost:5560/health
 
 # Логи веб-сервиса
 docker-compose logs -f web

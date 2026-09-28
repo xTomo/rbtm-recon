@@ -184,3 +184,27 @@ def test_tomo_ini_fails_with_default_interpolation():
     cfg = configparser.ConfigParser()
     with pytest.raises(ValueError):
         cfg['SAMPLE'] = {'specimen': '30% Ni'}
+
+
+@pytest.mark.parametrize('job_gpu, expected', [('0', '0'), (None, 'inherited'), ('', 'inherited')])
+def test_notebook_subprocesses_run_on_job_gpu(monkeypatch, tmp_path, job_gpu, expected):
+    """jupytext/nbconvert запускаются с CUDA_VISIBLE_DEVICES = RECON_JOB_GPU: процесс recon-service видит только
+    GPU интерактивной сессии, а ноутбук должен считать на GPU задач."""
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', 'inherited')
+    if job_gpu is None:
+        monkeypatch.delenv('RECON_JOB_GPU', raising=False)
+    else:
+        monkeypatch.setenv('RECON_JOB_GPU', job_gpu)
+    calls = []
+    monkeypatch.setattr(tomo_worker.subprocess, 'check_call',
+                        lambda args, **kw: calls.append((args[0], kw.get('env'))))
+    monkeypatch.setattr(tomo_worker.nbformat, 'read', lambda path, version: CLEAN_NB)
+
+    nb, errors = tomo_worker._notebook_auto_run(str(tmp_path / 'reconstructor4.py'))
+
+    assert errors == []
+    assert [c[0] for c in calls] == ['jupytext', 'jupyter', 'jupyter']
+    for _, env in calls:
+        assert env is not None and env['CUDA_VISIBLE_DEVICES'] == expected
+    # окружение процесса воркера не меняется
+    assert tomo_worker.os.environ['CUDA_VISIBLE_DEVICES'] == 'inherited'
