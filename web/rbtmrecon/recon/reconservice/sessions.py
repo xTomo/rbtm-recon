@@ -33,7 +33,7 @@
 | GET  .../axis/diff?center&tilt&max_px          | binary uint16: ``axis.diff_view`` пары 0°/180° |
 | GET  .../rings/preview?row&center&tilt&preset&region&max_px&seq | binary uint16 (2, h, w): без колец и с пресетом, общее окно |
 | GET  .../repositioning                         | JSON: применимость, checkpoint-ы (угол, sy, sx), накопленные сдвиги, предупреждения |
-| POST .../recipe {center?, tilt?, row?, rings?, angles?, slices?, xy_roi?, pixel_size_mm?} | JSON: полный рецепт по состоянию сессии (ROI кропа, ось, размер пикселя) — для POST /jobs |
+| POST .../recipe {center?, tilt?, row?, rings?, angles?, slices?, xy_roi?, binning?, pixel_size_mm?} | JSON: полный рецепт по состоянию сессии (ROI кропа, ось, размер пикселя) — для POST /jobs |
 | POST .../estimate {recipe}                     | JSON: ``pipeline.estimate`` + оценка времени, с/срез по замерам превью |
 
 ``region`` — ``x0,y0,x1,y1`` в пикселях среза (w×w, w — ширина ROI), для увеличенного фрагмента; ``rings`` —
@@ -63,7 +63,7 @@ import logging
 import threading
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from flask import Blueprint, current_app, jsonify, request
 
@@ -458,6 +458,24 @@ def _str(src, name: str, default: str) -> str:
     return default if v is None or v == '' else str(v)
 
 
+#: коэффициенты копий с биннингом, которые можно заказать из студии (``outputs.binning`` рецепта)
+BINNING_RANGE = (2, 32)
+
+
+def _binning(v) -> List[int]:
+    """Список коэффициентов копий с биннингом: целые в BINNING_RANGE, без повторов, по возрастанию; [] — без копий."""
+    if not isinstance(v, (list, tuple)):
+        raise ValueError('binning: нужен список коэффициентов, получено {!r}'.format(v))
+    out = set()
+    for x in v:
+        if isinstance(x, bool) or not isinstance(x, (int, float)) or int(x) != x:
+            raise ValueError('binning: коэффициенты — целые числа, получено {!r}'.format(x))
+        if not BINNING_RANGE[0] <= int(x) <= BINNING_RANGE[1]:
+            raise ValueError('binning: коэффициент {} вне [{}, {}]'.format(int(x), *BINNING_RANGE))
+        out.add(int(x))
+    return sorted(out)
+
+
 def _max_px(src) -> int:
     return arg_int(src, 'max_px', _cfg().preview_max_px, *_MAX_PX_RANGE)
 
@@ -618,7 +636,8 @@ def make_recipe(sid):
 
     Тело (всё необязательно): ``center``/``tilt``/``row`` — ось (как у slice; без них — текущая ось сессии, при
     первом запросе авто-ось), ``rings`` — пресет, ``angles`` — режим углов, ``slices`` — [z0, z1) строк детектора
-    (по умолчанию весь ROI), ``xy_roi``, ``pixel_size_mm`` — размер пикселя, введённый пользователем (иначе
+    (по умолчанию весь ROI), ``xy_roi``, ``binning`` — коэффициенты копий с биннингом (по умолчанию [4]),
+    ``pixel_size_mm`` — размер пикселя, введённый пользователем (иначе
     найденный для скана, с источником). ROI — загруженного кропа. Рецепт проверяется по кадру скана."""
     b = _body()
     s = _mgr().get(sid, _user())
@@ -650,6 +669,8 @@ def make_recipe(sid):
             r.recon['slices'] = [int(z[0]), int(z[1])]
         if b.get('xy_roi') is not None:
             r.recon['xy_roi'] = dict(b['xy_roi'])
+        if b.get('binning') is not None:
+            r.outputs['binning'] = _binning(b['binning'])
         r.provenance['steps'] = {'fov': 'checked',
                                  'axis': 'auto' if ax.method == 'auto' else 'checked',
                                  'rings': 'checked' if 'rings' in b else 'auto',
