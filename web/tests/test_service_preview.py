@@ -330,6 +330,12 @@ def test_estimate(loaded):
     client.get(url(sid, 'slice', row=20, center=row_center(ss, 20), tilt=0.6), headers=HEADERS)
     t = client.post(url(sid, 'estimate'), json={'recipe': recipe_mod.to_dict(r)}, headers=HEADERS).get_json()['time']
     assert t['s_per_slice'] > 0 and t['n_slices'] == 32 and t['recon_s'] == pytest.approx(32 * t['s_per_slice'])
+    assert t['prepare_s'] is not None and t['prepare_s'] >= 0    # подготовка сессии — задача повторит её
+    # быстрый путь (сдвиг готовой строки) не занижает оценку: она по последнему срезу полным путём
+    _, meta = decode(client.get(url(sid, 'slice', row=20, center=row_center(ss, 20) + 0.5, tilt=0.6), headers=HEADERS))
+    assert 'fast_shift_px' in meta['timings']
+    t2 = client.post(url(sid, 'estimate'), json={'recipe': recipe_mod.to_dict(r)}, headers=HEADERS).get_json()['time']
+    assert t2['s_per_slice'] == t['s_per_slice']
     d = recipe_mod.to_dict(r)
     d['recon']['slices'] = [0, 100]                              # вне fov
     assert client.post(url(sid, 'estimate'), json={'recipe': d}, headers=HEADERS).status_code == 400

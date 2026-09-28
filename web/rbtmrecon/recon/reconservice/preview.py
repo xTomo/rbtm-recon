@@ -169,7 +169,9 @@ class Context:
         self.xp = xp or gpu.get_xp()
         self.axis: Optional[Axis] = None          # текущая ось сессии (авто или заданная через axis/tilt)
         self.warnings: List[str] = list(prep.warnings)
-        self.timings: Dict[str, float] = {}       # последнего среза (для оценки времени задачи)
+        self.timings: Dict[str, float] = {}       # последнего среза
+        self._full_timings: Dict[str, float] = {}  # последнего среза полным путём (выравнивание + кольца) — для оценки
+        self.prepare_s: Optional[float] = None    # секунд build_context — задача повторяет ту же подготовку
         self._band: Optional[Band] = None
         self._band_row_s: Optional[float] = None  # секунд нормировки на строку полосы
         self._pair = None                         # (img0, img180) нормированные кадры пары 0°/180°, numpy
@@ -386,6 +388,8 @@ class Context:
         img = np.ascontiguousarray(rec[y0:y1, x0:x1])
         t['total_s'] = round(time.time() - t_start, 4)
         self.timings = dict(t)
+        if t.get('align_s', 0.0) > 0 and 'rings_s' in t:
+            self._full_timings = dict(t)
         meta = {'row': int(row), 'axis': ax.to_dict(), 'rings': preset, 'angles': angle_mode,
                 'n_angles': int(fbp.select_angles(self.prep.angles, angle_mode).sum()),
                 'region': [x0, y0, x1, y1], 'exact': 'fast_shift_px' not in t, 'timings': t}
@@ -480,8 +484,10 @@ class Context:
         return out
 
     def seconds_per_slice(self) -> Optional[float]:
-        """Грубая оценка секунд на срез задачи по последнему превью: нормировка строки + выравнивание + кольца + FBP."""
-        t = self.timings
+        """Грубая оценка секунд на срез задачи по превью полным путём: нормировка строки + выравнивание + кольца +
+        FBP. Быстрый путь (сдвиг готовой строки) выравнивание и кольца не повторяет — по нему оценка занижена
+        (на реальном скане 0,19 с/срез против 0,30 в задаче); полный путь считает строку одну — с запасом."""
+        t = self._full_timings or self.timings
         if not t or self._band_row_s is None:
             return None
         return float(self._band_row_s + t.get('align_s', 0.0) + t.get('rings_s', 0.0) + t.get('fbp_s', 0.0))
@@ -492,6 +498,7 @@ def build_context(scan: ScanInfo, crop: CropData, pixel_size_mm: float, progress
     """Опорные кадры по кропу и сдвиги образца (advanced) — как pipeline.prepare с включённым repositioning, но без
     оси (ось задаётся в каждом запросе превью) и с углами checkpoint-ов для /repositioning."""
     xp = xp or gpu.get_xp()
+    t_start = time.time()
     warnings: List[str] = []
     idx, angles, fnums = pipeline.data_frames(scan)
     if idx.size == 0:
@@ -519,16 +526,18 @@ def build_context(scan: ScanInfo, crop: CropData, pixel_size_mm: float, progress
     ax0 = axis_mod.from_crop_params(0.0, 0.0, roi, method='placeholder')
     prep = pipeline.Prepared(idx=idx, angles=angles, fnums=fnums, de=de, frame_sy=frame_sy, frame_sx=frame_sx,
                              shifts=shifts, axis=ax0, shift_x=0.0, alfa=0.0, warnings=warnings)
+    ctx = Context(scan, crop, prep, pixel_size_mm, checkpoints, xp=xp)
+    ctx.prepare_s = round(time.time() - t_start, 3)
     progress(1.0, 'ready')
-    return Context(scan, crop, prep, pixel_size_mm, checkpoints, xp=xp)
+    return ctx
 
 
 def estimate(r: recipe_mod.Recipe, scan: ScanInfo, ctx: Optional[Context] = None,
              rate: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
     """pipeline.estimate + оценка времени. rate — скорость последних выполненных задач (``JobService.recent_rate``):
-    секунд на срез · ширина² · угол и секунд подготовки; без неё — по замерам превью (секунд на срез,
-    масштабированных на ширину рецепта как w²; превью считает строку с запасом, поэтому оценка завышена);
-    без того и другого — time: None."""
+    секунд на срез · ширина² · угол и секунд подготовки; без неё — по замерам превью (``seconds_per_slice``,
+    масштабированных на ширину рецепта как w²) и подготовки сессии (``prepare_s`` — задача повторяет опорные кадры
+    и сдвиги образца); без того и другого — time: None."""
     est = pipeline.estimate(r, scan)
     n_slices = int(est['volume_shape'][0])
     w = r.fov.width
@@ -543,5 +552,5 @@ def estimate(r: recipe_mod.Recipe, scan: ScanInfo, ctx: Optional[Context] = None
         return est
     scale = (w / float(ctx.roi.width)) ** 2
     est['time'] = {'s_per_slice': sps * scale, 'n_slices': n_slices, 'recon_s': sps * scale * n_slices,
-                   'source': 'preview'}
+                   'prepare_s': ctx.prepare_s, 'source': 'preview'}
     return est
