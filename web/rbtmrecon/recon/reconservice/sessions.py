@@ -69,7 +69,7 @@ from reconengine import data, gpu
 from reconengine import recipe as recipe_mod
 from reconengine.model import Cancelled, CropData, ROI, ScanInfo, check_cancel
 
-from . import auth, binary, preview
+from . import auth, binary, cache, preview
 from .arbiter import Arbiter
 from .config import Config
 from .scans import arg_float, arg_int, pixel_size_json
@@ -292,6 +292,7 @@ class SessionManager:
                 check_cancel(cancel)
                 return
             logger.info('сессия %s: кроп готов за %.1f с', s.id[:8], time.time() - t0)
+            cache.cleanup_quiet(self.cfg)             # новый кроп мог превысить предел кэша на /fast
         except Cancelled:
             with self._lock:
                 if current():

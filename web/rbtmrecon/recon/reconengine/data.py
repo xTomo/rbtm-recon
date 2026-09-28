@@ -708,6 +708,10 @@ class CropLoader:
         path = self.cache_path(roi)
         cached = self._open_cached(roi, path)
         if cached is not None:
+            try:
+                os.utime(self._meta_path(path))     # время использования — для вытеснения старых кропов (LRU)
+            except OSError:
+                pass
             progress(1.0, 'crop')
             return CropData(roi=roi, frames=cached, path=path, fingerprint=scan.fingerprint)
 

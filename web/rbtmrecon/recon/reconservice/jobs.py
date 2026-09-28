@@ -78,7 +78,7 @@ import reconengine
 from reconengine import gpu
 from reconengine import recipe as recipe_mod
 
-from . import auth, publish
+from . import auth, cache, publish
 from .config import Config
 
 logger = logging.getLogger(__name__)
@@ -409,6 +409,7 @@ class JobRunner:
             self._fail(job, '{}: {}'.format(type(exc).__name__, exc))
         finally:
             self.current = None
+            cache.cleanup_quiet(self.cfg)             # задача могла создать кроп сверх предела кэша
 
     def _engine_cmd(self, job: Dict[str, Any], scan_path: str, recipe_path: str, run_dir: str) -> List[str]:
         cmd = [self.cfg.job_python, '-m', 'reconengine', 'run', scan_path, '--recipe', recipe_path, '--out', run_dir,
