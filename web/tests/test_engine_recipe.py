@@ -249,11 +249,22 @@ def test_from_rec_config_ini_migrates_half_open_roi(tmp_path, caplog):
                                            frame_height=10, frame_width=10)
 
     assert r.fov == ROI(2, 8, 1, 5)
-    assert r.axis is None
     assert r.input['exp_id'] == 'exp-old'
     assert r.input['fingerprint'] == 'fp-old'
     assert r.pixel_size['source'] == 'default'
-    assert any('axis_corr' in rec.message for rec in caplog.records)
+    assert any('shift_x=1.2' in rec.message for rec in caplog.records)
+    # ось ноутбука (относительно кропа) переведена в координаты детектора и обратно даёт те же параметры
+    from reconengine import axis as axis_mod
+    assert r.axis.method == 'notebook'
+    shift_x, alfa = axis_mod.to_crop_params(r.axis, r.fov)
+    assert shift_x == pytest.approx(1.2) and alfa == pytest.approx(0.3)
+
+
+def test_from_rec_config_ini_without_axis_corr_leaves_axis_auto(tmp_path):
+    ini_path = tmp_path / 'rec_config.ini'
+    _write_ini(ini_path, {'x_min': 0, 'x_max': 10, 'y_min': 0, 'y_max': 10})
+    r = recipe_mod.from_rec_config_ini(ini_path, exp_id='e', fingerprint='f', frame_height=20, frame_width=20)
+    assert r.axis is None
 
 
 def test_from_rec_config_ini_without_axis_corr_section(tmp_path):

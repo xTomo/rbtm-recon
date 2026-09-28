@@ -358,10 +358,11 @@ def from_rec_config_ini(path: Any, exp_id: str, fingerprint: str,
 
     ``[roi] x_min x_max y_min y_max`` — полуоткрытые границы (как использует ``reconstructor4.py``:
     ``data_images[:, y_min:y_max, x_min:x_max]``), переносятся напрямую в ``fov``. ``[axis_corr]``
-    (``shift_x``, ``alfa``) — в другой системе координат (относительно кропа, а не детектора) и
-    игнорируется; в лог пишется сообщение. Размер пикселя в старом конфиге не хранился — берётся
-    значение по умолчанию с source='default'.
+    (``shift_x``, ``alfa``) задан относительно кропа ``[roi]`` из того же файла и переводится в координаты
+    детектора (:func:`axis.from_crop_params`, ``method='notebook'``) — по такому рецепту движок повторяет
+    ноутбук. Размер пикселя в старом конфиге не хранился — берётся значение по умолчанию с source='default'.
     """
+    from .axis import from_crop_params  # noqa: WPS433 — axis тянет scipy только при вызове
     cfg = configparser.ConfigParser()
     if not cfg.read(str(path), encoding='utf-8'):
         raise FileNotFoundError('rec_config.ini не найден: {}'.format(path))
@@ -372,10 +373,12 @@ def from_rec_config_ini(path: Any, exp_id: str, fingerprint: str,
     roi = ROI(x0=int(sec['x_min']), x1=int(sec['x_max']), y0=int(sec['y_min']), y1=int(sec['y_max']))
     roi.validate(frame_height, frame_width)
 
-    if cfg.has_section('axis_corr'):
-        logger.info(
-            'from_rec_config_ini(%s): секция [axis_corr] проигнорирована — старая коррекция '
-            '(shift_x/alfa) задана в системе координат кропа, а не детектора', path)
-
     ps = pixelsize.resolve(None, None, None)
-    return default_recipe(exp_id, fingerprint, roi, ps.value_mm, ps.source, is_advanced=True)
+    r = default_recipe(exp_id, fingerprint, roi, ps.value_mm, ps.source, is_advanced=True)
+    if cfg.has_section('axis_corr'):
+        sec = cfg['axis_corr']
+        r.axis = from_crop_params(float(sec['shift_x']), float(sec['alfa']), roi, method='notebook')
+        logger.info('from_rec_config_ini(%s): ось ноутбука shift_x=%s alfa=%s → center_x=%.3f на y=%.1f, '
+                    'наклон %.4f°', path, sec['shift_x'], sec['alfa'], r.axis.center_x, r.axis.y_ref,
+                    r.axis.tilt_deg)
+    return r
