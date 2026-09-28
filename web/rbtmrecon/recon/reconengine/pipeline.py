@@ -373,7 +373,7 @@ def run_recipe(r: recipe_mod.Recipe, scan_path: str, out_dir: str, cache_dir: st
     rd = recipe_mod.to_dict(resolved)
     sha = recipe_mod.sha256(resolved)
     stats = outputs.volume_stats(np.concatenate([s.ravel() for s in samples]) if samples else np.zeros(0))
-    gpu_name = _gpu_name(xp)
+    gpu_name = gpu.device_name()
     doc = outputs.result_document(rd, sha, files, shape, pixel_size, stats, timings, warnings,
                                   ENGINE_VERSION, gpu_name)
     recipe_mod.save(resolved, os.path.join(out_dir, 'recipe.json'))
@@ -381,13 +381,3 @@ def run_recipe(r: recipe_mod.Recipe, scan_path: str, out_dir: str, cache_dir: st
     progress(1.0, 'done')
     return RunResult(recipe=resolved, result=doc, out_dir=str(out_dir))
 
-
-def _gpu_name(xp) -> Optional[str]:
-    if not gpu.is_gpu(xp):
-        return None
-    try:
-        props = xp.cuda.runtime.getDeviceProperties(xp.cuda.Device().id)
-        name = props.get('name')
-        return name.decode() if isinstance(name, bytes) else str(name)
-    except Exception:  # noqa: BLE001 — имя карты только для отчёта
-        return None

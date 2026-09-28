@@ -96,3 +96,36 @@ def gpu_lock(path: Optional[str]):
             yield
         finally:
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def lock_busy(path: Optional[str]) -> Optional[bool]:
+    """Занята ли блокировка gpu_lock(path) другим процессом. None — не определить (Windows, нет пути)."""
+    if not path:
+        return None
+    try:
+        import fcntl  # noqa: WPS433 — только Linux
+    except ImportError:
+        return None
+    try:
+        fh = open(path, 'a+')  # noqa: SIM115 — закрывается ниже
+    except OSError:
+        return None
+    with fh:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        return False
+
+
+def device_name() -> Optional[str]:
+    """Имя текущей карты или None на CPU."""
+    xp = get_xp()
+    if not is_gpu(xp):
+        return None
+    try:
+        name = xp.cuda.runtime.getDeviceProperties(xp.cuda.Device().id).get('name')
+        return name.decode() if isinstance(name, bytes) else str(name)
+    except Exception:  # noqa: BLE001 — только для отчёта
+        return None
