@@ -58,3 +58,24 @@ def test_recipe_binning(loaded):
     assert client.post(url(sid, 'recipe'), json={'binning': []}, headers=HEADERS).get_json()['outputs']['binning'] == []
     for bad in ([1], [64], 'x', [2.5], [True], 4):
         assert client.post(url(sid, 'recipe'), json={'binning': bad}, headers=HEADERS).status_code == 400, bad
+
+
+def test_recipe_smoothing(loaded):
+    """smoothing в теле recipe → блок рецепта (недостающие поля — по умолчанию), provenance.steps.smoothing; без
+    ключа — выключено и 'auto'; ошибки значений — 400."""
+    _, client, _, _, sid, _ = loaded
+    d = client.post(url(sid, 'recipe'), json={}, headers=HEADERS).get_json()
+    assert d['smoothing'] == {'sigma': None, 'deblur': 'wiener', 'balance': 0.02, 'amount': 1.5}
+    assert d['provenance']['steps']['smoothing'] == 'auto'
+    d = client.post(url(sid, 'recipe'), json={'smoothing': {'sigma': 1.5, 'deblur': 'unsharp', 'amount': 2}},
+                    headers=HEADERS).get_json()
+    assert d['smoothing'] == {'sigma': 1.5, 'deblur': 'unsharp', 'balance': 0.02, 'amount': 2}
+    assert d['provenance']['steps']['smoothing'] == 'checked'
+    assert client.post('/jobs', json={'recipe': d, 'name': 'образец'}, headers=HEADERS).status_code == 201
+    est = client.post(url(sid, 'estimate'), json={'recipe': d}, headers=HEADERS).get_json()
+    assert est['halo_rows'] > 0 and est['ring_rows_factor'] > 1
+    d = client.post(url(sid, 'recipe'), json={'smoothing': None}, headers=HEADERS).get_json()
+    assert d['smoothing']['sigma'] is None and d['provenance']['steps']['smoothing'] == 'checked'
+    for bad in ({'sigma': 0.1}, {'sigma': 1.5, 'deblur': 'rl'}, {'sigma': 1.5, 'balance': 2}, {'sigma': 'x'},
+                {'sigma': 1.5, 'radius': 2}, 1.5, 'wiener', [1.5]):
+        assert client.post(url(sid, 'recipe'), json={'smoothing': bad}, headers=HEADERS).status_code == 400, bad

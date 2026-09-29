@@ -1,5 +1,6 @@
-"""Тесты превью сессии (reconservice.preview через /sessions/<sid>/...): срез совпадает со срезом run_recipe,
-кэш полосы, авто-ось, перебор центра, вид 0°−180°, кольца, сдвиги образца, оценка, «последний выигрывает»."""
+"""Тесты превью сессии (reconservice.preview через /sessions/<sid>/...): срез совпадает со срезом run_recipe (и со
+сглаживанием), кэш полосы и блока строк, авто-ось, перебор центра, вид 0°−180°, кольца, сравнение вариантов, сдвиги
+образца, оценка, «последний выигрывает»."""
 import os
 import sys
 import threading
@@ -10,7 +11,7 @@ import numpy as np
 import pytest
 
 from reconengine import axis as axis_mod
-from reconengine import data, fbp, gpu, pipeline, preprocess
+from reconengine import data, fbp, gpu, pipeline, preprocess, rings, smoothing
 from reconengine import recipe as recipe_mod
 from reconengine.model import Axis, ROI
 from reconservice import preview
@@ -106,6 +107,108 @@ def test_slice_matches_run_recipe(tmp_path, make, dx, dy, n_slices):
     assert np.abs(got - ref)[inside].max() <= step
     assert meta['row'] == row and meta['rings'] == 'medium' and meta['angles'] == 'full_halves'
     assert set(meta['timings']) >= {'band_s', 'align_s', 'rings_s', 'fbp_s', 'total_s'}
+
+
+@pytest.fixture
+def per_row_rings(monkeypatch):
+    """remove_all_stripe (заглушка — тождество) → вычитание половины среднего по углам: заметно меняет синограмму,
+    по строкам независимо, как настоящая."""
+    monkeypatch.setattr(sys.modules['tomo.remove_stripe'], 'remove_all_stripe',
+                        lambda tomo, **kw: tomo - 0.5 * tomo.mean(axis=0, keepdims=True))
+
+
+SMOOTH = {'sigma': 1.5, 'deblur': 'wiener', 'balance': 0.02, 'amount': 1.5}
+
+
+@pytest.mark.parametrize('make, dx, dy, n_slices', [(simple_scan, 2, 4, None), (advanced_scan, 6, 10, 24)],
+                         ids=['simple', 'advanced'])
+def test_slice_with_smoothing_matches_run_recipe(tmp_path, per_row_rings, make, dx, dy, n_slices):
+    """Сглаживание: превью строки (блок строк ± ореол после колец → фильтр → FBP строки) — тот же срез, что в объёме
+    run_recipe со слоями по 5 строк (ореол слоёв, края кропа, сдвиги образца); фрагмент — FBP только его."""
+    ss = make()
+    roi = ROI(dx, ss.scan.width - dx, dy, ss.scan.height - dy)
+    app, client, cfg, sid, ctx = session_for(tmp_path, ss, roi.to_dict())
+    scan = data.open_scan(cfg.scan_path('exp1'))
+    ax = true_axis(ss)
+    z1 = roi.y1 if n_slices is None else roi.y0 + n_slices
+    r = make_recipe(scan, roi, ax, ctx.pixel_size, angles='full_halves', slices=[roi.y0, z1])
+    r.rings = {'preset': 'medium', 'params': None}
+    r.smoothing = dict(SMOOTH)
+    vol = run_volume(tmp_path, cfg, 'exp1', r)
+
+    for row in (roi.y0, roi.y0 + 3, (roi.y0 + z1) // 2, z1 - 1):
+        rax = Axis(ax.center_at(row), row, ax.tilt_deg)
+        img, meta = ctx.slice(row, rax, 'medium', 'full_halves', smooth=SMOOTH)
+        ref = vol[row - roi.y0]
+        assert img.shape == ref.shape == (roi.width, roi.width)
+        assert np.abs(img - ref).max() < 1e-4 * (ref.max() - ref.min()), row
+        assert meta['smoothing'] == SMOOTH and meta['timings']['block_rows'] >= 17
+        # фрагмент — FBP только его пикселей, те же значения
+        part, meta = ctx.slice(row, rax, 'medium', 'full_halves', region=(5, 9, 30, 21), smooth=SMOOTH)
+        assert part.shape == (12, 25) and meta['timings']['fbp_px'] == 12 * 25
+        assert np.abs(part - ref[9:21, 5:30]).max() < 1e-4 * (ref.max() - ref.min())
+    manager(app).stop_reaper()
+
+
+def test_slice_smoothing_changes_reuse_block(loaded, per_row_rings, monkeypatch):
+    """Смена σ и метода (в пределах запаса) — только фильтр и FBP: без выравнивания, колец и нормировки; смена центра
+    — сдвиг блока; смена колец — кольца заново на том же блоке строк."""
+    _, client, _, ss, sid, ctx = loaded
+    calls = {'align': 0, 'rings': 0, 'norm': 0}
+
+    def counting(name, fn):
+        def inner(*a, **kw):
+            calls[name] += 1
+            return fn(*a, **kw)
+        return inner
+
+    monkeypatch.setattr(axis_mod, 'align_rows', counting('align', axis_mod.align_rows))
+    monkeypatch.setattr(rings, 'apply', counting('rings', rings.apply))
+    monkeypatch.setattr(preprocess, 'normalize_slab', counting('norm', preprocess.normalize_slab))
+    c = row_center(ss, 20)
+    q = dict(row=20, center=c, tilt=ss.tilt_deg, rings='medium', max_px=4000)
+    first, meta = decode(client.get(url(sid, 'slice', smooth=1.5, **q), headers=HEADERS))
+    t = meta['timings']
+    assert meta['smoothing'] == SMOOTH and meta['exact'] is True
+    assert t['block_rows'] == 32 and t['align_s'] > 0 and t['smooth_s'] > 0        # запас до σ = 2 — весь кроп
+    assert calls['align'] == 4 and calls['rings'] == 2                             # порции по 8 и по 16 строк
+    before = dict(calls)
+    for extra in (dict(smooth=2.0), dict(smooth=1.0, deblur='unsharp', amount=2), dict(smooth=0.8, deblur='none'),
+                  dict(smooth=1.5, balance=0.05)):
+        img, meta = decode(client.get(url(sid, 'slice', **dict(q, **extra)), headers=HEADERS))
+        assert meta['timings']['align_s'] == 0 and meta['timings']['rings_s'] == 0, extra
+        assert meta['smoothing']['sigma'] == extra['smooth'] and meta['exact'] is True
+        assert np.abs(img - first).max() > 0                                         # фильтр другой
+    assert calls == before
+    # центр: быстрый путь — сдвиг блока, близко к полному
+    fast, meta = decode(client.get(url(sid, 'slice', smooth=1.5, **dict(q, center=c + 0.6)), headers=HEADERS))
+    assert meta['exact'] is False and 'fast_shift_px' in meta['timings'] and calls == before
+    exact, meta = decode(client.get(url(sid, 'slice', smooth=1.5, exact=1, **dict(q, center=c + 0.6)),
+                                    headers=HEADERS))
+    assert meta['exact'] is True and _corr(fast, exact) > 0.999
+    assert calls['norm'] == before['norm'] and calls['rings'] > before['rings']
+    # другие кольца — кольца заново, без нормировки полосы
+    before = dict(calls)
+    decode(client.get(url(sid, 'slice', smooth=1.5, **dict(q, rings='strong')), headers=HEADERS))
+    assert calls['rings'] == before['rings'] + 2 and calls['norm'] == before['norm']
+    # выключенное сглаживание — прежний путь по одной строке
+    _, meta = decode(client.get(url(sid, 'slice', smooth=0, **q), headers=HEADERS))
+    assert meta['smoothing'] is None and meta['timings']['block_rows'] == 1
+
+
+def test_slice_http_smoothing_params(loaded):
+    _, client, _, ss, sid, _ = loaded
+    base = dict(row=20, center=row_center(ss, 20), tilt=ss.tilt_deg, rings='off')
+    _, meta = decode(client.get(url(sid, 'slice', smooth=1.2, deblur='unsharp', amount=2, **base), headers=HEADERS))
+    assert meta['smoothing'] == {'sigma': 1.2, 'deblur': 'unsharp', 'balance': 0.02, 'amount': 2.0}
+    assert {'smooth_s', 'block_rows', 'fbp_s', 'rings_s'} <= set(meta['timings'])
+    for off in ('', '0'):
+        _, meta = decode(client.get(url(sid, 'slice', smooth=off, **base), headers=HEADERS))
+        assert meta['smoothing'] is None
+    for bad in (dict(smooth=0.1), dict(smooth=5), dict(smooth='x'), dict(smooth='nan'), dict(smooth=1.5, deblur='rl'),
+                dict(smooth=1.5, balance=0), dict(smooth=1.5, amount=-1), dict(smooth=1.5, balance='x')):
+        r = client.get(url(sid, 'slice', **dict(base, **bad)), headers=HEADERS)
+        assert r.status_code == 400, bad
 
 
 def test_slice_http_params(loaded):
@@ -295,6 +398,16 @@ def test_diff_view(loaded):
 
 # --- кольца, сдвиги образца, оценка ------------------------------------------------------------------------
 
+def test_noise_level_of_white_noise():
+    rng = np.random.default_rng(0)
+    img = 5.0 + 0.3 * rng.standard_normal((200, 200))
+    img[:, 100:] += 10.0                                                # край объекта не мешает (MAD)
+    assert preview.noise_level(img) == pytest.approx(0.3, rel=0.05)
+    m = preview.compare_metrics([img, img * 2])
+    assert m[0]['sharpness'] == 1.0 and m[1]['sharpness'] == pytest.approx(4.0)
+    assert m[1]['noise'] == pytest.approx(2 * m[0]['noise'])
+
+
 def test_rings_preview(loaded, monkeypatch):
     _, client, _, ss, sid, ctx = loaded
     # заглушка remove_all_stripe — тождество; подменяем на вычитание среднего по углам (заметно меняет срез)
@@ -439,6 +552,108 @@ def test_center_change_uses_fast_shift_close_to_exact(loaded):
     # другой наклон — полный путь
     other = client.get(url(sid, 'slice', row=row, center=c, tilt=tilt + 0.5, max_px=4000), headers=HEADERS)
     assert decode(other)[1]['exact'] is True
+
+
+# --- сравнение вариантов на фрагменте --------------------------------------------------------------------------
+
+def test_compare_variants_fragment_and_metrics(tmp_path, per_row_rings):
+    """compare: стопка (k, th, tw) с общим окном; каждый вариант — тот же фрагмент, что slice с его кольцами и
+    сглаживанием; варианты нормализованы; на шумном скане сглаживание снижает шум; кольца — раз на пресет."""
+    ss = simple_scan(noise=1.0)
+    app, client, cfg, sid, ctx = session_for(tmp_path, ss, ROI_SIMPLE)
+    c = row_center(ss, 20)
+    variants = [{'rings': 'medium', 'smoothing': None}, {'rings': 'medium', 'smoothing': {'sigma': 1.5}},
+                {'rings': 'medium', 'smoothing': {'sigma': 2.0, 'deblur': 'none'}},
+                {'rings': 'strong', 'smoothing': {'sigma': 1.0, 'deblur': 'unsharp'}}, {'rings': 'off'}]
+    region = [8, 12, 60, 50]
+    calls = []
+    orig = rings.apply
+
+    def counting(sino, params, xp=None):
+        calls.append((np.shape(sino)[0], params and params['snr']))
+        return orig(sino, params, xp=xp)
+
+    rings.apply = counting
+    try:
+        r = client.post(url(sid, 'compare'), json={'row': 20, 'center': c, 'tilt': ss.tilt_deg, 'region': region,
+                                                   'variants': variants, 'angles': 'first_180', 'seq': 1},
+                        headers=HEADERS)
+    finally:
+        rings.apply = orig
+    assert r.status_code == 200, r.get_json()
+    stack, meta = decode(r)
+    assert stack.shape == (5, 38, 52) and meta['region'] == region and meta['row'] == 20
+    assert meta['downsample'] == 1
+    small, meta_s = decode(client.post(url(sid, 'compare'), json={'row': 20, 'center': c, 'tilt': ss.tilt_deg,
+                                                                  'region': region, 'variants': variants[:2],
+                                                                  'max_px': 20}, headers=HEADERS))
+    assert small.shape == (2, 12, 17) and meta_s['downsample'] == 3
+    # кольца: medium — на строках под наибольший ореол его вариантов (σ = 2 Винер нет, 2.0 'none' → h = 6,
+    # 1.5 Винер → h = 16: весь кроп 32 строки, порции по 16), strong — ореол 1.0 'unsharp' (h = 4, 9 строк)
+    assert sorted(calls) == sorted([(16, 3.0), (16, 3.0), (9, 2.0)])
+    assert meta['variants'] == [
+        {'rings': 'medium', 'smoothing': None}, {'rings': 'medium', 'smoothing': SMOOTH},
+        {'rings': 'medium', 'smoothing': {'sigma': 2.0, 'deblur': 'none', 'balance': 0.02, 'amount': 1.5}},
+        {'rings': 'strong', 'smoothing': {'sigma': 1.0, 'deblur': 'unsharp', 'balance': 0.02, 'amount': 1.5}},
+        {'rings': 'off', 'smoothing': None}]
+    step = float(r.headers['X-Scale'])
+    lo, hi = float(r.headers['X-Offset']), float(r.headers['X-Offset']) + 65535 * step
+    for got, v in zip(stack, meta['variants']):                       # общее окно, значения — как у slice
+        ref, _ = ctx.slice(20, Axis(c, 20, ss.tilt_deg), v['rings'], region=tuple(region), smooth=v['smoothing'])
+        inside = (ref > lo + step) & (ref < hi - step)
+        assert inside.mean() > 0.9 and np.abs(got - ref)[inside].max() <= step
+    m = meta['metrics']
+    assert len(m) == 5 and m[0]['sharpness'] == 1.0 and all(x['noise'] > 0 for x in m)
+    assert m[2]['noise'] < 0.6 * m[0]['noise'] and m[2]['sharpness'] < 1      # гаусс без деблюра: тише и мягче
+    assert m[1]['noise'] < m[0]['noise']                                        # Винер σ 1,5: шум ниже
+    assert set(meta['timings']) >= {'band_s', 'align_s', 'rings_s', 'smooth_s', 'fbp_s', 'total_s', 'block_rows'}
+    manager(app).stop_reaper()
+
+
+def test_compare_default_region_limits_and_seq(loaded):
+    _, client, _, ss, sid, ctx = loaded
+    c = row_center(ss, 20)
+    base = {'row': 20, 'center': c, 'tilt': ss.tilt_deg}
+    # без region — квадрат size с краями по срезу первого варианта (срез 68 — меньше 384: весь срез)
+    stack, meta = decode(client.post(url(sid, 'compare'), json=dict(base, variants=[{'rings': 'off'}]),
+                                     headers=HEADERS))
+    assert stack.shape == (1, 68, 68) and meta['region'] == [0, 0, 68, 68] and meta['metrics'][0]['sharpness'] == 1
+    stack, meta = decode(client.post(url(sid, 'compare'), json=dict(base, size=24, variants=[
+        {'rings': 'off'}, {'rings': 'off', 'smoothing': {'sigma': 1.0}}]), headers=HEADERS))
+    x0, y0, x1, y1 = meta['region']
+    assert stack.shape == (2, 24, 24) and (x1 - x0, y1 - y0) == (24, 24)
+    full, _ = ctx.slice(20, Axis(c, 20, ss.tilt_deg), 'off')
+    assert meta['region'] == list(preview.structured_region(full, 24))
+    # ось сессии, если center/tilt не заданы
+    assert client.post(url(sid, 'compare'), json={'variants': [{}]}, headers=HEADERS).status_code == 200
+    for bad in ({'variants': []}, {'variants': [{}] * 9}, {'variants': 'off'}, {}, {'variants': [{'rings': 'x'}]},
+                {'variants': [{'smoothing': {'sigma': 9}}]}, {'variants': [{'smoothing': 1.5}]}, {'variants': [3]},
+                {'variants': [{}], 'region': [0, 0, 100, 10]}, {'variants': [{}], 'size': 4},
+                {'variants': [{}], 'angles': 'x'}):
+        assert client.post(url(sid, 'compare'), json=dict(base, **bad), headers=HEADERS).status_code == 400, bad
+    # «последний выигрывает» — свой канал
+    body = dict(base, variants=[{'rings': 'off'}], region=[0, 0, 20, 20])
+    assert client.post(url(sid, 'compare'), json=dict(body, seq=5), headers=HEADERS).status_code == 200
+    r = client.post(url(sid, 'compare'), json=dict(body, seq=3), headers=HEADERS)
+    assert r.status_code == 409 and r.get_json()['error'] == 'superseded'
+    assert client.get(url(sid, 'slice', seq=1, row=20), headers=HEADERS).status_code == 200
+
+
+def test_compare_reuses_slice_block(loaded, per_row_rings, monkeypatch):
+    """Блок строк после колец, посчитанный срезом со сглаживанием, сравнение σ при той же оси берёт из кэша: без
+    выравнивания и колец."""
+    _, client, _, ss, sid, _ = loaded
+    c = row_center(ss, 20)
+    q = dict(row=20, center=c, tilt=ss.tilt_deg, rings='medium', smooth=1.5)
+    assert client.get(url(sid, 'slice', **q), headers=HEADERS).status_code == 200
+    calls = []
+    monkeypatch.setattr(rings, 'apply', lambda *a, **kw: calls.append(1))
+    monkeypatch.setattr(axis_mod, 'align_rows', lambda *a, **kw: calls.append(2))
+    body = {'row': 20, 'center': c, 'tilt': ss.tilt_deg, 'region': [10, 10, 50, 50],
+            'variants': [{'rings': 'medium', 'smoothing': s} for s in (None, {'sigma': 0.7}, {'sigma': 2.0})]}
+    r = client.post(url(sid, 'compare'), json=body, headers=HEADERS)
+    assert r.status_code == 200 and calls == []
+    assert decode(r)[1]['timings']['rings_s'] == 0
 
 
 def test_structured_region_finds_edges():

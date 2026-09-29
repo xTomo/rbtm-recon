@@ -1,6 +1,7 @@
 """Тесты reconengine.pipeline и cli: конвейер по слоям, совпадение со старым путём, запуск по рецепту."""
 import json
 import os
+import sys
 import threading
 
 import numpy as np
@@ -8,7 +9,7 @@ import pytest
 
 import engine_phantom as ph
 from reconengine import axis as axis_mod
-from reconengine import cli, data, gpu, pipeline, preprocess
+from reconengine import cli, data, fbp, gpu, pipeline, preprocess, rings, smoothing
 from reconengine import recipe as recipe_mod
 from reconengine.model import Axis, Cancelled, ROI
 
@@ -36,13 +37,24 @@ def make_recipe(scan, roi, ax=None, **changes):
     return r
 
 
-def full_crop_reference(crop, prep):
-    """Та же обработка, что в process_slab, но сразу на всём кропе (как в ноутбуке): (h, n, w)."""
+def full_crop_reference(crop, prep, ring_params=None, smooth_params=None):
+    """Та же обработка, что в process_slab, но сразу на всём кропе (как в ноутбуке): (h, n, w); с ring_params и
+    smooth_params — затем кольца и сглаживание по всему кропу."""
     raw = np.asarray(crop.frames[prep.idx])
     norm = np.asarray(preprocess.normalize_slab(raw, prep.fnums, prep.de, xp=np))
     norm = pipeline._apply_shifts(norm, prep.frame_sy, prep.frame_sx, np)
     out = np.stack([np.asarray(axis_mod.transform_image(fr, prep.shift_x, prep.alfa, xp=np)) for fr in norm])
-    return np.swapaxes(out, 0, 1)
+    sino = np.ascontiguousarray(np.swapaxes(out, 0, 1))
+    sino = np.asarray(rings.apply(sino, ring_params, xp=np))
+    return np.asarray(smoothing.apply(sino, smooth_params, xp=np))
+
+
+@pytest.fixture
+def per_row_rings(monkeypatch):
+    """remove_all_stripe (заглушка — тождество) → вычитание половины среднего по углам: заметно меняет синограмму,
+    по строкам независимо, как настоящая."""
+    monkeypatch.setattr(sys.modules['tomo.remove_stripe'], 'remove_all_stripe',
+                        lambda tomo, **kw: tomo - 0.5 * tomo.mean(axis=0, keepdims=True))
 
 
 # --- мелкие функции ------------------------------------------------------------------------------------------
@@ -90,6 +102,32 @@ def test_slabs_equal_full_crop(make):
                               for a in range(0, roi.height, rows)])
         scale = np.abs(ref).max()
         assert np.abs(got - ref).max() < 1e-4 * scale
+
+
+@pytest.mark.parametrize('make', [simple_scan, advanced_scan], ids=['simple', 'advanced'])
+def test_smoothed_slabs_equal_full_crop(make, per_row_rings):
+    """Сглаживание: слой с ореолом ±h (кольца на всех его строках, затем фильтр) даёт то же, что кольца и фильтр по
+    всему кропу сразу — и у краёв кропа, и при слое меньше ореола."""
+    ss = make()
+    roi = inner_roi(ss, 3, 1)
+    crop = ph.make_crop(ss.frames, roi)
+    ax = Axis(center_x=ss.center_x, y_ref=ss.y_ref, tilt_deg=ss.tilt_deg)
+    prep = pipeline.prepare(ss.scan, crop, make_recipe(ss.scan, roi, ax), xp=np)
+    rp = rings.resolve('strong')
+    m = pipeline.margin(prep, roi.width)
+    base = full_crop_reference(crop, prep, rp)
+    cases = [({'sigma': 1.5}, 5)] if ss.scan.is_advanced else [({'sigma': 1.5}, 5), ({'sigma': 1.5}, 16),
+                                                               ({'sigma': 0.8, 'deblur': 'unsharp'}, 5)]
+    for block, rows in cases:
+        sp = smoothing.resolve(block)
+        assert smoothing.halo_rows(sp) >= 3
+        ref = np.asarray(smoothing.apply(base, sp, xp=np))
+        scale = ref.max() - ref.min()
+        assert np.abs(ref - base).max() > 0.01 * scale                                   # фильтр заметен
+        got = np.concatenate([np.asarray(pipeline.smoothed_slab(crop, prep, (a, min(a + rows, roi.height)), m,
+                                                                rp, sp, xp=np))
+                              for a in range(0, roi.height, rows)])
+        assert np.abs(got - ref).max() < 1e-4 * scale, (block, rows)
 
 
 def test_standard_scan_matches_notebook_path():
@@ -165,6 +203,40 @@ def test_run_recipe_end_to_end(tmp_path, make):
     assert np.isclose(vol[z].sum() * 0.009, truth.sum(), rtol=0.1)
 
 
+def test_run_recipe_with_smoothing_equals_full_crop_filter(tmp_path, per_row_rings):
+    """Задача со сглаживанием (слои по 5 строк, часть срезов): срезы — FBP синограмм после колец и фильтра по всему
+    кропу; ореол слоёв берёт соседние строки кропа и за пределами recon.slices."""
+    ss = simple_scan()
+    path = write_h5(ss, tmp_path / 'scan.h5')
+    scan = data.open_scan(path)
+    roi = ROI(3, 69, 2, 38)
+    ax = Axis(ss.center_x, ss.y_ref, ss.tilt_deg)
+    r = make_recipe(scan, roi, ax)
+    r.rings = {'preset': 'medium', 'params': None}
+    r.smoothing = dict(smoothing.default_block(), sigma=1.5)
+    r.recon['slices'] = [roi.y0 + 4, roi.y0 + 17]
+    res = pipeline.run_recipe(r, path, str(tmp_path / 'out'), str(tmp_path / 'cache'), backend='cpu', slab_rows=5)
+    doc = res.result
+    vol = np.fromfile(os.path.join(res.out_dir, doc['volume']['file']), '<f4').reshape(doc['volume']['shape'])
+    assert vol.shape == (13, 66, 66)
+    assert doc['timings']['halo_rows'] == smoothing.halo_rows(smoothing.resolve(r.smoothing)) == 16
+    assert res.recipe.smoothing['sigma'] == 1.5 and doc['recipe']['smoothing']['sigma'] == 1.5
+    assert recipe_mod.load(tmp_path / 'out' / 'recipe.json').smoothing == res.recipe.smoothing
+
+    crop = ph.make_crop(ss.frames, roi)
+    prep = pipeline.prepare(scan, crop, r, xp=np)
+    sp = smoothing.resolve(r.smoothing)
+    ref_sino = full_crop_reference(crop, prep, rings.resolve('medium'), sp)[4:17]
+    ref = fbp.recon_rows(ref_sino, prep.angles, 0.009, backend='cpu')
+    assert np.abs(vol - ref).max() < 1e-4 * (ref.max() - ref.min())
+    # без сглаживания — другой объём (фильтр действительно применён)
+    r.smoothing = smoothing.default_block()
+    off = pipeline.run_recipe(r, path, str(tmp_path / 'off'), str(tmp_path / 'cache'), backend='cpu', slab_rows=5)
+    vol_off = np.fromfile(os.path.join(off.out_dir, off.result['volume']['file']), '<f4').reshape(vol.shape)
+    assert np.abs(vol_off - vol).max() > 0.01 * (ref.max() - ref.min())
+    assert 'halo_rows' not in off.result['timings']
+
+
 def test_axis_is_invariant_to_roi_shift(tmp_path):
     """Одна и та же ось в координатах детектора при сдвинутом ROI даёт тот же срез."""
     ss = simple_scan(tilt_deg=0.0)
@@ -208,6 +280,14 @@ def test_estimate(tmp_path):
     assert est['volume_shape'] == [32, 68, 68]
     assert est['volume_bytes'] == 32 * 68 * 68 * 4
     assert est['n_angles_used'] == 60                          # first_180 из 0..357
+    assert est['halo_rows'] == 0 and est['ring_rows_factor'] == 1.0
+    # сглаживание: слои (на CPU — по 16 строк) с ореолом ±16 — строк через кольца больше, чем срезов
+    r.smoothing = dict(smoothing.default_block(), sigma=1.5)
+    est = pipeline.estimate(r, scan)
+    assert est['halo_rows'] == 16
+    assert est['ring_rows_factor'] == pytest.approx((32 + 32) / 32.0)       # 2 слоя, у каждого ореол до краёв
+    assert pipeline.ring_rows_total((0, 32), 16, 16, 32) == 64
+    assert pipeline.ring_rows_total((10, 20), 4, 2, 32) == 10 + 3 * 4
 
 
 # --- cli -------------------------------------------------------------------------------------------------------
@@ -301,14 +381,22 @@ def test_slab_rows_for_memory():
     assert 40 <= six_gb < eight_gb <= 256                     # на 6 ГБ — десятки строк, с ростом памяти — больше
     assert pipeline.slab_rows_for_memory(int(0.5e9), n, w, 43) == 4          # не меньше минимума
     assert pipeline.slab_rows_for_memory(int(80e9), n, w, 43) == 256         # не больше максимума
+    # сглаживание: ореол 2h строк на входе и выходе, копия результата фильтра и его рабочие порции — слой меньше
+    smooth = pipeline.slab_rows_for_memory(int(5.8e9), n, w, 43, halo=16)
+    assert 20 <= smooth < six_gb
+    assert pipeline.slab_rows_for_memory(int(5.8e9), n, w, 43, halo=0) == six_gb
 
 
-def test_run_recipe_retries_slab_on_gpu_oom(tmp_path, monkeypatch):
-    """Нехватка памяти GPU на слое — слой вдвое меньше и заново; объём тот же, что без сбоя."""
+@pytest.mark.parametrize('sigma', [None, 1.0], ids=['plain', 'smoothing'])
+def test_run_recipe_retries_slab_on_gpu_oom(tmp_path, monkeypatch, sigma):
+    """Нехватка памяти GPU на слое — слой вдвое меньше и заново; объём тот же, что без сбоя (и со сглаживанием:
+    слой берётся с ореолом)."""
     ss = simple_scan()
     path = write_h5(ss, tmp_path / 'scan.h5')
     scan = data.open_scan(path)
     r = make_recipe(scan, ROI(3, 69, 2, 38), Axis(ss.center_x, ss.y_ref, ss.tilt_deg))
+    r.smoothing = dict(smoothing.default_block(), sigma=sigma)
+    hs = smoothing.halo_rows(smoothing.resolve(r.smoothing))
     ref = pipeline.run_recipe(r, path, str(tmp_path / 'ref'), str(tmp_path / 'cache'), backend='cpu', slab_rows=16)
 
     class OutOfMemoryError(MemoryError):
@@ -325,6 +413,6 @@ def test_run_recipe_retries_slab_on_gpu_oom(tmp_path, monkeypatch):
 
     monkeypatch.setattr(pipeline, 'process_slab', flaky)
     res = pipeline.run_recipe(r, path, str(tmp_path / 'oom'), str(tmp_path / 'cache'), backend='cpu', slab_rows=16)
-    assert calls[0] == (0, 16) and calls[1] == (0, 8)
+    assert calls[0] == (0, 16 + hs) and calls[1] == (0, 8 + hs)
     vol = [np.fromfile(os.path.join(x.out_dir, x.result['volume']['file']), '<f4') for x in (ref, res)]
     assert np.allclose(vol[0], vol[1], atol=1e-6 * np.abs(vol[0]).max())

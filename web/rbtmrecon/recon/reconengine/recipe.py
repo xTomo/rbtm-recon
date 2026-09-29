@@ -2,8 +2,13 @@
 
 Часть полей привязана к конкретному файлу скана (``pixel_size``, ``fov``, ``axis``, ``repositioning``,
 ``recon.slices``, ``recon.xy_roi``) и не должна переноситься на другой скан. Остальные поля
-(``normalization``, ``rings``, ``recon.algorithm``, ``recon.angles``, ``outputs``) — «переносимые»:
+(``normalization``, ``rings``, ``smoothing``, ``recon.algorithm``, ``recon.angles``, ``outputs``) — «переносимые»:
 их можно сохранить как шаблон и применить к рецепту другого скана через :func:`apply_template`.
+
+``smoothing`` — сглаживание проекций гауссом и деблюринг тем же ядром (:mod:`smoothing`):
+``{sigma: null | число, deblur: 'wiener' | 'unsharp' | 'none', balance, amount}``; ``sigma`` null или 0 — выключено
+(по умолчанию). Рецепт без блока (записанный до его появления) читается как выключенный; выключенный блок в
+:func:`sha256` не входит — хэш старых рецептов не меняется.
 
 Геометрия (``fov``, ``axis``) хранится через :class:`model.ROI` / :class:`model.Axis`, чтобы переиспользовать
 их валидацию и (де)сериализацию; остальные секции — обычные словари с проверкой типов/диапазонов
@@ -26,7 +31,7 @@ import tempfile
 from typing import Any, Dict, List, Optional
 
 from . import __version__ as _ENGINE_VERSION
-from . import fbp, pixelsize, rings
+from . import fbp, pixelsize, rings, smoothing
 from .model import ROI, Axis
 
 logger = logging.getLogger(__name__)
@@ -43,10 +48,12 @@ _ALGORITHMS = {'FBP'}
 
 _TOP_LEVEL_KEYS = {
     'schema', 'engine', 'created', 'author', 'input', 'pixel_size', 'fov', 'axis',
-    'repositioning', 'recon', 'normalization', 'rings', 'outputs', 'provenance',
+    'repositioning', 'recon', 'normalization', 'rings', 'smoothing', 'outputs', 'provenance',
 }
 #: Верхнеуровневые поля, переносимые в другой рецепт целиком.
-_TRANSFERABLE_TOP = ('normalization', 'rings', 'outputs')
+_TRANSFERABLE_TOP = ('normalization', 'rings', 'smoothing', 'outputs')
+#: Шаги студии, чьё происхождение (auto | checked) записывается в ``provenance.steps``.
+_PROVENANCE_STEPS = ('fov', 'axis', 'rings', 'smoothing', 'run')
 #: Поля секции ``recon``, переносимые в другой рецепт (``slices``/``xy_roi`` привязаны к скану).
 _TRANSFERABLE_RECON = ('algorithm', 'angles')
 
@@ -68,6 +75,7 @@ class Recipe:
     rings: Dict[str, Any]
     outputs: Dict[str, Any]
     provenance: Dict[str, Any]
+    smoothing: Dict[str, Any] = dataclasses.field(default_factory=smoothing.default_block)
 
 
 @functools.lru_cache(maxsize=1)
@@ -116,7 +124,8 @@ def default_recipe(exp_id: str, fingerprint: str, roi: ROI, pixel_size_value: fl
         normalization='auto',
         rings={'preset': 'medium', 'params': None},
         outputs={'full': True, 'binning': [4], 'dtype': 'float32'},
-        provenance={'steps': {'fov': 'auto', 'axis': 'auto', 'rings': 'auto', 'run': 'auto'}},
+        provenance={'steps': {'fov': 'auto', 'axis': 'auto', 'rings': 'auto', 'smoothing': 'auto', 'run': 'auto'}},
+        smoothing=smoothing.default_block(),
     )
 
 
@@ -198,11 +207,43 @@ def _validate_types(recipe: Recipe) -> None:
     _require(isinstance(outputs.get('dtype'), str) and outputs['dtype'],
              'outputs.dtype должен быть непустой строкой')
 
+    _validate_smoothing(recipe.smoothing)
+
     steps = recipe.provenance.get('steps', {})
-    for key in ('fov', 'axis', 'rings', 'run'):
+    for key in _PROVENANCE_STEPS:
         if key in steps:
             _require(steps[key] in _PROVENANCE_STATES,
                      'provenance.steps.{} неизвестен: {!r}'.format(key, steps[key]))
+
+
+def _is_number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _validate_smoothing(block: Any) -> None:
+    """Блок ``smoothing``: словарь с полями ``smoothing.DEFAULTS`` (типы), значения — :func:`smoothing.resolve`."""
+    _require(isinstance(block, dict), 'smoothing должен быть словарём: {!r}'.format(block))
+    unknown = set(block) - set(smoothing.DEFAULTS)
+    _require(not unknown, 'smoothing: неизвестные поля {}'.format(sorted(unknown)))
+    sigma = block.get('sigma')
+    _require(sigma is None or _is_number(sigma), 'smoothing.sigma должен быть числом или null: {!r}'.format(sigma))
+    _require(isinstance(block.get('deblur'), str), 'smoothing.deblur должен быть строкой: {!r}'.format(
+        block.get('deblur')))
+    for key in ('balance', 'amount'):
+        _require(_is_number(block.get(key)), 'smoothing.{} должен быть числом: {!r}'.format(key, block.get(key)))
+    try:
+        smoothing.resolve(block)
+    except ValueError as exc:
+        raise ValueError('recipe: {}'.format(exc)) from None
+
+
+def smoothing_block(block: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Блок ``smoothing`` рецепта из частичного (недостающие поля — по умолчанию; None — выключено), без проверки."""
+    out = smoothing.default_block()
+    if block is not None:
+        _require(isinstance(block, dict), 'smoothing должен быть словарём или null: {!r}'.format(block))
+        out.update(copy.deepcopy(block))
+    return out
 
 
 def validate(recipe: Recipe, height: int, width: int) -> None:
@@ -246,6 +287,7 @@ def to_dict(recipe: Recipe) -> Dict[str, Any]:
         'recon': copy.deepcopy(recipe.recon),
         'normalization': recipe.normalization,
         'rings': copy.deepcopy(recipe.rings),
+        'smoothing': copy.deepcopy(recipe.smoothing),
         'outputs': copy.deepcopy(recipe.outputs),
         'provenance': copy.deepcopy(recipe.provenance),
     }
@@ -255,7 +297,8 @@ def from_dict(d: Dict[str, Any]) -> Recipe:
     """Словарь (например, из JSON) → :class:`Recipe`, с валидацией типов/диапазонов.
 
     Неизвестные ключи верхнего уровня — игнорируются с предупреждением в лог. Неизвестная мажорная
-    версия схемы — :class:`ValueError`.
+    версия схемы — :class:`ValueError`. Нет блока ``smoothing`` (или null) — выключено; недостающие поля блока —
+    по умолчанию.
     """
     _check_schema(d.get('schema'))
 
@@ -284,6 +327,7 @@ def from_dict(d: Dict[str, Any]) -> Recipe:
         rings=copy.deepcopy(d.get('rings') or {'preset': 'medium', 'params': None}),
         outputs=copy.deepcopy(d.get('outputs') or {}),
         provenance=copy.deepcopy(d.get('provenance') or {'steps': {}}),
+        smoothing=smoothing_block(d.get('smoothing')),
     )
     _validate_types(recipe)
     return recipe
@@ -317,10 +361,13 @@ def load(path: Any) -> Recipe:
 
 
 def sha256(recipe: Recipe) -> str:
-    """Sha256 канонического JSON рецепта (sort_keys, без ``created``/``author``)."""
+    """Sha256 канонического JSON рецепта (sort_keys, без ``created``/``author``). Выключенный ``smoothing`` не
+    входит: рецепт без блока (записанный до его появления) и с выключенным блоком — один и тот же хэш."""
     d = to_dict(recipe)
     d.pop('created', None)
     d.pop('author', None)
+    if smoothing.resolve(d.get('smoothing')) is None:
+        d.pop('smoothing', None)
     canon = json.dumps(d, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
     return hashlib.sha256(canon.encode('utf-8')).hexdigest()
 
