@@ -437,6 +437,9 @@ def test_repositioning_advanced(tmp_path):
     assert r.status_code == 200
     body = r.get_json()
     assert body['advanced'] is True and body['applicable'] is True and len(body['checkpoints']) == 2
+    # чистый сдвиг образца — не поворот: проверка контрольных кадров его пропускает, сдвиги применяются
+    assert [c['status'] for c in body['checks']] == ['ok', 'ok']
+    assert not any('контрольные кадры' in w for w in body['warnings'])
     # ndi.shift(data_check, s) ≈ data: накопленный сдвиг сегмента k = −смещение образца в нём
     assert np.allclose(body['cumulative']['sy'], [0.0, -1.3, -2.1], atol=0.11)
     assert np.allclose(body['cumulative']['sx'], [0.0, 0.8, -0.6], atol=0.11)

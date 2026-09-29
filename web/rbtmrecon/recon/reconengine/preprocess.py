@@ -14,13 +14,20 @@ safe_median — медиана 3×3 только в плоскости кадр�
 
 Порог объекта (огибающая, авто-ROI, углы за пределами ROI): фон — медиана изображения −ln T, шум —
 MAD·1.4826; маска — значения больше фон + k_sigma·шум; столбец (строка) «занят», если в нём доля маски > 2 %.
+
+Контрольные кадры (advanced, ``check_checkpoints``): после каждой периодической вставки снимается data_check под тем
+же углом, что последний data-кадр до неё. ``repositioning_shifts`` меряет по этой паре только сдвиг; поворот образца
+или стола (скан 524efd6e от 15.09.2026: после вставок на 74,5°, 99,5° и 124,5° образец отставал на 3,3°, 2,8° и 14°,
+счётчик мотора этого не видел) такой сдвиг не описывает — корреляция выдаёт ложные «сдвиги» в десятки пикселей.
+Проверка сравнивает расхождение пары с расхождением соседних data-кадров (масштаб одного шага угла) и при большом
+расхождении ищет, с каким более ранним углом контрольный кадр совпадает лучше.
 """
 from __future__ import annotations
 
 import dataclasses
 import logging
 import math
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -31,6 +38,15 @@ logger = logging.getLogger(__name__)
 MAD_SCALE = 1.4826          # MAD → σ для нормального шума
 OCCUPIED_FRAC = 0.02        # доля маски, при которой столбец/строка считается занятой объектом
 ANGLE_MATCH_TOL = 0.5       # градусы: допуск совпадения угла data и data_check (как в tomotools4)
+#: проверка контрольных кадров (check_checkpoints): бининг кадров, глубина поиска угла назад, пороги.
+#: Калибровка (15.09 и 28.09): у исправных вставок rms(пара)/rms(соседние кадры) = 0,4…1,9; у повернувшихся — 3,9…9,5,
+#: а rms с кадром лучшего угла в 3–4 раза меньше, чем с кадром того же угла
+CHECK_BIN = 4
+CHECK_SEARCH_DEG = 30.0
+CHECK_COARSE_DEG = 2.0
+CHECK_SUSPECT_RATIO = 2.5
+CHECK_ROTATED_RATIO = 0.5
+CHECK_ROTATED_MIN_DEG = 1.0
 _MEDIAN_BLOCK_BYTES = 256 * 1024 * 1024
 
 
@@ -377,6 +393,134 @@ def repositioning_shifts(scan: ScanInfo, crop: CropData, de: DarkEmpty) -> Tuple
         sy[k], sx[k] = float(shift[0]), float(shift[1])
         logger.info('Checkpoint %d, angle=%.2f: shift_y=%.3f, shift_x=%.3f', k, dc_angle, sy[k], sx[k])
     return cp_angles, sy, sx
+
+
+def _binned_norm(scan: ScanInfo, crop: CropData, de: DarkEmpty, idx: Sequence[int], b: int = CHECK_BIN) -> np.ndarray:
+    """Кадры idx (индексы timeline) → −ln T с интерполяцией empty по frame_number, уменьшенные ×b (среднее), (n, h, w)."""
+    fn = np.asarray(scan.frame_numbers)[list(idx)]
+    out = []
+    for a in range(0, len(idx), 8):
+        part = np.asarray(crop.frames[[int(i) for i in idx[a:a + 8]]])
+        nm = _normalize(part, fn[a:a + 8], de, np, median3=False, clip0=False)
+        n, h, w = nm.shape
+        h2, w2 = h // b * b, w // b * b
+        out.append(nm[:, :h2, :w2].reshape(n, h2 // b, b, w2 // b, b).mean(axis=(2, 4)))
+    return np.concatenate(out) if out else np.zeros((0, 1, 1), dtype='float32')
+
+
+def _pair_rms(ref: np.ndarray, mov: np.ndarray) -> float:
+    """rms разности ref и mov после совмещения сдвигом (взаимная корреляция), без полос у краёв."""
+    from scipy import ndimage  # noqa: WPS433
+    from skimage.registration import phase_cross_correlation  # noqa: WPS433
+    s, _, _ = phase_cross_correlation(ref, mov, upsample_factor=4, normalization=None)
+    moved = ndimage.shift(mov, s, order=1, mode='nearest')
+    m = int(math.ceil(float(np.abs(s).max()))) + 4
+    if 2 * m >= min(ref.shape):
+        return float('inf')
+    return float(np.sqrt(((ref[m:-m, m:-m] - moved[m:-m, m:-m]) ** 2).mean()))
+
+
+def check_checkpoints(scan: ScanInfo, crop: CropData, de: DarkEmpty) -> List[Dict[str, Any]]:
+    """Проверка контрольных кадров advanced-скана: по одному результату на периодическую вставку k.
+
+    Поля: k, angle (угол data_check), status — 'ok' | 'rotated' (кадр после вставки совпадает с кадром более раннего
+    угла: образец или стол провернулись назад, счётчик мотора этого не видит) | 'changed' (кадр отличается сильнее
+    шага угла, но более ранний угол не подходит: образец сместился нежёстко или провернулся вперёд) | 'skipped';
+    rms_same, rms_step (соседние data-кадры — масштаб одного шага угла), ratio, best_angle, offset_deg (best − angle),
+    rms_best, message (для предупреждения, по-русски; у 'ok' — пусто).
+
+    de — по всему кропу. Кадры уменьшаются ×CHECK_BIN; угол ищется только назад (кадров после вставки для сравнения
+    нет — они сняты уже со сбоем), сначала через CHECK_COARSE_DEG, затем по всем кадрам около лучшего. Поиск идёт
+    только для подозрительных вставок (ratio > CHECK_SUSPECT_RATIO): у исправного скана проверка — 3 кадра на вставку."""
+    out: List[Dict[str, Any]] = []
+    if not scan.is_advanced or not de.periodic_empties:
+        return out
+    # бининг: ×CHECK_BIN для рабочих кропов (сотни–тысячи пикселей), меньше — для маленьких
+    b = CHECK_BIN if min(crop.frames.shape[1:]) >= 64 * CHECK_BIN else max(1, min(crop.frames.shape[1:]) // 64)
+    fnums = np.asarray(scan.frame_numbers)
+    angles = np.asarray(scan.angles, dtype='float64')
+    d_idx = np.asarray(scan.data_idx, dtype=np.int64)
+    d_idx = d_idx[np.argsort(fnums[d_idx], kind='stable')]
+    c_idx = np.asarray(scan.check_idx, dtype=np.int64)
+    c_idx = c_idx[np.argsort(fnums[c_idx], kind='stable')]
+    d_fn, d_ang = fnums[d_idx], angles[d_idx]
+    c_fn = fnums[c_idx]
+    pf = [int(v) for v in de.periodic_empty_fnumbers]
+    k_total = len(pf)
+    for k in range(k_total):
+        res: Dict[str, Any] = {'k': k, 'angle': None, 'status': 'skipped', 'rms_same': None, 'rms_step': None,
+                               'ratio': None, 'best_angle': None, 'offset_deg': None, 'rms_best': None, 'message': ''}
+        out.append(res)
+        next_fn = pf[k + 1] if k + 1 < k_total else int(d_fn[-1]) + 1
+        dc = np.where((c_fn >= pf[k]) & (c_fn < next_fn))[0]
+        if dc.size == 0 or d_idx.size < 2:
+            continue
+        c = int(c_idx[int(dc[0])])
+        th = float(angles[c])
+        res['angle'] = th
+        try:
+            j = _find_matching_data_frame(th, d_ang, d_fn, pf[k])
+        except ValueError:
+            j = None
+        if j is None or j == 0:
+            continue
+        before = np.where(d_fn < pf[k])[0]                       # data-кадры до вставки (позиции в d_idx)
+        st = _binned_norm(scan, crop, de, [c, int(d_idx[j]), int(d_idx[j - 1])], b)
+        r_same, r_step = _pair_rms(st[1], st[0]), _pair_rms(st[1], st[2])
+        ratio = r_same / r_step if r_step > 0 else float('inf')
+        res.update(status='ok', rms_same=r_same, rms_step=r_step, ratio=ratio, best_angle=th, offset_deg=0.0,
+                   rms_best=r_same)
+        if not ratio > CHECK_SUSPECT_RATIO:
+            continue
+        # поиск назад: грубо через CHECK_COARSE_DEG, затем все кадры около лучшего
+        diff = th - d_ang[before]
+        cand = before[(diff >= 0) & (diff <= CHECK_SEARCH_DEG)]
+        step = float(np.median(np.abs(np.diff(d_ang[before])))) if before.size > 1 else 0.5
+        stride = max(1, int(round(CHECK_COARSE_DEG / max(step, 1e-6))))
+        coarse = cand[::-1][::stride][::-1]
+        rms_of: Dict[int, float] = {int(j): r_same}
+        for pos, img in zip(coarse, _binned_norm(scan, crop, de, [int(d_idx[q]) for q in coarse], b)):
+            rms_of[int(pos)] = _pair_rms(img, st[0])
+        best = min(rms_of, key=rms_of.get)
+        near = [int(q) for q in cand if abs(d_ang[q] - d_ang[best]) <= CHECK_COARSE_DEG + 1e-6 and int(q) not in rms_of]
+        for pos, img in zip(near, _binned_norm(scan, crop, de, [int(d_idx[q]) for q in near], b)):
+            rms_of[pos] = _pair_rms(img, st[0])
+        best = min(rms_of, key=rms_of.get)
+        best_angle = float(d_ang[best])
+        # уточнение параболой по соседним кадрам (если есть оба)
+        nb = [q for q in (best - 1, best + 1) if q in rms_of]
+        if len(nb) == 2:
+            y0, y1, y2 = rms_of[best - 1], rms_of[best], rms_of[best + 1]
+            den = y0 - 2 * y1 + y2
+            if den > 0:
+                best_angle += 0.5 * (y0 - y2) / den * float(d_ang[best + 1] - d_ang[best])
+        r_best = rms_of[best]
+        off = best_angle - th
+        res.update(best_angle=best_angle, offset_deg=off, rms_best=r_best)
+        if off <= -CHECK_ROTATED_MIN_DEG and r_best < CHECK_ROTATED_RATIO * r_same:
+            res['status'] = 'rotated'
+            res['message'] = ('после вставки {} ({:.1f}°) образец повернулся назад примерно на {:.1f}°: кадр после вставки '
+                              'совпадает с кадром {:.1f}° (расхождение {:.3f} против {:.3f} с кадром того же угла)'
+                              ).format(k + 1, th, -off, best_angle, r_best, r_same)
+        else:
+            res['status'] = 'changed'
+            res['message'] = ('после вставки {} ({:.1f}°) кадр под тем же углом отличается в {:.1f} раза сильнее, чем '
+                              'соседние кадры: образец сместился, изменился или провернулся'
+                              ).format(k + 1, th, ratio)
+        logger.warning('Checkpoint %d: %s', k, res['message'])
+    return out
+
+
+def checks_summary(checks: Sequence[Dict[str, Any]]) -> Optional[str]:
+    """Итоговое предупреждение по проверке контрольных кадров или None (все в порядке)."""
+    bad = [c for c in checks if c.get('status') in ('rotated', 'changed')]
+    if not bad:
+        return None
+    total = sum(c['offset_deg'] for c in bad if c['status'] == 'rotated')
+    tail = ' (накопленный сбой угла ≈ {:.1f}°)'.format(total) if total else ''
+    return ('контрольные кадры: после {} из {} вставок данные сняты не под записанным углом{} — сдвиги образца по этим '
+            'вставкам не применяются, авто-ось и срез по всем углам ненадёжны; проверьте крепление образца и удержание '
+            'поворотного стола').format(len(bad), len(checks), tail)
 
 
 def segment_index(frame_numbers: Sequence[int], periodic_empty_fnumbers: Sequence[int]) -> np.ndarray:

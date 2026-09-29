@@ -266,12 +266,15 @@ def make_synthetic_scan(angles: Sequence[float], height: int = 64, width: int = 
                         y_ref: float = 31.5, tilt_deg: float = 0.0, blobs: Optional[List[Blob]] = None,
                         advanced: bool = False, n_segments: int = 3, series_length: int = 3,
                         segment_offsets: Optional[Sequence[Tuple[float, float]]] = None,
+                        segment_angle_offsets: Optional[Sequence[float]] = None,
                         drift: float = 0.0, noise: float = 0.0, seed: int = 0) -> SyntheticScan:
     """Скан с аналитическими проекциями.
 
     advanced: периодические empty-серии и data_check; segment_offsets[k] = (dy, dx) — абсолютный сдвиг образца
-    в плоскости детектора в сегменте k (сегмент 0 — (0, 0)); drift — относительный дрейф яркости источника
-    за весь скан (линейно по frame_number, для проверки интерполяции empty)."""
+    в плоскости детектора в сегменте k (сегмент 0 — (0, 0)); segment_angle_offsets[k] — сбой угла в сегменте k,
+    градусы: data и data_check сегмента сняты под углом «записанный + сбой» (поворот образца во время вставки,
+    которого счётчик мотора не видит); drift — относительный дрейф яркости источника за весь скан (линейно по
+    frame_number, для проверки интерполяции empty)."""
     blobs = asymmetric_blobs() if blobs is None else blobs
     if advanced:
         tl = advanced_timeline(angles, n_segments, series_length=series_length)
@@ -286,7 +289,10 @@ def make_synthetic_scan(angles: Sequence[float], height: int = 64, width: int = 
     obj = (tl.modes == MODE_DATA) | (tl.modes == MODE_DATA_CHECK)
     p = np.zeros((n, height, width))
     idx = np.where(obj)[0]
-    p[idx] = project(blobs, tl.angles[idx], height, width, center_x, y_ref, tilt_deg, offsets[idx])
+    true_angles = tl.angles.astype('float64')
+    if advanced and segment_angle_offsets is not None:
+        true_angles = true_angles + np.array([segment_angle_offsets[int(s)] if s >= 0 else 0.0 for s in tl.segments])
+    p[idx] = project(blobs, true_angles[idx], height, width, center_x, y_ref, tilt_deg, offsets[idx])
     dark, empty = flat_fields(height, width, seed=seed + 1)
     rng = np.random.default_rng(seed) if noise > 0 else None
     frames = np.empty((n, height, width), dtype='uint16')
