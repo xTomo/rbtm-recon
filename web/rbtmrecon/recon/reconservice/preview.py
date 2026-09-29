@@ -721,6 +721,8 @@ class Context:
         if cp is not None:
             out['checkpoints'] = [{'angle': float(a), 'sy': float(y), 'sx': float(x)}
                                   for a, y, x in zip(cp['angles'], cp['sy'], cp['sx'])]
+            # проверка контрольных кадров (preprocess.check_checkpoints): статус, сбой угла, расхождения
+            out['checks'] = list(cp.get('checks') or [])
             cy, cx = preprocess.cumulative_shifts(np.asarray(cp['sy']), np.asarray(cp['sx']))
             out['cumulative'] = {'sy': [float(v) for v in cy], 'sx': [float(v) for v in cx]}
             out['max_shift'] = {'sy': float(np.max(np.abs(p.frame_sy))) if p.frame_sy.size else 0.0,
@@ -767,11 +769,14 @@ def build_context(scan: ScanInfo, crop: CropData, pixel_size_mm: float, progress
     if scan.is_advanced and de_full.periodic_empty_fnumbers:
         progress(0.5, 'repositioning')
         cp_angles, sy, sx = preprocess.repositioning_shifts(scan, crop, de_full)
-        sy, sx = np.asarray(sy, dtype='float64'), np.asarray(sx, dtype='float64')
+        check_cancel(cancel)
+        checks = preprocess.check_checkpoints(scan, crop, de_full)
+        sy, sx = pipeline.drop_bad_checkpoint_shifts(sy, sx, checks)
+        warnings.extend(pipeline.checks_warnings(checks))
         if np.isnan(sy).any() or np.isnan(sx).any():
             warnings.append('сдвиг образца измерен не на всех checkpoint-ах: неизмеренные приняты за 0')
         shifts = {'sy': [float(v) for v in sy], 'sx': [float(v) for v in sx]}
-        checkpoints = dict(shifts, angles=[float(a) for a in cp_angles])
+        checkpoints = dict(shifts, angles=[float(a) for a in cp_angles], checks=checks)
         check_cancel(cancel)
     frame_sy, frame_sx = pipeline._frame_shifts(fnums, de_full.periodic_empty_fnumbers, sy, sx, warnings)
     roi = crop.roi

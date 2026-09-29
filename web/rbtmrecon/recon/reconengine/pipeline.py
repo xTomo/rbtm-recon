@@ -144,6 +144,24 @@ def _apply_shifts(slab, sy: np.ndarray, sx: np.ndarray, xp):
     return slab
 
 
+def drop_bad_checkpoint_shifts(sy: np.ndarray, sx: np.ndarray, checks) -> Tuple[np.ndarray, np.ndarray]:
+    """Сдвиги вставок, где проверка контрольных кадров нашла поворот или изменение образца, — 0: корреляция пары там
+    меряет не сдвиг (см. preprocess.check_checkpoints), и её «сдвиг» в десятки пикселей только портит данные."""
+    sy, sx = np.array(sy, dtype='float64'), np.array(sx, dtype='float64')
+    for c in checks:
+        k = int(c['k'])
+        if c.get('status') in ('rotated', 'changed') and k < len(sy):
+            sy[k] = sx[k] = 0.0
+    return sy, sx
+
+
+def checks_warnings(checks) -> List[str]:
+    """Предупреждения по проверке контрольных кадров: по вставкам и итоговое (пусто — всё в порядке)."""
+    out = [c['message'] for c in checks if c.get('status') in ('rotated', 'changed') and c.get('message')]
+    summary = preprocess.checks_summary(checks)
+    return ([summary] + out) if summary else []
+
+
 def prepare(scan: ScanInfo, crop: CropData, r: recipe_mod.Recipe, xp=None) -> Prepared:
     """Опорные кадры, сдвиги образца, ось. Ось из рецепта используется как есть; если её нет — авто по паре
     0°/180° на нормированных (и скорректированных по сдвигу) кадрах."""
@@ -158,6 +176,10 @@ def prepare(scan: ScanInfo, crop: CropData, r: recipe_mod.Recipe, xp=None) -> Pr
 
     shifts = None
     sy = sx = np.zeros(0)
+    checks: List[Dict[str, Any]] = []
+    if scan.is_advanced and de_full.periodic_empty_fnumbers:
+        # проверка контрольных кадров — всегда (диагностика данных), даже если коррекция сдвигов выключена
+        checks = preprocess.check_checkpoints(scan, crop, de_full)
     if r.repositioning.get('enabled') and scan.is_advanced and de_full.periodic_empty_fnumbers:
         given = r.repositioning.get('shifts')
         if given:
@@ -165,9 +187,11 @@ def prepare(scan: ScanInfo, crop: CropData, r: recipe_mod.Recipe, xp=None) -> Pr
         else:
             _, sy, sx = preprocess.repositioning_shifts(scan, crop, de_full)
             sy, sx = np.asarray(sy, dtype='float64'), np.asarray(sx, dtype='float64')
+            sy, sx = drop_bad_checkpoint_shifts(sy, sx, checks)
         if np.isnan(sy).any() or np.isnan(sx).any():
             warnings.append('сдвиг образца измерен не на всех checkpoint-ах: неизмеренные приняты за 0')
         shifts = {'sy': [float(v) for v in sy], 'sx': [float(v) for v in sx]}
+    warnings.extend(checks_warnings(checks))
     frame_sy, frame_sx = _frame_shifts(fnums, de_full.periodic_empty_fnumbers, sy, sx, warnings)
 
     ax = r.axis
