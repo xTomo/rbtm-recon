@@ -25,20 +25,24 @@
 
 | Метод и путь                                   | Ответ |
 |------------------------------------------------|-------|
-| GET  .../slice?row&center&tilt&rings&angles&region&max_px&seq | binary uint16 (h, w) среза; X-Meta: row, axis, rings, angles, n_angles, region, timings |
+| GET  .../slice?row&center&tilt&rings&angles&region&smooth&deblur&balance&amount&max_px&seq | binary uint16 (h, w) среза; X-Meta: row, axis, rings, angles, n_angles, region, smoothing, timings |
 | POST .../axis/auto                             | JSON: axis, shift_x, alfa, углы пары 0°/180° |
 | POST .../axis/scan {row, center?, tilt?, step, n, metric, region, seq} | binary uint16 (n, th, tw): фрагменты среза при центрах center + (i − n//2)·step, общее окно квантования; X-Meta: centers, metrics, best |
 | POST .../axis/tilt {y_top, c_top, y_bottom, c_bottom} | JSON: axis (``axis.tilt_from_centers``) |
 | POST .../axis/set {center, tilt, row?}         | JSON: axis — ось, заданная вручную (method ``manual``) |
 | GET  .../axis/diff?center&tilt&max_px          | binary uint16: ``axis.diff_view`` пары 0°/180° |
 | GET  .../rings/preview?row&center&tilt&preset&region&max_px&seq | binary uint16 (2, h, w): без колец и с пресетом, общее окно |
+| POST .../compare {row, center?, tilt?, angles, region?, size, variants: [{rings, smoothing}], max_px, seq} | binary uint16 (k, th, tw): фрагмент среза при каждом варианте, общее окно; X-Meta: row, axis, angles, region, variants (нормализованные), metrics [{noise, sharpness}], timings |
 | GET  .../repositioning                         | JSON: применимость, checkpoint-ы (угол, sy, sx), накопленные сдвиги, предупреждения |
-| POST .../recipe {center?, tilt?, row?, rings?, angles?, slices?, xy_roi?, binning?, pixel_size_mm?} | JSON: полный рецепт по состоянию сессии (ROI кропа, ось, размер пикселя) — для POST /jobs |
+| POST .../recipe {center?, tilt?, row?, rings?, smoothing?, angles?, slices?, xy_roi?, binning?, pixel_size_mm?} | JSON: полный рецепт по состоянию сессии (ROI кропа, ось, размер пикселя) — для POST /jobs |
 | POST .../estimate {recipe}                     | JSON: ``pipeline.estimate`` + оценка времени, с/срез по замерам превью |
 
-``region`` — ``x0,y0,x1,y1`` в пикселях среза (w×w, w — ширина ROI), для увеличенного фрагмента; ``rings`` —
-пресет (``rings.PRESETS``, по умолчанию ``medium``); ``angles`` — ``fbp.ANGLE_MODES`` (по умолчанию
-``first_180``); ``max_px`` — по умолчанию ``cfg.preview_max_px``.
+``region`` — ``x0,y0,x1,y1`` в пикселях среза (w×w, w — ширина ROI), для увеличенного фрагмента (восстанавливается
+только он); ``rings`` — пресет (``rings.PRESETS``, по умолчанию ``medium``); ``angles`` — ``fbp.ANGLE_MODES`` (по
+умолчанию ``first_180``); ``max_px`` — по умолчанию ``cfg.preview_max_px``. Сглаживание в ``slice``: ``smooth`` — σ
+(нет, пусто или 0 — выключено), ``deblur`` — ``wiener`` | ``unsharp`` | ``none``, ``balance``, ``amount`` (как блок
+рецепта ``smoothing``, проверка — ``smoothing.resolve``); в X-Meta — нормализованные параметры или null, в
+``timings`` — ``smooth_s`` и ``block_rows`` (строк в блоке после колец).
 
 Подробности:
 - ``axis/scan``: по умолчанию step = 1 px, n = 9, metric = ``grad``, region — квадрат 256 px с наибольшей
@@ -49,11 +53,17 @@
   center/tilt и отдаёт ``GET /sessions/<sid>`` при восстановлении страницы); ``slice`` и прочие с явными
   center/tilt текущую ось не меняют.
 - ``estimate`` не требует ``ready``: без замеров превью ``time: null``.
+- ``compare`` (канал ``compare``): ``variants`` — 1…8 объектов ``{rings: пресет, smoothing: {sigma, deblur, balance,
+  amount} | null}``; ``region`` — [x0, y0, x1, y1] среза, null — квадрат стороны ``size`` (по умолчанию 384) с
+  наибольшей энергией краёв по срезу первого варианта. Кольца считаются раз на пресет, блок строк — раз на запрос,
+  каждый вариант — фильтр и FBP только фрагмента. ``metrics``: ``noise`` — 1,4826·MAD лапласиана / √20 (1/мм),
+  ``sharpness`` — энергия градиента относительно первого варианта (``preview.compare_metrics``).
 
 Память: кроп — memmap uint16 на диске; полоса нормированных (и сдвинутых по образцу) строк вокруг строки превью
 кэшируется, чтобы смена центра/наклона не нормировала кадры заново; её высота — запас под текущий наклон
 (``axis.margin_rows``) с небольшим резервом, при большем наклоне пересчитывается. На 6 ГБ полоса для
-~400–800 углов и ширины ~3000 — сотни МБ; кэш держится на GPU, при нехватке памяти — в RAM.
+~400–800 углов и ширины ~3000 — сотни МБ; кэш держится на GPU, при нехватке памяти — в RAM. Со сглаживанием полоса
+шире на ореол (до σ = 2 — ещё ~2·23 строки) и держится ещё блок строк после колец (~47 строк, ~0,3 ГБ на GPU).
 """
 from __future__ import annotations
 
@@ -68,7 +78,7 @@ from typing import Any, Dict, List, Optional
 from flask import Blueprint, current_app, jsonify, request
 
 from reconengine import axis as axis_mod
-from reconengine import data, fbp, gpu, rings
+from reconengine import data, fbp, gpu, rings, smoothing
 from reconengine import recipe as recipe_mod
 from reconengine.model import Cancelled, CropData, ROI, ScanInfo, check_cancel
 
@@ -476,6 +486,18 @@ def _binning(v) -> List[int]:
     return sorted(out)
 
 
+def _smoothing_args(src) -> Optional[Dict[str, Any]]:
+    """Блок сглаживания из query ``smooth`` (σ), ``deblur``, ``balance``, ``amount``; σ нет, пусто или 0 — None
+    (выключено). Значения проверяет ``smoothing.resolve`` (ValueError → 400)."""
+    sigma = arg_float(src, 'smooth')
+    if not sigma:
+        return None
+    block = {'sigma': sigma, 'deblur': _str(src, 'deblur', smoothing.DEFAULTS['deblur']),
+             'balance': arg_float(src, 'balance'), 'amount': arg_float(src, 'amount')}
+    smoothing.resolve(block)
+    return block
+
+
 def _max_px(src) -> int:
     return arg_int(src, 'max_px', _cfg().preview_max_px, *_MAX_PX_RANGE)
 
@@ -534,11 +556,12 @@ def load_cancel(sid):
 @bp.get('/<sid>/slice')
 def slice_(sid):
     a = request.args
+    smooth = _smoothing_args(a)
 
     def fn(ctx, check):
         row, ax = _axis_args(ctx, a, check)
         return ctx.slice(row, ax, _str(a, 'rings', preview.DEFAULT_RINGS), _str(a, 'angles', preview.DEFAULT_ANGLES),
-                         _region(a), check, exact=a.get('exact', '') in ('1', 'true'))
+                         _region(a), check, exact=a.get('exact', '') in ('1', 'true'), smooth=smooth)
 
     img, meta = _compute(sid, 'slice', _seq(a), fn)
     return binary.array_response(img, meta=meta, max_px=_max_px(a))
@@ -624,6 +647,24 @@ def rings_preview(sid):
     return binary.array_response(stack, meta=meta, max_px=_max_px(a))    # окно по обоим срезам — общее
 
 
+@bp.post('/<sid>/compare')
+def compare(sid):
+    """Варианты колец и сглаживания на одном фрагменте среза — стопка с общим окном (см. модуль и
+    ``preview.compare``)."""
+    b = _body()
+    variants = preview.compare_variants(b.get('variants'))          # ошибки — 400 до ожидания GPU
+    size = arg_int(b, 'size', preview.COMPARE_REGION_PX, 16, 4096)
+
+    def fn(ctx, check):
+        row, ax = _axis_args(ctx, b, check)
+        return ctx.compare(row, ax, variants, region=_region(b), size=size,
+                           angle_mode=_str(b, 'angles', preview.DEFAULT_ANGLES), check=check)
+
+    frags, meta = _compute(sid, 'compare', _seq(b), fn)
+    lo, hi = preview.pooled_window(frags)
+    return binary.array_response(frags, lo=lo, hi=hi, meta=meta, max_px=_max_px(b))
+
+
 @bp.get('/<sid>/repositioning')
 def repositioning(sid):
     s = _mgr().get(sid, _user())
@@ -638,7 +679,8 @@ def make_recipe(sid):
     первом запросе авто-ось), ``rings`` — пресет, ``angles`` — режим углов, ``slices`` — [z0, z1) строк детектора
     (по умолчанию весь ROI), ``xy_roi``, ``binning`` — коэффициенты копий с биннингом (по умолчанию [4]),
     ``pixel_size_mm`` — размер пикселя, введённый пользователем (иначе
-    найденный для скана, с источником). ROI — загруженного кропа. Рецепт проверяется по кадру скана."""
+    найденный для скана, с источником), ``smoothing`` — блок сглаживания ``{sigma, deblur, balance, amount}`` или
+    null (выключено; недостающие поля — по умолчанию). ROI — загруженного кропа. Рецепт проверяется по кадру скана."""
     b = _body()
     s = _mgr().get(sid, _user())
     preset = _str(b, 'rings', preview.DEFAULT_RINGS)
@@ -648,6 +690,7 @@ def make_recipe(sid):
     if angles not in fbp.ANGLE_MODES:
         raise ValueError('неизвестный режим углов: {}'.format(angles))
     user_ps = arg_float(b, 'pixel_size_mm', None, lo=1e-6, hi=10.0)
+    smooth = recipe_mod.smoothing_block(b.get('smoothing'))
 
     def fn(ctx, check):
         if b.get('center') is None and b.get('tilt') is None:
@@ -661,6 +704,7 @@ def make_recipe(sid):
         r.author = s.owner
         r.axis = ax
         r.rings = {'preset': preset, 'params': None}
+        r.smoothing = smooth
         r.recon['angles'] = angles
         if b.get('slices') is not None:
             z = b['slices']
@@ -674,6 +718,7 @@ def make_recipe(sid):
         r.provenance['steps'] = {'fov': 'checked',
                                  'axis': 'auto' if ax.method == 'auto' else 'checked',
                                  'rings': 'checked' if 'rings' in b else 'auto',
+                                 'smoothing': 'checked' if 'smoothing' in b else 'auto',
                                  'run': 'checked'}
         d = recipe_mod.to_dict(r)
         r = recipe_mod.from_dict(d)                      # проверка типов (xy_roi, slices из тела)

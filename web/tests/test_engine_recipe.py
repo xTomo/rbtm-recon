@@ -6,7 +6,7 @@ import logging
 import pytest
 
 import reconengine
-from reconengine import fbp, recipe as recipe_mod, rings
+from reconengine import fbp, recipe as recipe_mod, rings, smoothing
 from reconengine.model import ROI, Axis
 
 
@@ -42,7 +42,10 @@ def test_default_recipe_structure():
     assert r.normalization == 'auto'
     assert r.rings == {'preset': 'medium', 'params': None}
     assert r.outputs == {'full': True, 'binning': [4], 'dtype': 'float32'}
-    assert r.provenance == {'steps': {'fov': 'auto', 'axis': 'auto', 'rings': 'auto', 'run': 'auto'}}
+    assert r.smoothing == {'sigma': None, 'deblur': 'wiener', 'balance': 0.02, 'amount': 1.5}   # выключено
+    assert smoothing.resolve(r.smoothing) is None
+    assert r.provenance == {'steps': {'fov': 'auto', 'axis': 'auto', 'rings': 'auto', 'smoothing': 'auto',
+                                      'run': 'auto'}}
 
 
 def test_default_recipe_repositioning_disabled_when_not_advanced():
@@ -95,12 +98,58 @@ def test_from_dict_ignores_unknown_top_level_keys_with_warning(caplog):
     (lambda d: d['outputs'].update(binning=[4, 0]), 'binning'),
     (lambda d: d['outputs'].update(binning=[4, -2]), 'binning'),
     (lambda d: d['outputs'].update(binning=[4, 2.5]), 'binning'),
+    (lambda d: d['smoothing'].update(sigma=0.1), 'smoothing.sigma'),
+    (lambda d: d['smoothing'].update(sigma=5), 'smoothing.sigma'),
+    (lambda d: d['smoothing'].update(sigma='1.5'), 'smoothing.sigma'),
+    (lambda d: d['smoothing'].update(sigma=True), 'smoothing.sigma'),
+    (lambda d: d['smoothing'].update(sigma=1.5, deblur='rl'), 'smoothing.deblur'),
+    (lambda d: d['smoothing'].update(sigma=1.5, balance=0), 'smoothing.balance'),
+    (lambda d: d['smoothing'].update(sigma=1.5, amount=-1), 'smoothing.amount'),
+    (lambda d: d['smoothing'].update(radius=3), 'smoothing'),
+    (lambda d: d.update(smoothing=[1.5]), 'smoothing'),
+    (lambda d: d['provenance']['steps'].update(smoothing='maybe'), 'smoothing'),
 ])
 def test_from_dict_rejects_invalid_values(mutate, message_part):
     d = recipe_mod.to_dict(make_default())
     mutate(d)
     with pytest.raises(ValueError, match=message_part):
         recipe_mod.from_dict(d)
+
+
+def test_smoothing_block_roundtrip_and_partial():
+    d = recipe_mod.to_dict(make_default())
+    d['smoothing'] = {'sigma': 1.5, 'deblur': 'unsharp'}                    # недостающие поля — по умолчанию
+    r = recipe_mod.from_dict(d)
+    assert r.smoothing == {'sigma': 1.5, 'deblur': 'unsharp', 'balance': 0.02, 'amount': 1.5}
+    assert smoothing.resolve(r.smoothing)['deblur'] == 'unsharp'
+    d2 = recipe_mod.to_dict(r)
+    assert recipe_mod.to_dict(recipe_mod.from_dict(json.loads(json.dumps(d2)))) == d2
+    # выключено: sigma null или 0; null вместо блока — блок по умолчанию
+    for off in ({'sigma': 0}, {'sigma': None, 'deblur': 'none'}, None):
+        d['smoothing'] = off
+        assert smoothing.resolve(recipe_mod.from_dict(d).smoothing) is None
+
+
+def test_recipe_without_smoothing_block_reads_as_off_with_same_sha():
+    """Рецепт, записанный до появления блока, читается как выключенный; хэш — как у рецепта с выключенным блоком
+    (выключенный блок в хэш не входит — хэши старых result.json не меняются)."""
+    r = make_default()
+    old = recipe_mod.to_dict(r)
+    del old['smoothing']
+    old['provenance']['steps'].pop('smoothing')
+    r_old = recipe_mod.from_dict(old)
+    assert r_old.smoothing == smoothing.default_block()
+    r.provenance['steps'].pop('smoothing')
+    assert recipe_mod.sha256(r_old) == recipe_mod.sha256(r)
+    off = copy.deepcopy(r)
+    off.smoothing = {'sigma': 0, 'deblur': 'none', 'balance': 0.5, 'amount': 0.0}     # выключено иначе
+    assert recipe_mod.sha256(off) == recipe_mod.sha256(r)
+    on = copy.deepcopy(r)
+    on.smoothing = dict(smoothing.default_block(), sigma=1.5)
+    assert recipe_mod.sha256(on) != recipe_mod.sha256(r)
+    on2 = copy.deepcopy(on)
+    on2.smoothing['balance'] = 0.05
+    assert recipe_mod.sha256(on2) != recipe_mod.sha256(on)
 
 
 def test_angle_modes_match_fbp_module():
@@ -196,10 +245,12 @@ def test_transferable_part_contains_only_portable_fields():
     r.rings['preset'] = 'strong'
     r.outputs['binning'] = [2, 4]
     r.recon['angles'] = 'full_halves'
+    r.smoothing = dict(smoothing.default_block(), sigma=1.2)
     part = recipe_mod.transferable_part(r)
 
-    assert set(part.keys()) == {'normalization', 'rings', 'outputs', 'recon'}
+    assert set(part.keys()) == {'normalization', 'rings', 'smoothing', 'outputs', 'recon'}
     assert part['rings']['preset'] == 'strong'
+    assert part['smoothing']['sigma'] == 1.2
     assert part['outputs']['binning'] == [2, 4]
     assert set(part['recon'].keys()) == {'algorithm', 'angles'}
     assert part['recon']['angles'] == 'full_halves'
@@ -210,6 +261,7 @@ def test_apply_template_keeps_scan_bound_fields_and_overrides_portable():
     template_source.rings['preset'] = 'weak'
     template_source.outputs['binning'] = [8]
     template_source.recon['angles'] = 'full_halves'
+    template_source.smoothing['sigma'] = 1.5
     template = recipe_mod.transferable_part(template_source)
 
     target = make_default(exp_id='exp-B', fingerprint='fp-B', roi=make_roi(0, 32, 0, 32))
@@ -220,6 +272,11 @@ def test_apply_template_keeps_scan_bound_fields_and_overrides_portable():
     assert result.rings['preset'] == 'weak'
     assert result.outputs['binning'] == [8]
     assert result.recon['angles'] == 'full_halves'
+    assert result.smoothing['sigma'] == 1.5
+    # шаблон без блока сглаживания (сохранён до его появления) — сглаживание цели не меняется
+    old_template = {k: v for k, v in template.items() if k != 'smoothing'}
+    target.smoothing['sigma'] = 0.8
+    assert recipe_mod.apply_template(target, old_template).smoothing['sigma'] == 0.8
     # не перенесено — осталось от target
     assert result.input['exp_id'] == 'exp-B'
     assert result.fov == target.fov

@@ -14,6 +14,15 @@
   ``parallel`` при строке 0 объёма сверху — проверить на сервере сравнением с 'astra').
 Результат делится на pixel_size (мм) → коэффициент ослабления в 1/мм, как сейчас.
 
+Фрагмент среза (``region`` = (x0, y0, x1, y1) в пикселях среза w×w, полуоткрытый): обратная проекция идёт только
+по его пикселям — стоимость ∝ площади (фрагмент 384² вместо 3216² — в десятки раз дешевле), фильтрация синограммы та
+же. 'cpu' — те же формулы по координатам пикселей фрагмента (поэлементно те же числа, что обрезка полного среза);
+'astra' — ``create_vol_geom`` с окном (``astra_window``): в astra пиксель (строка i, столбец j) объёма с окном
+[min_x, max_x] × [min_y, max_y] и шагом 1 имеет центр (min_x + j + 0,5, max_y − i − 0,5), а окно полного среза по
+умолчанию — ±w/2; окно фрагмента (x0 − w/2, x1 − w/2, w/2 − y1, w/2 − y0) даёт те же центры пикселей, что у
+пикселей [y0, y1) × [x0, x1) полного среза, и тот же шаг (масштаб FBP_CUDA не меняется) — проверить на сервере
+сравнением с обрезкой полного среза.
+
 Выбор углов (``select_angles``):
 - 'first_180'   — углы с (a − a.min) < 180 (текущее поведение);
 - 'full_halves' — наибольшее кратное 180° число полуоборотов k от начала скана (для 0–360° — все углы).
@@ -24,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import math
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -121,19 +131,45 @@ def ramp_filter(size: int) -> np.ndarray:
     return 2 * np.real(np.fft.fft(f))
 
 
-def _fbp_cpu(sinos: np.ndarray, angles_deg: np.ndarray) -> np.ndarray:
-    """FBP на numpy: sinos (s, n, w) → (s, w, w) float32 в единицах «ослабление на пиксель»."""
+Region = Tuple[int, int, int, int]
+
+
+def check_region(region: Optional[Sequence[int]], width: int) -> Optional[Region]:
+    """Фрагмент среза w×w: None или весь срез → None; иначе (x0, y0, x1, y1) c 0 ≤ x0 < x1 ≤ w, 0 ≤ y0 < y1 ≤ w
+    (иначе ValueError)."""
+    if region is None:
+        return None
+    x0, y0, x1, y1 = (int(v) for v in region)
+    if not (0 <= x0 < x1 <= width and 0 <= y0 < y1 <= width):
+        raise ValueError('region {},{},{},{} вне среза {}×{}'.format(x0, y0, x1, y1, width, width))
+    if (x0, y0, x1, y1) == (0, 0, width, width):
+        return None
+    return x0, y0, x1, y1
+
+
+def astra_window(width: int, region: Region) -> Tuple[float, float, float, float]:
+    """(min_x, max_x, min_y, max_y) для ``astra.create_vol_geom(y1 − y0, x1 − x0, ...)``: пиксели фрагмента region
+    совпадают с пикселями [y0, y1) × [x0, x1) полного среза w×w (окно по умолчанию ±w/2; строка 0 — сверху, у max_y).
+    Весь срез → (−w/2, w/2, −w/2, w/2)."""
+    x0, y0, x1, y1 = region
+    half = width / 2.0
+    return x0 - half, x1 - half, half - y1, half - y0
+
+
+def _fbp_cpu(sinos: np.ndarray, angles_deg: np.ndarray, region: Optional[Region] = None) -> np.ndarray:
+    """FBP на numpy: sinos (s, n, w) → (s, w, w) float32 в единицах «ослабление на пиксель»; с region —
+    (s, y1 − y0, x1 − x0): обратная проекция только в пикселях фрагмента."""
     s, n, w = sinos.shape
     size = max(64, int(2 ** np.ceil(np.log2(2 * w))))
     padded = np.zeros((s, n, size), dtype='float64')
     padded[:, :, :w] = sinos
     filtered = np.real(np.fft.ifft(np.fft.fft(padded, axis=-1) * ramp_filter(size), axis=-1))[:, :, :w]
     filtered = np.ascontiguousarray(filtered, dtype='float32')
+    x0, y0, x1, y1 = region if region is not None else (0, 0, w, w)
     c = (w - 1) / 2.0
-    coord = np.arange(w, dtype='float64') - c
-    xx = coord[None, :]
-    yy = coord[:, None]
-    rec = np.zeros((s, w * w), dtype='float32')
+    xx = (np.arange(x0, x1, dtype='float64') - c)[None, :]
+    yy = (np.arange(y0, y1, dtype='float64') - c)[:, None]
+    rec = np.zeros((s, (y1 - y0) * (x1 - x0)), dtype='float32')
     for j, th in enumerate(np.deg2rad(np.asarray(angles_deg, dtype='float64'))):
         t = (xx * math.cos(th) - yy * math.sin(th) + c).ravel()   # индекс детектора
         valid = (t >= 0) & (t <= w - 1)
@@ -145,12 +181,41 @@ def _fbp_cpu(sinos: np.ndarray, angles_deg: np.ndarray) -> np.ndarray:
         col = filtered[:, j, :]
         rec += col[:, i0] * wgt0 + col[:, np.minimum(i0 + 1, w - 1)] * wgt1
     rec *= np.float32(np.pi / (2 * n))
-    return rec.reshape(s, w, w)
+    return rec.reshape(s, y1 - y0, x1 - x0)
 
 
-def _fbp_astra(sinos: np.ndarray, angles_deg: np.ndarray) -> np.ndarray:
+def _astra_fbp_window(au, sino: np.ndarray, angles_deg: np.ndarray, region: Region) -> np.ndarray:
+    """FBP_CUDA одной синограммы (n, w) только во фрагменте region — как ``astra_recon_2d_parallel`` (та же
+    геометрия проекций, шаг детектора 1), но объём — окно ``astra_window``."""
+    astra = au.astra
+    w = sino.shape[-1]
+    x0, y0, x1, y1 = region
+    proj_geom = au.build_proj_geometry_parallel_2d(w, angles_deg, 1.0)
+    vol_geom = astra.create_vol_geom(y1 - y0, x1 - x0, *astra_window(w, region))
+    sino_id = astra.data2d.create('-sino', proj_geom, data=sino)
+    rec_id = astra.data2d.create('-vol', vol_geom)
+    try:
+        cfg = astra.astra_dict('FBP_CUDA')
+        cfg['ReconstructionDataId'] = rec_id
+        cfg['ProjectionDataId'] = sino_id
+        cfg['option'] = {}
+        alg_id = astra.algorithm.create(cfg)
+        try:
+            astra.algorithm.run(alg_id, 1)
+        finally:
+            astra.algorithm.delete(alg_id)
+        return np.asarray(astra.data2d.get(rec_id), dtype='float32')
+    finally:
+        astra.data2d.delete(rec_id)
+        astra.data2d.delete(sino_id)
+
+
+def _fbp_astra(sinos: np.ndarray, angles_deg: np.ndarray, region: Optional[Region] = None) -> np.ndarray:
     au = _astra_utils()
     ang = np.asarray(angles_deg, dtype='float64')
+    if region is not None:
+        return np.stack([_astra_fbp_window(au, np.ascontiguousarray(sino, dtype='float32'), ang, region)
+                         for sino in sinos])
     out = [np.asarray(au.astra_recon_2d_parallel(np.ascontiguousarray(sino, dtype='float32'), ang,
                                                  [['FBP_CUDA']]), dtype='float32')
            for sino in sinos]
@@ -158,18 +223,23 @@ def _fbp_astra(sinos: np.ndarray, angles_deg: np.ndarray) -> np.ndarray:
 
 
 def recon_slice(sino: np.ndarray, angles_deg: np.ndarray, pixel_size: float,
-                backend: str = 'auto', angle_mode: str = 'first_180') -> np.ndarray:
-    """Срез (w, w) float32 по синограмме (n, w). backend: 'auto' (astra, если доступна, иначе cpu), 'astra', 'cpu'."""
+                backend: str = 'auto', angle_mode: str = 'first_180',
+                region: Optional[Sequence[int]] = None) -> np.ndarray:
+    """Срез (w, w) float32 по синограмме (n, w). backend: 'auto' (astra, если доступна, иначе cpu), 'astra', 'cpu'.
+    region — только фрагмент (см. recon_rows)."""
     from .gpu import to_numpy  # noqa: WPS433
     sino = to_numpy(sino)
     if sino.ndim != 2:
         raise ValueError('ожидается синограмма (n, w), получено {}'.format(sino.shape))
-    return recon_rows(sino[None], angles_deg, pixel_size, backend=backend, angle_mode=angle_mode)[0]
+    return recon_rows(sino[None], angles_deg, pixel_size, backend=backend, angle_mode=angle_mode, region=region)[0]
 
 
 def recon_rows(sino_rows: np.ndarray, angles_deg: np.ndarray, pixel_size: float,
-               backend: str = 'auto', angle_mode: str = 'first_180') -> np.ndarray:
-    """Слой срезов: sino_rows (s, n, w) → (s, w, w) float32."""
+               backend: str = 'auto', angle_mode: str = 'first_180',
+               region: Optional[Sequence[int]] = None) -> np.ndarray:
+    """Слой срезов: sino_rows (s, n, w) → (s, w, w) float32. region = (x0, y0, x1, y1) в пикселях среза w×w —
+    восстановить только этот фрагмент: (s, y1 − y0, x1 − x0), те же значения, что обрезка полного среза (см.
+    модуль); вне среза — ValueError."""
     from .gpu import to_numpy  # noqa: WPS433
     sino_rows = to_numpy(sino_rows)
     angles = np.asarray(angles_deg)
@@ -178,14 +248,16 @@ def recon_rows(sino_rows: np.ndarray, angles_deg: np.ndarray, pixel_size: float,
             angles.shape[0], sino_rows.shape))
     if not pixel_size or pixel_size <= 0:
         raise ValueError('pixel_size должен быть > 0, получено {}'.format(pixel_size))
+    s, _, w = sino_rows.shape
+    reg = check_region(region, w)
     be = resolve_backend(backend)
     groups = _half_groups(angles, angle_mode)
     if not groups:
         raise ValueError('нет углов для реконструкции')
     fbp = _fbp_astra if be == 'astra' else _fbp_cpu
-    s, _, w = sino_rows.shape
-    out = np.zeros((s, w, w), dtype='float32')
+    x0, y0, x1, y1 = reg if reg is not None else (0, 0, w, w)
+    out = np.zeros((s, y1 - y0, x1 - x0), dtype='float32')
     for idx in groups:
-        out += fbp(np.asarray(sino_rows[:, idx, :], dtype='float32'), angles[idx])
+        out += fbp(np.asarray(sino_rows[:, idx, :], dtype='float32'), angles[idx], reg)
     out /= np.float32(len(groups) * float(pixel_size))
     return out

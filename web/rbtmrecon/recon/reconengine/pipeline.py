@@ -10,6 +10,12 @@
 
 Кольца, как и в ноутбуке, подавляются по всем data-кадрам, углы для FBP выбираются уже после
 (``fbp.recon_rows``).
+
+Сглаживание проекций с деблюром (блок рецепта ``smoothing``, модуль :mod:`smoothing`) — линейный фильтр проекций
+после колец и перед FBP; он связывает соседние строки: выходной строке нужны ±h строк после колец (h —
+``smoothing.halo_rows``). Поэтому при включённом сглаживании слой [a, b) выравнивается и чистится от колец с ореолом
+(a − h, b + h) ∩ [0, H) (ореол входит в запас входных строк), затем ``smoothing.apply`` оставляет строки [a, b) — они
+точно совпадают с фильтром по всему кропу (за краями кропа — отражение). Выключено — слой как раньше, без ореола.
 """
 from __future__ import annotations
 
@@ -24,7 +30,7 @@ import numpy as np
 
 from . import __version__ as ENGINE_VERSION
 from . import axis as axis_mod
-from . import data, fbp, gpu, outputs, preprocess, rings
+from . import data, fbp, gpu, outputs, preprocess, rings, smoothing
 from . import recipe as recipe_mod
 from .model import Axis, CropData, ProgressFn, ScanInfo, check_cancel, no_progress
 
@@ -34,9 +40,13 @@ logger = logging.getLogger(__name__)
 _SHIFT_EXTRA_ROWS = 8
 #: Модель памяти GPU слоя в единицах «строка × все кадры × float32» (n·w·4 байт):
 #: на входную строку — слой float32, копия (медиана или сдвиг) и маска; на выходную — выровненная синограмма;
-#: кольца и FBP идут кусками по _RING_CHUNK строк, remove_all_stripe держит ~8 копий куска.
+#: кольца и FBP идут кусками по _RING_CHUNK строк, remove_all_stripe держит ~8 копий куска. Со сглаживанием
+#: входных и выровненных строк на 2h больше (ореол); фильтр — после колец: выровненные строки, результат (s строк)
+#: и рабочие порции (_SMOOTH_WORK_CHUNKS · smoothing.CHUNK_BYTES — спектр, обратное преобразование, кусок с
+#: дополнением, рабочая память cuFFT).
 _GPU_MEM_FRACTION = 0.6
 _IN_COPIES, _OUT_COPIES, _RING_COPIES = 2.25, 1.0, 8.0
+_SMOOTH_WORK_CHUNKS = 2
 _RING_CHUNK = 16
 _CPU_SLAB_ROWS = 16
 _MIN_SLAB_ROWS, _MAX_SLAB_ROWS = 4, 256
@@ -182,15 +192,22 @@ def margin(prep: Prepared, width: int) -> int:
     return axis_mod.margin_rows(prep.alfa, width) + int(math.ceil(max_sy)) + extra
 
 
-def slab_rows_for_memory(free_bytes: int, n_frames: int, width: int, margin_rows: int) -> int:
-    """Выходных строк слоя, помещающихся в free_bytes по модели памяти (см. _IN_COPIES и др.)."""
+def slab_rows_for_memory(free_bytes: int, n_frames: int, width: int, margin_rows: int, halo: int = 0) -> int:
+    """Выходных строк слоя, помещающихся в free_bytes по модели памяти (см. _IN_COPIES и др.). halo — ореол
+    сглаживания h (0 — выключено): входных и выровненных строк на 2h больше; фильтр идёт после выравнивания и колец
+    (входной слой уже отпущен) и держит выровненные строки, результат (s строк) и рабочие порции — второе
+    ограничение."""
     unit = max(1, n_frames * width * 4)
     budget = free_bytes * _GPU_MEM_FRACTION / unit
-    rows = (budget - _IN_COPIES * 2 * margin_rows - _RING_COPIES * _RING_CHUNK) / (_IN_COPIES + _OUT_COPIES)
+    rows = ((budget - _IN_COPIES * 2 * (margin_rows + halo) - _OUT_COPIES * 2 * halo - _RING_COPIES * _RING_CHUNK)
+            / (_IN_COPIES + _OUT_COPIES))
+    if halo > 0:
+        work = _SMOOTH_WORK_CHUNKS * smoothing.CHUNK_BYTES / unit
+        rows = min(rows, (budget - _OUT_COPIES * 2 * halo - work) / (_OUT_COPIES + 1.0))
     return int(min(_MAX_SLAB_ROWS, max(_MIN_SLAB_ROWS, rows)))
 
 
-def auto_slab_rows(n_frames: int, width: int, margin_rows: int, xp=None) -> int:
+def auto_slab_rows(n_frames: int, width: int, margin_rows: int, xp=None, halo: int = 0) -> int:
     """Число выходных строк слоя по свободной памяти GPU (на CPU — фиксированное)."""
     xp = xp or gpu.get_xp()
     if not gpu.is_gpu(xp):
@@ -198,7 +215,12 @@ def auto_slab_rows(n_frames: int, width: int, margin_rows: int, xp=None) -> int:
     info = gpu.mem_info()
     if info is None:
         return _CPU_SLAB_ROWS
-    return slab_rows_for_memory(info[0], n_frames, width, margin_rows)
+    return slab_rows_for_memory(info[0], n_frames, width, margin_rows, halo)
+
+
+def halo_range(out_rows: Tuple[int, int], halo: int, height: int) -> Tuple[int, int]:
+    """Строки кропа, нужные сглаживанию для выходных строк out_rows = [r0, r1): (r0 − h, r1 + h) ∩ [0, height)."""
+    return max(0, int(out_rows[0]) - int(halo)), min(int(height), int(out_rows[1]) + int(halo))
 
 
 def _is_gpu_oom(exc: BaseException) -> bool:
@@ -228,6 +250,22 @@ def process_slab(crop: CropData, prep: Prepared, out_rows: Tuple[int, int], m: i
     return sino
 
 
+def smoothed_slab(crop: CropData, prep: Prepared, out_rows: Tuple[int, int], m: int, ring_params, smooth_params,
+                  xp=None) -> Any:
+    """Синограммы (s, n, w) строк кропа out_rows = [a, b) после колец и сглаживания: ``process_slab`` для строк с
+    ореолом ``halo_range`` (кольца — на всех), затем ``smoothing.apply`` → строки [a, b). Совпадают с фильтром по
+    всему кропу (см. модуль). smooth_params=None — ``process_slab`` с кольцами."""
+    xp = xp or gpu.get_xp()
+    a, b = out_rows
+    ea, eb = halo_range(out_rows, smoothing.halo_rows(smooth_params), crop.roi.height)
+    sino = process_slab(crop, prep, (ea, eb), m, ring_params, xp=xp)
+    if not smooth_params:
+        return sino
+    out = smoothing.apply(sino, smooth_params, keep=(a - ea, b - ea), xp=xp)
+    del sino
+    return out
+
+
 def output_window(r: recipe_mod.Recipe) -> Tuple[Tuple[int, int, int, int], Optional[np.ndarray]]:
     """Окно среза (y0, y1, x0, x1) в пикселях среза w×w и маска круга в этом окне (или None)."""
     w = r.fov.width
@@ -250,17 +288,35 @@ def output_shape(r: recipe_mod.Recipe) -> Tuple[int, int, int]:
     return z1 - z0, y1 - y0, x1 - x0
 
 
+def ring_rows_total(slices: Tuple[int, int], rows: int, halo: int, height: int) -> int:
+    """Сколько строк пройдут выравнивание и кольца при слоях по rows выходных строк для строк кропа
+    slices = [c0, c1): со сглаживанием каждый слой берётся с ореолом ±halo (``halo_range``)."""
+    c0, c1 = int(slices[0]), int(slices[1])
+    rows = max(1, int(rows))
+    return sum(eb - ea for ea, eb in (halo_range((a, min(a + rows, c1)), halo, height) for a in range(c0, c1, rows)))
+
+
 def estimate(r: recipe_mod.Recipe, scan: ScanInfo) -> Dict[str, Any]:
-    """Размеры без вычислений: кроп, объём, копии с биннингом (байты)."""
+    """Размеры без вычислений: кроп, объём, копии с биннингом (байты). Со сглаживанием — ореол ``halo_rows`` и во
+    сколько раз строк через выравнивание и кольца больше, чем срезов (``ring_rows_factor``, грубо: слой — по
+    свободной памяти GPU сейчас, на CPU — _CPU_SLAB_ROWS; запас — по наклону оси рецепта, без сдвигов образца)."""
     shape = output_shape(r)
     n_data = int(len(scan.data_idx))
     full = int(np.prod(shape)) * 4
     binned = {int(b): int(np.prod([s // b for s in shape])) * 4 for b in r.outputs.get('binning', [])}
+    hs = smoothing.halo_rows(smoothing.resolve(r.smoothing))
+    factor = 1.0
+    if hs:
+        m = axis_mod.margin_rows(-r.axis.tilt_deg if r.axis is not None else 0.0, r.fov.width)
+        rows = auto_slab_rows(n_data, r.fov.width, m, halo=hs)
+        c0, c1 = int(r.recon['slices'][0]) - r.fov.y0, int(r.recon['slices'][1]) - r.fov.y0
+        factor = ring_rows_total((c0, c1), rows, hs, r.fov.height) / float(max(1, c1 - c0))
     return {
         'crop_bytes': int(scan.n_frames) * r.fov.height * r.fov.width * np.dtype(scan.dtype).itemsize,
         'volume_shape': list(shape), 'volume_bytes': full, 'binned_bytes': binned,
         'n_data_frames': n_data,
         'n_angles_used': int(fbp.select_angles(data_frames(scan)[1], r.recon['angles']).sum()),
+        'halo_rows': hs, 'ring_rows_factor': factor,
     }
 
 
@@ -318,7 +374,9 @@ def run_recipe(r: recipe_mod.Recipe, scan_path: str, out_dir: str, cache_dir: st
     t0 = time.time()
     w = r.fov.width
     m = margin(prep, w)
-    rows = int(slab_rows or auto_slab_rows(len(prep.idx), w, m, xp))
+    sp = smoothing.resolve(r.smoothing)
+    hs = smoothing.halo_rows(sp)
+    rows = int(slab_rows or auto_slab_rows(len(prep.idx), w, m, xp, halo=hs))
     z0, z1 = int(r.recon['slices'][0]), int(r.recon['slices'][1])
     c0, c1 = z0 - r.fov.y0, z1 - r.fov.y0                       # строки кропа
     (wy0, wy1, wx0, wx1), circle = output_window(r)
@@ -326,10 +384,12 @@ def run_recipe(r: recipe_mod.Recipe, scan_path: str, out_dir: str, cache_dir: st
     pixel_size = float(r.pixel_size['value_mm'])
     shape = output_shape(r)
     base = name or scan.exp_id
-    logger.info('run_recipe %s: срезы [%d, %d), слой %d строк, запас %d, объём %s, бэкенд FBP %s',
-                scan.exp_id, z0, z1, rows, m, shape, fbp.resolve_backend(backend))
+    logger.info('run_recipe %s: срезы [%d, %d), слой %d строк, запас %d, ореол сглаживания %d, объём %s, '
+                'бэкенд FBP %s', scan.exp_id, z0, z1, rows, m, hs, shape, fbp.resolve_backend(backend))
     timings['slab_rows'] = rows
     timings['n_angles'] = int(fbp.select_angles(prep.angles, r.recon['angles']).sum())   # для оценки времени
+    if sp:
+        timings['halo_rows'] = hs
 
     writer = outputs.VolumeWriter(out_dir, base, shape, pixel_size, binning=r.outputs.get('binning', [4]))
     samples: List[np.ndarray] = []
@@ -339,7 +399,11 @@ def run_recipe(r: recipe_mod.Recipe, scan_path: str, out_dir: str, cache_dir: st
             check_cancel(cancel)
             b = min(a + rows, c1)
             try:
-                sino = process_slab(crop, prep, (a, b), m, None, xp=xp)
+                if sp:
+                    # кольца на слое с ореолом (на всех строках), затем фильтр → готовые к FBP строки [a, b)
+                    sino = smoothed_slab(crop, prep, (a, b), m, ring_params, sp, xp=xp)
+                else:
+                    sino = process_slab(crop, prep, (a, b), m, None, xp=xp)
             except Exception as exc:  # noqa: BLE001 — нехватка памяти GPU: слой вдвое меньше и заново
                 if not _is_gpu_oom(exc) or rows <= _MIN_SLAB_ROWS:
                     raise
@@ -349,7 +413,7 @@ def run_recipe(r: recipe_mod.Recipe, scan_path: str, out_dir: str, cache_dir: st
                 continue
             # кольца и FBP кусками: память колец и объём среза в RAM не растут со слоем
             for c in range(0, b - a, _RING_CHUNK):
-                part = rings.apply(sino[c:c + _RING_CHUNK], ring_params, xp=xp)
+                part = sino[c:c + _RING_CHUNK] if sp else rings.apply(sino[c:c + _RING_CHUNK], ring_params, xp=xp)
                 rec = fbp.recon_rows(part, prep.angles, pixel_size, backend=backend, angle_mode=r.recon['angles'])
                 del part
                 rec = rec[:, wy0:wy1, wx0:wx1]

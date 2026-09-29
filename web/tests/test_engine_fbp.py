@@ -127,6 +127,147 @@ def test_recon_rows_matches_slices():
         fbp.recon_slice(rows, ANGLES_180, 1.0, backend='cpu')
 
 
+# --- фрагмент среза ----------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize('w', [48, 51])
+def test_cpu_region_equals_crop_of_full(w):
+    """Фрагмент (x0, y0, x1, y1): обратная проекция только в его пикселях — те же значения, что обрезка полного
+    среза (в т.ч. полуоборотами)."""
+    blobs = ph.asymmetric_blobs()
+    a360 = np.arange(0, 360, 2.0)
+    rows = np.stack([ph.sinogram(blobs, a360, w, zeta=z) for z in (-3.0, 4.0)])
+    full = fbp.recon_rows(rows, a360, 0.01, backend='cpu', angle_mode='full_halves')
+    for region in ((5, 7, 30, 19), (0, 0, w, 1), (w - 3, w - 5, w, w)):
+        x0, y0, x1, y1 = region
+        part = fbp.recon_rows(rows, a360, 0.01, backend='cpu', angle_mode='full_halves', region=region)
+        assert part.shape == (2, y1 - y0, x1 - x0) and part.dtype == np.float32
+        np.testing.assert_allclose(part, full[:, y0:y1, x0:x1], rtol=0, atol=1e-6 * np.abs(full).max())
+    assert fbp.recon_slice(rows[0], a360, 0.01, backend='cpu', region=(0, 0, w, w)).shape == (w, w)
+    for bad in ((0, 0, w + 1, 5), (5, 5, 5, 9), (-1, 0, 4, 4), (0, 3, 4, 2)):
+        with pytest.raises(ValueError):
+            fbp.recon_rows(rows, a360, 0.01, backend='cpu', region=bad)
+
+
+def test_astra_window_default_and_fragment():
+    assert fbp.astra_window(64, (0, 0, 64, 64)) == (-32.0, 32.0, -32.0, 32.0)      # окно astra по умолчанию
+    # пиксель (строка i, столбец j) окна: центр (min_x + j + 0,5, max_y − i − 0,5) — как у пикселя (y0 + i, x0 + j)
+    min_x, max_x, min_y, max_y = fbp.astra_window(64, (10, 20, 30, 24))
+    assert (max_x - min_x, max_y - min_y) == (20, 4)                               # шаг пикселя 1
+    assert (min_x + 0.5, max_y - 0.5) == (-32 + 10 + 0.5, 32 - 20 - 0.5)
+
+
+class _FakeAstra:
+    """Минимальная astra для проверки окна фрагмента: FBP_CUDA по соглашениям astra (центр пикселя объёма
+    (min_x + j + 0,5, max_y − i − 0,5), точка (X, Y) проецируется в t = X·cos θ + Y·sin θ от центра детектора) с тем
+    же ramp-фильтром, что у CPU-бэкенда. Совпадение с CPU-бэкендом на полном срезе проверяет соглашения, а фрагмент —
+    арифметику окна (реальная astra на GPU — вручную)."""
+
+    def __init__(self):
+        self.store = {}
+        self.vol_geoms = []
+        self.next_id = 0
+
+    def create_vol_geom(self, rows, cols, min_x=None, max_x=None, min_y=None, max_y=None):
+        if min_x is None:
+            min_x, max_x, min_y, max_y = -cols / 2.0, cols / 2.0, -rows / 2.0, rows / 2.0
+        g = {'rows': rows, 'cols': cols, 'window': (min_x, max_x, min_y, max_y)}
+        self.vol_geoms.append(g)
+        return g
+
+    def astra_dict(self, name):
+        assert name == 'FBP_CUDA'
+        return {'type': name}
+
+    @property
+    def data2d(self):
+        fake = self
+
+        class D:
+            @staticmethod
+            def create(kind, geom, data=None):
+                fake.next_id += 1
+                key = fake.next_id
+                fake.store[key] = (kind, geom, None if data is None else np.array(data, dtype='float32'))
+                return key
+
+            @staticmethod
+            def get(key):
+                return fake.store[key][2]
+
+            @staticmethod
+            def delete(key):
+                fake.store.pop(key)
+        return D
+
+    @property
+    def algorithm(self):
+        fake = self
+
+        class A:
+            @staticmethod
+            def create(cfg):
+                return cfg
+
+            @staticmethod
+            def run(cfg, iterations):
+                _, proj, sino = fake.store[cfg['ProjectionDataId']]
+                kind, vol, _ = fake.store[cfg['ReconstructionDataId']]
+                n, w = sino.shape
+                size = max(64, int(2 ** np.ceil(np.log2(2 * w))))
+                padded = np.zeros((n, size))
+                padded[:, :w] = sino
+                filt = np.real(np.fft.ifft(np.fft.fft(padded, axis=-1) * fbp.ramp_filter(size), axis=-1))[:, :w]
+                min_x, max_x, min_y, max_y = vol['window']
+                px, py = (max_x - min_x) / vol['cols'], (max_y - min_y) / vol['rows']
+                xx = (min_x + (np.arange(vol['cols']) + 0.5) * px)[None, :]
+                yy = (max_y - (np.arange(vol['rows']) + 0.5) * py)[:, None]
+                rec = np.zeros((vol['rows'], vol['cols']))
+                for j, th in enumerate(proj['angles']):
+                    t = xx * np.cos(th) + yy * np.sin(th) + (w - 1) / 2.0
+                    rec += np.interp(t, np.arange(w), filt[j], left=0.0, right=0.0)
+                fake.store[cfg['ReconstructionDataId']] = (kind, vol, (rec * np.pi / (2 * n)).astype('float32'))
+
+            @staticmethod
+            def delete(cfg):
+                pass
+        return A
+
+
+def test_astra_region_window_maps_onto_full_slice(monkeypatch):
+    """backend='astra' с region: объём astra — окно фрагмента; на поддельной astra (соглашения astra, см.
+    _FakeAstra) фрагмент совпадает с обрезкой полного среза, а полный срез — с CPU-бэкендом."""
+    from tomo.recon import astra_utils
+    fake = _FakeAstra()
+    monkeypatch.setattr(astra_utils, 'astra', fake, raising=False)
+    monkeypatch.setattr(astra_utils, 'build_proj_geometry_parallel_2d',
+                        lambda det, angles, spacing: {'det': det, 'angles': np.deg2rad(angles)}, raising=False)
+
+    def full_recon(sino, angles, method):
+        assert method == [['FBP_CUDA']]
+        g = fake.create_vol_geom(sino.shape[1], sino.shape[1])
+        sid = fake.data2d.create('-sino', {'angles': np.deg2rad(angles)}, data=sino)
+        rid = fake.data2d.create('-vol', g)
+        fake.algorithm.run({'ProjectionDataId': sid, 'ReconstructionDataId': rid}, 1)
+        rec = fake.data2d.get(rid)
+        fake.data2d.delete(rid)
+        fake.data2d.delete(sid)
+        return rec
+
+    monkeypatch.setattr(astra_utils, 'astra_recon_2d_parallel', full_recon)
+    w = 40
+    rows = np.stack([ph.sinogram(ph.asymmetric_blobs(), ANGLES_180, w, zeta=z) for z in (0.0, 2.0)])
+    full = fbp.recon_rows(rows, ANGLES_180, 0.02, backend='astra')
+    cpu = fbp.recon_rows(rows, ANGLES_180, 0.02, backend='cpu')
+    np.testing.assert_allclose(full, cpu, rtol=0, atol=1e-4 * np.abs(cpu).max())
+    fake.vol_geoms.clear()
+    region = (3, 11, 29, 17)
+    part = fbp.recon_rows(rows, ANGLES_180, 0.02, backend='astra', region=region)
+    assert part.shape == (2, 6, 26)
+    assert fake.vol_geoms[0] == {'rows': 6, 'cols': 26, 'window': fbp.astra_window(w, region)}
+    np.testing.assert_allclose(part, full[:, 11:17, 3:29], rtol=0, atol=1e-5 * np.abs(full).max())
+    assert not fake.store                                          # объекты astra удалены
+
+
 # --- бэкенды -----------------------------------------------------------------------------------------------
 
 def test_auto_backend_is_cpu_without_gpu():
