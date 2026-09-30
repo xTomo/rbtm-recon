@@ -506,7 +506,8 @@ class Context:
         if params:
             for c in range(0, block.shape[0], BLOCK_RING_CHUNK):
                 check()
-                block[c:c + BLOCK_RING_CHUNK] = rings.apply(block[c:c + BLOCK_RING_CHUNK], params, xp=self.xp)
+                block[c:c + BLOCK_RING_CHUNK] = rings.apply(block[c:c + BLOCK_RING_CHUNK], params, xp=self.xp,
+                                                            frame_dx=self.prep.frame_sx)
         return block
 
     def _cached_block(self, r: int, shift_x: float, alfa: float, preset: str, rows: Tuple[int, int],
@@ -583,7 +584,7 @@ class Context:
         sino, t = self.aligned_row(row, ax, check)
         check()
         t0 = time.time()
-        s = rings.apply(sino[None], rings.resolve(preset), xp=self.xp)[0]
+        s = rings.apply(sino[None], rings.resolve(preset), xp=self.xp, frame_dx=self.prep.frame_sx)[0]
         t['rings_s'] = round(time.time() - t0, 4)
         self._corrected = {'key': (r, alfa, preset), 'shift_x': shift_x, 'row': s}
         return s, t

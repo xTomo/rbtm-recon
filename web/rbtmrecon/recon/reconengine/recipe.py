@@ -145,7 +145,7 @@ def default_recipe(exp_id: str, fingerprint: str, roi: ROI, pixel_size_value: fl
             'angles': 'first_180',
         },
         normalization='auto',
-        rings={'preset': 'medium', 'params': None},
+        rings={'preset': 'medium', 'params': None, 'version': rings.VERSION},
         outputs={'full': True, 'binning': [4], 'dtype': 'float32'},
         provenance={'steps': {'fov': 'auto', 'axis': 'auto', 'rings': 'auto', 'smoothing': 'auto', 'run': 'auto'}},
         smoothing=smoothing.default_block(),
@@ -220,6 +220,12 @@ def _validate_types(recipe: Recipe) -> None:
     _require(preset in rings.PRESETS, 'rings.preset неизвестен: {!r}'.format(preset))
     params = recipe.rings.get('params')
     _require(params is None or isinstance(params, dict), 'rings.params должен быть словарём или None')
+    version = recipe.rings.get('version', 1)
+    _require(version in rings.VERSIONS, 'rings.version неизвестна: {!r}'.format(version))
+    try:
+        rings.resolve(preset, params, version=version)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError('recipe: rings.params: {}: {}'.format(type(exc).__name__, exc)) from None
 
     outputs = recipe.outputs
     _require(isinstance(outputs.get('full'), bool), 'outputs.full должен быть bool')
@@ -430,6 +436,8 @@ def sha256(recipe: Recipe) -> str:
     d.pop('author', None)
     if smoothing.resolve(d.get('smoothing')) is None:
         d.pop('smoothing', None)
+    if d.get('rings', {}).get('version', 1) == 1:
+        d['rings'] = {k: v for k, v in d['rings'].items() if k != 'version'}    # рецепты до версии 2 колец
     if d.get('motion') == motion_block('off'):
         d.pop('motion', None)
     if not d.get('empty_skip_first'):

@@ -45,7 +45,7 @@ def full_crop_reference(crop, prep, ring_params=None, smooth_params=None):
     norm = pipeline._apply_shifts(norm, prep.frame_sy, prep.frame_sx, np)
     out = np.stack([np.asarray(axis_mod.transform_image(fr, prep.shift_x, prep.alfa, xp=np)) for fr in norm])
     sino = np.ascontiguousarray(np.swapaxes(out, 0, 1))
-    sino = np.asarray(rings.apply(sino, ring_params, xp=np))
+    sino = np.asarray(rings.apply(sino, ring_params, xp=np, frame_dx=prep.frame_sx))
     return np.asarray(smoothing.apply(sino, smooth_params, xp=np))
 
 
@@ -212,7 +212,7 @@ def test_run_recipe_with_smoothing_equals_full_crop_filter(tmp_path, per_row_rin
     roi = ROI(3, 69, 2, 38)
     ax = Axis(ss.center_x, ss.y_ref, ss.tilt_deg)
     r = make_recipe(scan, roi, ax)
-    r.rings = {'preset': 'medium', 'params': None}
+    r.rings = {'preset': 'medium', 'params': None, 'version': rings.VERSION}
     r.smoothing = dict(smoothing.default_block(), sigma=1.5)
     r.recon['slices'] = [roi.y0 + 4, roi.y0 + 17]
     res = pipeline.run_recipe(r, path, str(tmp_path / 'out'), str(tmp_path / 'cache'), backend='cpu', slab_rows=5)

@@ -735,7 +735,7 @@ def make_recipe(sid):
         r.pixel_size['user_edited'] = user_ps is not None
         r.author = s.owner
         r.axis = ax
-        r.rings = {'preset': preset, 'params': None}
+        r.rings = {'preset': preset, 'params': None, 'version': rings.VERSION}
         r.smoothing = smooth
         r.motion = ctx.recipe_motion()
         r.empty_skip_first = ctx.empty_skip

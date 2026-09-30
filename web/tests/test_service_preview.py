@@ -83,7 +83,7 @@ def test_slice_matches_run_recipe(tmp_path, make, dx, dy, n_slices):
     ax = true_axis(ss)
     z1 = roi.y1 if n_slices is None else roi.y0 + n_slices          # advanced: часть срезов — быстрее
     r = make_recipe(scan, roi, ax, ctx.pixel_size, angles='full_halves', slices=[roi.y0, z1])
-    r.rings = {'preset': 'medium', 'params': None}
+    r.rings = {'preset': 'medium', 'params': None, 'version': rings.VERSION}
     vol = run_volume(tmp_path, cfg, 'exp1', r)
 
     for row in (roi.y0, roi.y0 + 3, (roi.y0 + z1) // 2, z1 - 1):
@@ -132,7 +132,7 @@ def test_slice_with_smoothing_matches_run_recipe(tmp_path, per_row_rings, make, 
     ax = true_axis(ss)
     z1 = roi.y1 if n_slices is None else roi.y0 + n_slices
     r = make_recipe(scan, roi, ax, ctx.pixel_size, angles='full_halves', slices=[roi.y0, z1])
-    r.rings = {'preset': 'medium', 'params': None}
+    r.rings = {'preset': 'medium', 'params': None, 'version': rings.VERSION}
     r.smoothing = dict(SMOOTH)
     vol = run_volume(tmp_path, cfg, 'exp1', r)
 
@@ -418,7 +418,7 @@ def test_rings_preview(loaded, monkeypatch):
                    headers=HEADERS)
     assert r.status_code == 200
     pair, meta = decode(r)
-    assert pair.shape == (2, 68, 68) and meta['rings'] == 'strong' and meta['params']['snr'] == 2.0
+    assert pair.shape == (2, 68, 68) and meta['rings'] == 'strong' and meta['params']['vo']['snr'] == 2.0
     off, _ = ctx.slice(20, Axis(c, 20, ss.tilt_deg), 'off')
     on, _ = ctx.slice(20, Axis(c, 20, ss.tilt_deg), 'strong')
     step = float(r.headers['X-Scale'])
@@ -572,9 +572,9 @@ def test_compare_variants_fragment_and_metrics(tmp_path, per_row_rings):
     calls = []
     orig = rings.apply
 
-    def counting(sino, params, xp=None):
-        calls.append((np.shape(sino)[0], params and params['snr']))
-        return orig(sino, params, xp=xp)
+    def counting(sino, params, xp=None, frame_dx=None):
+        calls.append((np.shape(sino)[0], params and params['vo']['snr']))
+        return orig(sino, params, xp=xp, frame_dx=frame_dx)
 
     rings.apply = counting
     try:

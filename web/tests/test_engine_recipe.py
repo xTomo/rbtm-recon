@@ -40,7 +40,7 @@ def test_default_recipe_structure():
     assert r.recon['algorithm'] == 'FBP'
     assert r.recon['angles'] == 'first_180'
     assert r.normalization == 'auto'
-    assert r.rings == {'preset': 'medium', 'params': None}
+    assert r.rings == {'preset': 'medium', 'params': None, 'version': rings.VERSION}
     assert r.outputs == {'full': True, 'binning': [4], 'dtype': 'float32'}
     assert r.smoothing == {'sigma': None, 'deblur': 'wiener', 'balance': 0.02, 'amount': 1.5}   # выключено
     assert smoothing.resolve(r.smoothing) is None
@@ -203,6 +203,29 @@ def test_motion_not_transferred_by_template():
     src.empty_skip_first = 3
     dst = recipe_mod.apply_template(make_default(exp_id='exp-2'), recipe_mod.transferable_part(src))
     assert dst.motion == recipe_mod.motion_block('auto') and dst.empty_skip_first == 3
+
+
+def test_rings_version():
+    """Новый рецепт — кольца версии 2; рецепт без rings.version (записан раньше) — версия 1 (как считалось тогда),
+    хэш такого рецепта не меняется."""
+    r = make_default()
+    assert r.rings['version'] == rings.VERSION == 2
+    d = recipe_mod.to_dict(r)
+    old = copy.deepcopy(d)
+    del old['rings']['version']
+    r_old = recipe_mod.from_dict(old)
+    assert r_old.rings.get('version', 1) == 1
+    legacy = copy.deepcopy(r)
+    legacy.rings = {'preset': 'medium', 'params': None}
+    assert recipe_mod.sha256(r_old) == recipe_mod.sha256(legacy)
+    assert recipe_mod.sha256(r) != recipe_mod.sha256(legacy)
+    for bad, match in (({'preset': 'medium', 'params': None, 'version': 7}, 'rings.version'),
+                       ({'preset': 'medium', 'params': {'fft': {'period': 'x'}}, 'version': 2}, 'rings.params'),
+                       ({'preset': 'medium', 'params': {'snr': 3}, 'version': 1}, 'rings.params')):
+        dd = copy.deepcopy(d)
+        dd['rings'] = bad
+        with pytest.raises(ValueError, match=match):
+            recipe_mod.from_dict(dd)
 
 
 def test_angle_modes_match_fbp_module():
