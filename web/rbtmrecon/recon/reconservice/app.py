@@ -28,12 +28,16 @@ class ServiceState:
     """Всё состояние процесса: реестр сканов, интерактивная сессия, очередь задач."""
 
     def __init__(self, cfg: Config, mongo_client=None):
-        from . import jobs, scans, sessions  # noqa: WPS433 — модули тянут движок
+        from . import jobs, prefetch, scans, sessions  # noqa: WPS433 — модули тянут движок
         self.cfg = cfg
         self._mongo = mongo_client
         self.scans = scans.ScanRegistry(cfg)
+        self.prefetch = prefetch.Prefetcher(cfg, self.scans)
         self.sessions = sessions.SessionManager(cfg, self.scans)
         self.jobs = jobs.JobService(cfg, self.db, self.scans)
+        # загрузка области и задача читают исходники сами — предзагрузка им только мешает (второй читатель HDD)
+        self.sessions.on_source_read = self.prefetch.stop
+        self.jobs.on_source_read = self.prefetch.stop
 
     @property
     def mongo(self):
@@ -52,6 +56,7 @@ class ServiceState:
         self.sessions.start_reaper()
 
     def stop(self) -> None:
+        self.prefetch.stop('service stop')
         self.jobs.stop()
         self.sessions.stop_reaper()
 
@@ -105,6 +110,7 @@ def create_app(config: Optional[Config] = None, *, mongo_client=None, start_thre
             'gpu_lock_busy': gpu.lock_busy(s.cfg.gpu_lock),
             'session': s.sessions.summary(),
             'jobs': s.jobs.summary(),
+            'prefetch': s.prefetch.status(),
         })
 
     _register_errors(app)

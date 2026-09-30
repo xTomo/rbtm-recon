@@ -69,7 +69,7 @@ import sys
 import threading
 import time
 import uuid
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 from flask import Blueprint, Response, current_app, jsonify, request
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
@@ -391,6 +391,8 @@ class JobRunner:
         run_dir = self._run_dir(job)
         self.current = {'id': job_id, 'exp_id': exp_id, 'run_dir': run_dir}
         logger.info('задача %s (%s): запуск %s', job_id, exp_id, job['run_id'])
+        if self.svc.on_source_read is not None:
+            self.svc.on_source_read('job')
         self.svc.tomo_status(exp_id, 'reconstructing', job_id)
         try:
             reason, rc, tail = self._run_engine(job, run_dir)
@@ -581,6 +583,8 @@ class JobService:
         self.scans = scans
         self._create_lock = threading.Lock()
         self.runner = JobRunner(self)
+        #: вызывается с причиной перед запуском задачи (ServiceState: остановить предзагрузку исходников)
+        self.on_source_read: Optional[Callable[[str], None]] = None
 
     @property
     def coll(self):

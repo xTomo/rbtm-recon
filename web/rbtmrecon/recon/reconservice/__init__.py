@@ -25,6 +25,7 @@
 - ``publish``  — перенос результата в ``/storage/<id>/reconstruction/``, история, архивная копия ``.h5``;
 - ``results``  — результат: сведения, срезы копии ×4, файлы (``/results/*``);
 - ``cache``    — предел кэша кропов на /fast (``RECON_FAST_LIMIT_GB``): вытеснение давно не использованных;
+- ``prefetch`` — предзагрузка исходного HDF5 (HDD) в кэш ОС после обзора, до «Загрузить область» (``RECON_PREFETCH``);
 - ``app``      — сборка Flask-приложения, ``/health``;
 - ``preflight`` — проверка окружения после выкатки: ``python -m reconservice.preflight [--exp <id>]``.
 
