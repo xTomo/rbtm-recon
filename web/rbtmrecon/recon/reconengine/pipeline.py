@@ -312,7 +312,7 @@ def process_slab(crop: CropData, prep: Prepared, out_rows: Tuple[int, int], m: i
     del aligned
     if ring_params:
         for c in range(0, sino.shape[0], _RING_CHUNK):
-            sino[c:c + _RING_CHUNK] = rings.apply(sino[c:c + _RING_CHUNK], ring_params, xp=xp)
+            sino[c:c + _RING_CHUNK] = rings.apply(sino[c:c + _RING_CHUNK], ring_params, xp=xp, frame_dx=prep.frame_sx)
     return sino
 
 
@@ -448,7 +448,7 @@ def run_recipe(r: recipe_mod.Recipe, scan_path: str, out_dir: str, cache_dir: st
     z0, z1 = int(r.recon['slices'][0]), int(r.recon['slices'][1])
     c0, c1 = z0 - r.fov.y0, z1 - r.fov.y0                       # строки кропа
     (wy0, wy1, wx0, wx1), circle = output_window(r)
-    ring_params = rings.resolve(r.rings.get('preset', 'medium'), r.rings.get('params'))
+    ring_params = rings.resolve(r.rings.get('preset', 'medium'), r.rings.get('params'), version=r.rings.get('version', 1))
     pixel_size = float(r.pixel_size['value_mm'])
     shape = output_shape(r)
     base = name or scan.exp_id
@@ -481,7 +481,8 @@ def run_recipe(r: recipe_mod.Recipe, scan_path: str, out_dir: str, cache_dir: st
                 continue
             # кольца и FBP кусками: память колец и объём среза в RAM не растут со слоем
             for c in range(0, b - a, _RING_CHUNK):
-                part = sino[c:c + _RING_CHUNK] if sp else rings.apply(sino[c:c + _RING_CHUNK], ring_params, xp=xp)
+                part = sino[c:c + _RING_CHUNK] if sp else rings.apply(sino[c:c + _RING_CHUNK], ring_params, xp=xp,
+                                                                      frame_dx=prep.frame_sx)
                 rec = fbp.recon_rows(part, prep.angles, pixel_size, backend=backend, angle_mode=r.recon['angles'])
                 del part
                 rec = rec[:, wy0:wy1, wx0:wx1]
