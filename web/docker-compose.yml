@@ -40,7 +40,8 @@ services:
   reconstructor-jupyter:
     runtime: nvidia
     build: rbtmrecon/
-    command: bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && umask 0002 && cd /rbtm/recon/ && jupyter lab"
+    # exec: jupyter становится PID 1 и сам завершается по SIGTERM (иначе bash его игнорирует, docker stop ждёт 10 с)
+    command: bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && umask 0002 && cd /rbtm/recon/ && exec jupyter lab"
 #    runtime: nvidia
     environment:
       # Jupyter — на GPU 0 вместе с задачами реконструкции; GPU 1 остаётся интерактивной студии
