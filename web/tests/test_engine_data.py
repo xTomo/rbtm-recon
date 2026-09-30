@@ -391,6 +391,73 @@ def test_crop_matches_h5py(tmp_path, adv, adv_scan, monkeypatch):
     del crop
 
 
+def test_crop_reads_sequentially_in_one_thread(tmp_path, adv, adv_scan, monkeypatch):
+    """HDD: сжатые чанки читает один поток подряд по файлу, распаковка — в пуле; в памяти не больше workers + 2
+    прочитанных и не записанных чанков."""
+    workers = 2
+    reads, done = [], []
+    orig_read, orig_crop = data.ChunkSampler._read_raw, data.ChunkSampler._crop_from_raw
+
+    def read_raw(self, offset, size):
+        reads.append((threading.get_ident(), offset, len(reads) - len(done)))
+        return orig_read(self, offset, size)
+
+    def crop_from_raw(self, c, raw, *box):
+        time.sleep(0.02)             # распаковка медленнее чтения — чтение упирается в предел буфера
+        return orig_crop(self, c, raw, *box)
+
+    monkeypatch.setattr(data.ChunkSampler, '_read_raw', read_raw)
+    monkeypatch.setattr(data.ChunkSampler, '_crop_from_raw', crop_from_raw)
+    crop = data.CropLoader(adv_scan, str(tmp_path / 'cache')).load(
+        ROI_A, progress=lambda f, st: f > 0 and done.append(f), workers=workers)
+    np.testing.assert_array_equal(np.asarray(crop.frames), h5_frames(adv.path, (slice(None), slice(7, 40), slice(5, 50))))
+    assert len(reads) == 6
+    assert len({t for t, _, _ in reads}) == 1
+    offsets = [o for _, o, _ in reads]
+    assert offsets == sorted(offsets)
+    assert max(backlog for _, _, backlog in reads) <= workers + 2
+    del crop
+
+
+@pytest.mark.parametrize('where', ['_read_raw', '_crop_from_raw'])
+def test_crop_error_propagates_and_stops_reader(tmp_path, adv_scan, monkeypatch, where):
+    """Ошибка чтения (поток чтения) или распаковки (пул) поднимается из load, недописанный файл удаляется,
+    поток чтения не остаётся висеть."""
+    orig = getattr(data.ChunkSampler, where)
+    calls = []
+
+    def failing(self, *args):
+        calls.append(1)
+        if len(calls) == 3:
+            raise OSError('сбой диска')
+        return orig(self, *args)
+
+    monkeypatch.setattr(data.ChunkSampler, where, failing)
+    loader = data.CropLoader(adv_scan, str(tmp_path / 'cache'))
+    with pytest.raises(OSError, match='сбой диска'):
+        loader.load(ROI_A, workers=2)
+    assert os.listdir(str(tmp_path / 'cache')) == []
+    assert not [t for t in threading.enumerate() if t.name == 'crop-reader']
+
+
+def test_crop_bad_chunk_falls_back_to_h5py(tmp_path, adv, adv_scan, monkeypatch):
+    orig_read = data.ChunkSampler._read_raw
+    bad = []
+
+    def read_raw(self, offset, size):
+        raw = orig_read(self, offset, size)
+        if not bad:
+            bad.append(offset)
+            return b'\0' * len(raw)       # битый zlib-поток первого чанка → h5py
+        return raw
+
+    monkeypatch.setattr(data.ChunkSampler, '_read_raw', read_raw)
+    crop = data.CropLoader(adv_scan, str(tmp_path / 'cache')).load(ROI_A, workers=3)
+    np.testing.assert_array_equal(np.asarray(crop.frames), h5_frames(adv.path, (slice(None), slice(7, 40), slice(5, 50))))
+    assert bad
+    del crop
+
+
 @pytest.mark.parametrize('workers', [1, 4])
 def test_crop_fallback_shuffle(tmp_path, workers):
     sh = es.write_scan(tmp_path / 'sh.h5', shuffle=True)
