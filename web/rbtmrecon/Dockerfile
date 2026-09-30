@@ -62,10 +62,9 @@ c.ServerApp.password = u'sha1:b53c6ff4cf18:365ffefa7ddea6908cf8ce15e63826df11299
 c.ServerApp.root_dir = '/storage'\n\
 c.ServerApp.default_url = '/lab'" >> ~/.jupyter/jupyter_server_config.py
 # recon-service (reconservice): API студии, очередь задач движка и старая очередь ноутбуков.
-# exec — gunicorn становится PID 1 и получает SIGTERM от docker stop (bash его не передаёт):
-# запущенная задача успевает остановиться и убрать за собой (graceful_timeout в gunicorn_conf.py).
+# CMD в exec-форме (JSON) и exec в конце: gunicorn становится PID 1 и получает SIGTERM от docker stop — запущенная
+# задача успевает остановиться и убрать за собой (graceful_timeout в gunicorn_conf.py). В shell-форме
+# (CMD bash -c "...") Docker добавлял /bin/sh -c: PID 1 был sh, SIGTERM терялся, и docker stop через
+# stop_grace_period (90 с) убивал всё SIGKILL — без уборки.
 EXPOSE 5560
-CMD bash -c ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && \
-            umask 0002 && \
-            cd /rbtm/recon/ && \
-            exec gunicorn -c reconservice/gunicorn_conf.py 'reconservice.app:create_app()'"
+CMD ["bash", "-c", ". /opt/conda/etc/profile.d/conda.sh && conda activate xrecon && umask 0002 && cd /rbtm/recon/ && exec gunicorn -c reconservice/gunicorn_conf.py 'reconservice.app:create_app()'"]
