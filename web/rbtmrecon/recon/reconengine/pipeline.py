@@ -31,6 +31,7 @@ import numpy as np
 from . import __version__ as ENGINE_VERSION
 from . import axis as axis_mod
 from . import data, fbp, gpu, outputs, preprocess, rings, smoothing
+from . import motion as motion_mod
 from . import recipe as recipe_mod
 from .model import Axis, CropData, ProgressFn, ScanInfo, check_cancel, no_progress
 
@@ -104,6 +105,7 @@ class Prepared:
     shift_x: float
     alfa: float
     warnings: List[str]
+    motion: Optional[Dict[str, Any]] = None    # блок motion рецепта, как применён (dx — если компенсирован)
 
 
 def _normalization_de(scan: ScanInfo, de: preprocess.DarkEmpty, mode: str) -> preprocess.DarkEmpty:
@@ -171,7 +173,7 @@ def prepare(scan: ScanInfo, crop: CropData, r: recipe_mod.Recipe, xp=None) -> Pr
     if idx.size == 0:
         raise ValueError('{}: в скане нет data-кадров'.format(scan.exp_id))
 
-    de_full = preprocess.dark_empty_from_crop(scan, crop)
+    de_full = preprocess.dark_empty_from_crop(scan, crop, skip_first=r.empty_skip_first)
     de = _normalization_de(scan, de_full, r.normalization)
 
     shifts = None
@@ -194,17 +196,57 @@ def prepare(scan: ScanInfo, crop: CropData, r: recipe_mod.Recipe, xp=None) -> Pr
     warnings.extend(checks_warnings(checks))
     frame_sy, frame_sx = _frame_shifts(fnums, de_full.periodic_empty_fnumbers, sy, sx, warnings)
 
-    ax = r.axis
-    if ax is None:
+    def auto(fsx):
         p0, p180 = pair_0_180(angles)
         pair = np.asarray(crop.frames[[int(idx[p0]), int(idx[p180])]])
         norm = preprocess.normalize_slab(pair, fnums[[p0, p180]], de, xp=xp)
-        norm = _apply_shifts(norm, frame_sy[[p0, p180]], frame_sx[[p0, p180]], xp)
-        ax = axis_mod.auto_axis(gpu.to_numpy(norm[0]), gpu.to_numpy(norm[1]), crop.roi)
-        logger.info('авто-ось: center_x=%.2f на y=%.1f, наклон %.4f°', ax.center_x, ax.y_ref, ax.tilt_deg)
+        norm = _apply_shifts(norm, frame_sy[[p0, p180]], fsx[[p0, p180]], xp)
+        a = axis_mod.auto_axis(gpu.to_numpy(norm[0]), gpu.to_numpy(norm[1]), crop.roi)
+        logger.info('авто-ось: center_x=%.2f на y=%.1f, наклон %.4f°', a.center_x, a.y_ref, a.tilt_deg)
+        return a
+
+    ax = r.axis
+    frame_sx, motion_used = apply_motion(r.motion, scan, crop, idx, angles, fnums, de, de_full, frame_sy, frame_sx,
+                                         checks, tilt=lambda: (ax or auto(frame_sx)).tilt_deg, xp=xp,
+                                         warnings=warnings)
+    if ax is None:
+        ax = auto(frame_sx)
     shift_x, alfa = axis_mod.to_crop_params(ax, crop.roi)
     return Prepared(idx=idx, angles=angles, fnums=fnums, de=de, frame_sy=frame_sy, frame_sx=frame_sx,
-                    shifts=shifts, axis=ax, shift_x=shift_x, alfa=alfa, warnings=warnings)
+                    shifts=shifts, axis=ax, shift_x=shift_x, alfa=alfa, warnings=warnings, motion=motion_used)
+
+
+def rotated_checks(checks) -> bool:
+    """Проверка контрольных кадров нашла сбой угла хотя бы на одной вставке."""
+    return any(c.get('status') == 'rotated' for c in (checks or []))
+
+
+def apply_motion(block: Dict[str, Any], scan: ScanInfo, crop: CropData, idx, angles, fnums, de, de_full,
+                 frame_sy: np.ndarray, frame_sx: np.ndarray, checks, tilt, xp=None,
+                 warnings: Optional[List[str]] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Компенсация смещения образца по блоку рецепта ``motion``: frame_sx − dx. Решение студии (``applied``)
+    выполняется как есть (dx — из рецепта); без него — оценка :func:`motion.estimate` и :func:`motion.decide`.
+    tilt — функция, возвращающая наклон оси (линии полос ⟂ оси); вызывается, только если нужна оценка.
+    Возвращает (frame_sx, блок motion как применён)."""
+    mode = block.get('mode', 'off')
+    if mode == 'off':
+        return frame_sx, recipe_mod.motion_block('off', applied=False)
+    applied = block.get('applied')
+    if applied is not None:
+        if not applied:
+            return frame_sx, recipe_mod.motion_block(mode, applied=False, summary=block.get('summary'))
+        dx = motion_mod.from_block(block, fnums)
+        logger.info('смещение образца: компенсация по рецепту (СКО %.2f px)', float(np.std(dx)))
+        return frame_sx - dx, recipe_mod.motion_block(mode, True, dx, fnums, block.get('summary'))
+    profiles, _ys = motion_mod.band_profiles(crop, idx, fnums, de, frame_sy, frame_sx, tilt(), xp=xp)
+    b = motion_mod.effective_bin(crop.frames.shape[1], crop.frames.shape[2], motion_mod.DEFAULTS['bin'])
+    est = motion_mod.estimate(profiles, angles, fnums, de_full.periodic_empty_fnumbers, bin_used=b)
+    ok, why = motion_mod.decide(est, mode, rotated_checks(checks))
+    if warnings is not None and est.status == 'inconsistent':
+        warnings.append('смещение образца: ' + why)
+    if not ok:
+        return frame_sx, recipe_mod.motion_block(mode, False, summary=est.summary())
+    return frame_sx - est.dx, recipe_mod.motion_block(mode, True, est.dx, fnums, est.summary())
 
 
 # --- слои --------------------------------------------------------------------------------------------------
@@ -359,6 +401,8 @@ def resolved_recipe(r: recipe_mod.Recipe, prep: Prepared) -> recipe_mod.Recipe:
     d['axis'] = prep.axis.to_dict()
     if prep.shifts is not None:
         d['repositioning'] = dict(d['repositioning'], shifts=prep.shifts)
+    if prep.motion is not None:
+        d['motion'] = prep.motion
     return recipe_mod.from_dict(d)
 
 
