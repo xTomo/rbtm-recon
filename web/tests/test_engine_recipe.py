@@ -152,6 +152,59 @@ def test_recipe_without_smoothing_block_reads_as_off_with_same_sha():
     assert recipe_mod.sha256(on2) != recipe_mod.sha256(on)
 
 
+def test_motion_and_empty_skip_defaults_and_old_recipes():
+    """Новый рецепт: компенсация смещения — авто, первые 2 кадра серий empty не берутся. Рецепт без этих полей
+    (записанный раньше) — как считалось тогда: выключено и 0; его хэш не меняется."""
+    r = make_default()
+    assert r.motion == recipe_mod.motion_block('auto') and r.empty_skip_first == recipe_mod.EMPTY_SKIP_DEFAULT
+    d = recipe_mod.to_dict(r)
+    assert recipe_mod.to_dict(recipe_mod.from_dict(json.loads(json.dumps(d)))) == d
+    old = copy.deepcopy(d)
+    del old['motion'], old['empty_skip_first']
+    r_old = recipe_mod.from_dict(old)
+    assert r_old.motion == recipe_mod.motion_block('off') and r_old.empty_skip_first == 0
+    legacy = copy.deepcopy(r)
+    legacy.motion, legacy.empty_skip_first = recipe_mod.motion_block('off'), 0
+    assert recipe_mod.sha256(r_old) == recipe_mod.sha256(legacy)
+    assert recipe_mod.sha256(r) != recipe_mod.sha256(legacy)
+    # частичный блок — недостающие поля null
+    d2 = copy.deepcopy(d)
+    d2['motion'] = {'mode': 'on'}
+    assert recipe_mod.from_dict(d2).motion == recipe_mod.motion_block('on')
+
+
+@pytest.mark.parametrize('block, match', [
+    ({'mode': 'maybe'}, 'motion.mode'),
+    ({'mode': 'auto', 'dx': [0.1], 'fnums': None}, 'вместе'),
+    ({'mode': 'auto', 'dx': [0.1, 0.2], 'fnums': [1]}, 'одной длины'),
+    ({'mode': 'auto', 'applied': True}, 'требует dx'),
+    ({'mode': 'auto', 'applied': 'yes'}, 'applied'),
+    ({'mode': 'auto', 'dx': ['a'], 'fnums': [1]}, 'только числа'),
+    ({'mode': 'auto', 'extra': 1}, 'неизвестные поля'),
+])
+def test_motion_block_validation(block, match):
+    d = recipe_mod.to_dict(make_default())
+    d['motion'] = block
+    with pytest.raises(ValueError, match=match):
+        recipe_mod.from_dict(d)
+
+
+@pytest.mark.parametrize('value', [-1, 21, 1.5, True, '2'])
+def test_empty_skip_first_validation(value):
+    d = recipe_mod.to_dict(make_default())
+    d['empty_skip_first'] = value
+    with pytest.raises(ValueError, match='empty_skip_first'):
+        recipe_mod.from_dict(d)
+
+
+def test_motion_not_transferred_by_template():
+    src = make_default()
+    src.motion = recipe_mod.motion_block('auto', True, [0.5], [10])
+    src.empty_skip_first = 3
+    dst = recipe_mod.apply_template(make_default(exp_id='exp-2'), recipe_mod.transferable_part(src))
+    assert dst.motion == recipe_mod.motion_block('auto') and dst.empty_skip_first == 3
+
+
 def test_angle_modes_match_fbp_module():
     # angles валидны ровно те, что объявлены в fbp.ANGLE_MODES
     d = recipe_mod.to_dict(make_default())
@@ -248,7 +301,7 @@ def test_transferable_part_contains_only_portable_fields():
     r.smoothing = dict(smoothing.default_block(), sigma=1.2)
     part = recipe_mod.transferable_part(r)
 
-    assert set(part.keys()) == {'normalization', 'rings', 'smoothing', 'outputs', 'recon'}
+    assert set(part.keys()) == {'normalization', 'rings', 'smoothing', 'outputs', 'recon', 'empty_skip_first'}
     assert part['rings']['preset'] == 'strong'
     assert part['smoothing']['sigma'] == 1.2
     assert part['outputs']['binning'] == [2, 4]

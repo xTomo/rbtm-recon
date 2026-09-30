@@ -157,12 +157,23 @@ def _median_frames(frames: np.ndarray, idx: np.ndarray, r0: int, r1: int,
     return out
 
 
-def dark_empty_from_crop(scan: ScanInfo, crop: CropData,
-                         rows: Optional[Tuple[int, int]] = None) -> DarkEmpty:
+def series_tail(idx: np.ndarray, skip_first: int) -> np.ndarray:
+    """Кадры серии без первых skip_first, но не меньше двух (серия из одного кадра — как есть)."""
+    idx = np.asarray(idx)
+    return idx[min(max(0, int(skip_first)), max(0, len(idx) - 2)):]
+
+
+def dark_empty_from_crop(scan: ScanInfo, crop: CropData, rows: Optional[Tuple[int, int]] = None,
+                         skip_first: int = 0) -> DarkEmpty:
     """Медианы dark, начальной empty-серии и периодических empty-серий по кропу (строки rows кропа, если заданы).
 
     Разбиение empty на серии — как в ``hdf5_v2.load_tomo_data_advanced_v2`` (первые series_length — начальная,
     далее по series_length подряд), frame_number серии — номер её первого кадра.
+
+    skip_first — сколько первых кадров каждой серии не брать в медиану (:func:`series_tail`, остаётся не меньше двух).
+    У части камер первые кадры после ухода образца из пучка несут «тень» объекта (инерция детектора, 0,1–0,3 %) и
+    темнее остальных на ~1 %; в начальной серии — прогрев трубки. 0 — все кадры (рецепты, записанные до появления
+    параметра).
 
     Advanced: dark вычитается из каждого empty-кадра, потом медиана (как load_tomo_data_advanced_v2).
     Не-advanced: все empty — одна начальная серия, медиана, потом вычитание dark (как load_tomo_data_v2).
@@ -191,18 +202,19 @@ def dark_empty_from_crop(scan: ScanInfo, crop: CropData,
     empty_fn = fnums[empty_idx]
 
     if not scan.is_advanced:
-        initial = _median_frames(frames, empty_idx, r0, r1) - dark
+        initial = _median_frames(frames, series_tail(empty_idx, skip_first), r0, r1) - dark
         return DarkEmpty(dark, initial.astype('float32'), int(empty_fn[0]), [], [])
 
     sl = int(scan.series_length)
     if sl <= 0:
         raise ValueError('advanced-скан без series_length — разбиение empty на серии невозможно')
-    initial = _median_frames(frames, empty_idx[:sl], r0, r1, subtract=dark)
+    initial = _median_frames(frames, series_tail(empty_idx[:sl], skip_first), r0, r1, subtract=dark)
     periodic, periodic_fn = [], []
     remaining = empty_idx[sl:]
     remaining_fn = empty_fn[sl:]
     for k in range(len(remaining) // sl):
-        periodic.append(_median_frames(frames, remaining[k * sl:(k + 1) * sl], r0, r1, subtract=dark))
+        periodic.append(_median_frames(frames, series_tail(remaining[k * sl:(k + 1) * sl], skip_first), r0, r1,
+                                       subtract=dark))
         periodic_fn.append(int(remaining_fn[k * sl]))
     if len(remaining) % sl:
         logger.warning('empty-кадров после начальной серии %d — не кратно series_length=%d, хвост %d отброшен',

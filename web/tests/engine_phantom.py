@@ -267,14 +267,16 @@ def make_synthetic_scan(angles: Sequence[float], height: int = 64, width: int = 
                         advanced: bool = False, n_segments: int = 3, series_length: int = 3,
                         segment_offsets: Optional[Sequence[Tuple[float, float]]] = None,
                         segment_angle_offsets: Optional[Sequence[float]] = None,
-                        drift: float = 0.0, noise: float = 0.0, seed: int = 0) -> SyntheticScan:
+                        drift: float = 0.0, noise: float = 0.0, seed: int = 0,
+                        frame_dx: Optional[Sequence[float]] = None) -> SyntheticScan:
     """Скан с аналитическими проекциями.
 
     advanced: периодические empty-серии и data_check; segment_offsets[k] = (dy, dx) — абсолютный сдвиг образца
     в плоскости детектора в сегменте k (сегмент 0 — (0, 0)); segment_angle_offsets[k] — сбой угла в сегменте k,
     градусы: data и data_check сегмента сняты под углом «записанный + сбой» (поворот образца во время вставки,
     которого счётчик мотора не видит); drift — относительный дрейф яркости источника за весь скан (линейно по
-    frame_number, для проверки интерполяции empty)."""
+    frame_number, для проверки интерполяции empty); frame_dx — сдвиг образца по x для каждого кадра timeline
+    (действует на data и data_check; имитация смещения образца во время съёмки)."""
     blobs = asymmetric_blobs() if blobs is None else blobs
     if advanced:
         tl = advanced_timeline(angles, n_segments, series_length=series_length)
@@ -287,6 +289,8 @@ def make_synthetic_scan(angles: Sequence[float], height: int = 64, width: int = 
             if tl.modes[i] in (MODE_DATA, MODE_DATA_CHECK):
                 offsets[i] = segment_offsets[int(tl.segments[i])]
     obj = (tl.modes == MODE_DATA) | (tl.modes == MODE_DATA_CHECK)
+    if frame_dx is not None:
+        offsets[:, 1] += np.where(obj, np.asarray(frame_dx, dtype='float64'), 0.0)
     p = np.zeros((n, height, width))
     idx = np.where(obj)[0]
     true_angles = tl.angles.astype('float64')

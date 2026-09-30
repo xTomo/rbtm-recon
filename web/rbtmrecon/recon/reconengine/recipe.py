@@ -5,6 +5,14 @@
 (``normalization``, ``rings``, ``smoothing``, ``recon.algorithm``, ``recon.angles``, ``outputs``) — «переносимые»:
 их можно сохранить как шаблон и применить к рецепту другого скана через :func:`apply_template`.
 
+``motion`` — компенсация смещения образца во время съёмки (:mod:`motion`), привязана к скану:
+``{mode: 'auto' | 'on' | 'off', applied: null | bool, dx: null | [...], fnums: null | [...], summary: null | {...}}``.
+``applied`` — решение, принятое в студии (задача ему следует; null — задача оценивает и решает сама); ``dx`` — сдвиг
+образца по data-кадрам ``fnums``, px детектора (компенсация — сдвиг кадра на −dx). ``empty_skip_first`` — сколько
+первых кадров каждой серии empty не брать в медиану (:func:`preprocess.dark_empty_from_crop`), переносимое. Рецепт
+без этих полей (записанный до их появления) читается как ``motion.mode = 'off'`` и ``empty_skip_first = 0`` — то есть
+как считалось тогда; в :func:`sha256` эти значения не входят.
+
 ``smoothing`` — сглаживание проекций гауссом и деблюринг тем же ядром (:mod:`smoothing`):
 ``{sigma: null | число, deblur: 'wiener' | 'unsharp' | 'none', balance, amount}``; ``sigma`` null или 0 — выключено
 (по умолчанию). Рецепт без блока (записанный до его появления) читается как выключенный; выключенный блок в
@@ -31,7 +39,7 @@ import tempfile
 from typing import Any, Dict, List, Optional
 
 from . import __version__ as _ENGINE_VERSION
-from . import fbp, pixelsize, rings, smoothing
+from . import fbp, motion as motion_mod, pixelsize, rings, smoothing
 from .model import ROI, Axis
 
 logger = logging.getLogger(__name__)
@@ -48,10 +56,14 @@ _ALGORITHMS = {'FBP'}
 
 _TOP_LEVEL_KEYS = {
     'schema', 'engine', 'created', 'author', 'input', 'pixel_size', 'fov', 'axis',
-    'repositioning', 'recon', 'normalization', 'rings', 'smoothing', 'outputs', 'provenance',
+    'repositioning', 'recon', 'normalization', 'rings', 'smoothing', 'outputs', 'provenance', 'motion',
+    'empty_skip_first',
 }
 #: Верхнеуровневые поля, переносимые в другой рецепт целиком.
-_TRANSFERABLE_TOP = ('normalization', 'rings', 'smoothing', 'outputs')
+_TRANSFERABLE_TOP = ('normalization', 'rings', 'smoothing', 'outputs', 'empty_skip_first')
+_MOTION_KEYS = ('mode', 'applied', 'dx', 'fnums', 'summary')
+#: empty_skip_first новых рецептов (у старых — 0)
+EMPTY_SKIP_DEFAULT = 2
 #: Шаги студии, чьё происхождение (auto | checked) записывается в ``provenance.steps``.
 _PROVENANCE_STEPS = ('fov', 'axis', 'rings', 'smoothing', 'run')
 #: Поля секции ``recon``, переносимые в другой рецепт (``slices``/``xy_roi`` привязаны к скану).
@@ -76,6 +88,17 @@ class Recipe:
     outputs: Dict[str, Any]
     provenance: Dict[str, Any]
     smoothing: Dict[str, Any] = dataclasses.field(default_factory=smoothing.default_block)
+    motion: Dict[str, Any] = dataclasses.field(default_factory=lambda: motion_block('off'))
+    empty_skip_first: int = 0
+
+
+def motion_block(mode: str = 'auto', applied: Optional[bool] = None, dx=None, fnums=None,
+                 summary: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Блок ``motion`` рецепта."""
+    return {'mode': mode, 'applied': applied,
+            'dx': None if dx is None else [round(float(v), 4) for v in dx],
+            'fnums': None if fnums is None else [int(v) for v in fnums],
+            'summary': copy.deepcopy(summary)}
 
 
 @functools.lru_cache(maxsize=1)
@@ -126,6 +149,8 @@ def default_recipe(exp_id: str, fingerprint: str, roi: ROI, pixel_size_value: fl
         outputs={'full': True, 'binning': [4], 'dtype': 'float32'},
         provenance={'steps': {'fov': 'auto', 'axis': 'auto', 'rings': 'auto', 'smoothing': 'auto', 'run': 'auto'}},
         smoothing=smoothing.default_block(),
+        motion=motion_block('auto'),
+        empty_skip_first=EMPTY_SKIP_DEFAULT,
     )
 
 
@@ -208,6 +233,10 @@ def _validate_types(recipe: Recipe) -> None:
              'outputs.dtype должен быть непустой строкой')
 
     _validate_smoothing(recipe.smoothing)
+    _validate_motion(recipe.motion)
+    _require(isinstance(recipe.empty_skip_first, int) and not isinstance(recipe.empty_skip_first, bool)
+             and 0 <= recipe.empty_skip_first <= 20,
+             'empty_skip_first должен быть целым 0…20: {!r}'.format(recipe.empty_skip_first))
 
     steps = recipe.provenance.get('steps', {})
     for key in _PROVENANCE_STEPS:
@@ -235,6 +264,25 @@ def _validate_smoothing(block: Any) -> None:
         smoothing.resolve(block)
     except ValueError as exc:
         raise ValueError('recipe: {}'.format(exc)) from None
+
+
+def _validate_motion(block: Any) -> None:
+    _require(isinstance(block, dict), 'motion должен быть словарём: {!r}'.format(block))
+    unknown = set(block) - set(_MOTION_KEYS)
+    _require(not unknown, 'motion: неизвестные поля {}'.format(sorted(unknown)))
+    _require(block.get('mode') in motion_mod.MODES,
+             'motion.mode: ожидается одно из {}: {!r}'.format(', '.join(motion_mod.MODES), block.get('mode')))
+    applied = block.get('applied')
+    _require(applied is None or isinstance(applied, bool), 'motion.applied должен быть bool или null')
+    dx, fn = block.get('dx'), block.get('fnums')
+    _require((dx is None) == (fn is None), 'motion: dx и fnums задаются вместе')
+    if dx is not None:
+        _require(isinstance(dx, list) and isinstance(fn, list) and len(dx) == len(fn),
+                 'motion: dx и fnums — списки одной длины')
+        _require(all(_is_number(v) for v in dx), 'motion.dx: только числа')
+        _require(all(isinstance(v, int) and not isinstance(v, bool) for v in fn), 'motion.fnums: только целые')
+    _require(not (applied is True and dx is None), 'motion: applied = true требует dx')
+    _require(block.get('summary') is None or isinstance(block.get('summary'), dict), 'motion.summary — словарь или null')
 
 
 def smoothing_block(block: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -288,6 +336,8 @@ def to_dict(recipe: Recipe) -> Dict[str, Any]:
         'normalization': recipe.normalization,
         'rings': copy.deepcopy(recipe.rings),
         'smoothing': copy.deepcopy(recipe.smoothing),
+        'motion': copy.deepcopy(recipe.motion),
+        'empty_skip_first': recipe.empty_skip_first,
         'outputs': copy.deepcopy(recipe.outputs),
         'provenance': copy.deepcopy(recipe.provenance),
     }
@@ -328,9 +378,21 @@ def from_dict(d: Dict[str, Any]) -> Recipe:
         outputs=copy.deepcopy(d.get('outputs') or {}),
         provenance=copy.deepcopy(d.get('provenance') or {'steps': {}}),
         smoothing=smoothing_block(d.get('smoothing')),
+        motion=_motion_from(d.get('motion')),
+        empty_skip_first=d.get('empty_skip_first', 0),
     )
     _validate_types(recipe)
     return recipe
+
+
+def _motion_from(block: Any) -> Dict[str, Any]:
+    """Блок motion из словаря рецепта: нет блока (старый рецепт) — выключено; недостающие поля — null."""
+    if block is None:
+        return motion_block('off')
+    _require(isinstance(block, dict), 'motion должен быть словарём или null: {!r}'.format(block))
+    out = {key: None for key in _MOTION_KEYS}
+    out.update(copy.deepcopy(block))
+    return out
 
 
 def _atomic_write_json(path: Any, obj: Any) -> None:
@@ -368,6 +430,10 @@ def sha256(recipe: Recipe) -> str:
     d.pop('author', None)
     if smoothing.resolve(d.get('smoothing')) is None:
         d.pop('smoothing', None)
+    if d.get('motion') == motion_block('off'):
+        d.pop('motion', None)
+    if not d.get('empty_skip_first'):
+        d.pop('empty_skip_first', None)
     canon = json.dumps(d, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
     return hashlib.sha256(canon.encode('utf-8')).hexdigest()
 
