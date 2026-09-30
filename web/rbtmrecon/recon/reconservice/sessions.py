@@ -34,6 +34,8 @@
 | GET  .../rings/preview?row&center&tilt&preset&region&max_px&seq | binary uint16 (2, h, w): без колец и с пресетом, общее окно |
 | POST .../compare {row, center?, tilt?, angles, region?, size, variants: [{rings, smoothing}], max_px, seq} | binary uint16 (k, th, tw): фрагмент среза при каждом варианте, общее окно; X-Meta: row, axis, angles, region, variants (нормализованные), metrics [{noise, sharpness}], timings |
 | GET  .../repositioning                         | JSON: применимость, checkpoint-ы (угол, sy, sx), накопленные сдвиги, предупреждения |
+| GET  .../motion                                | JSON: смещение образца во время съёмки — режим, применено ли, пояснение, сводка (status, rms, ptp, common, discrepancy, bands), dx и dx_raw по кадрам (fnums, angles) |
+| POST .../motion {mode}                         | JSON: то же после смены режима компенсации: auto \| on \| off (сдвиги кадров пересчитываются, авто-ось сессии забывается) |
 | POST .../recipe {center?, tilt?, row?, rings?, smoothing?, angles?, slices?, xy_roi?, binning?, pixel_size_mm?} | JSON: полный рецепт по состоянию сессии (ROI кропа, ось, размер пикселя) — для POST /jobs |
 | POST .../estimate {recipe}                     | JSON: ``pipeline.estimate`` + оценка времени, с/срез по замерам превью |
 
@@ -78,7 +80,7 @@ from typing import Any, Callable, Dict, List, Optional
 from flask import Blueprint, current_app, jsonify, request
 
 from reconengine import axis as axis_mod
-from reconengine import data, fbp, gpu, rings, smoothing
+from reconengine import data, fbp, gpu, motion, rings, smoothing
 from reconengine import recipe as recipe_mod
 from reconengine.model import Cancelled, CropData, ROI, ScanInfo, check_cancel
 
@@ -297,7 +299,8 @@ class SessionManager:
             crop = loader.load(roi, progress=progress(0.0, _P_CROP), cancel=cancel, workers=self.cfg.workers)
             check_cancel(cancel)
             ps = s.extra.get('pixel_size')
-            ctx = preview.build_context(s.scan, crop, ps.value_mm, progress=progress(_P_CROP, 1.0), cancel=cancel)
+            ctx = preview.build_context(s.scan, crop, ps.value_mm, progress=progress(_P_CROP, 1.0), cancel=cancel,
+                                        motion_mode=s.extra.get('motion_mode', 'auto'))
             with self._lock:
                 ok = current() and not cancel.is_set()
                 if ok:
@@ -423,6 +426,7 @@ def session_json(s: Session, now: Optional[float] = None) -> Dict[str, Any]:
         'pixel_size': pixel_size_json(ps) if ps is not None else None,
         'axis': ctx.axis.to_dict() if ctx is not None and ctx.axis is not None else None,
         'warnings': list(ctx.warnings) if ctx is not None else [],
+        'motion': ctx.motion_info(full=False) if ctx is not None else None,
     }
 
 
@@ -675,6 +679,30 @@ def repositioning(sid):
     return jsonify(_ready(s).repositioning_info())
 
 
+@bp.get('/<sid>/motion')
+def motion_get(sid):
+    s = _mgr().get(sid, _user())
+    return jsonify(_ready(s).motion_info(full=True))
+
+
+@bp.post('/<sid>/motion')
+def motion_set(sid):
+    """Режим компенсации смещения образца; запоминается в сессии и действует на следующие загрузки области."""
+    mode = _body().get('mode')
+    if mode not in motion.MODES:
+        raise ValueError('mode: ожидается одно из {}, получено {!r}'.format(', '.join(motion.MODES), mode))
+    s = _mgr().get(sid, _user())
+
+    def fn(ctx, check):
+        s.extra['motion_mode'] = mode
+        ctx.set_motion(mode)
+        return ctx.motion_info(full=True)
+
+    info = _compute(sid, None, None, fn)
+    gpu.free_memory()                             # кэши полос по прежним сдвигам отпущены
+    return jsonify(info)
+
+
 @bp.post('/<sid>/recipe')
 def make_recipe(sid):
     """Полный рецепт по состоянию сессии — для ``POST /jobs`` (браузеру не нужно знать схему рецепта).
@@ -709,6 +737,8 @@ def make_recipe(sid):
         r.axis = ax
         r.rings = {'preset': preset, 'params': None}
         r.smoothing = smooth
+        r.motion = ctx.recipe_motion()
+        r.empty_skip_first = ctx.empty_skip
         r.recon['angles'] = angles
         if b.get('slices') is not None:
             z = b['slices']

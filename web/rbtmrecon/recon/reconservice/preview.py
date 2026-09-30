@@ -59,9 +59,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from reconengine import axis as axis_mod
-from reconengine import fbp, gpu, pipeline, preprocess, rings, smoothing
+from reconengine import fbp, gpu, motion, pipeline, preprocess, rings, smoothing
 from reconengine import recipe as recipe_mod
-from reconengine.model import Axis, CropData, ProgressFn, ROI, ScanInfo, check_cancel, no_progress
+from reconengine.model import Axis, Cancelled, CropData, ProgressFn, ROI, ScanInfo, check_cancel, no_progress
 
 logger = logging.getLogger(__name__)
 
@@ -252,18 +252,74 @@ class Context:
         self._band: Optional[Band] = None
         self._band_row_s: Optional[float] = None  # секунд нормировки на строку полосы
         self._pair = None                         # (img0, img180) нормированные кадры пары 0°/180°, numpy
+        self._auto: Optional[Axis] = None         # авто-ось по текущей паре (кэш; сбрасывается вместе с парой)
         self._pair_pos: Optional[Tuple[int, int]] = None
         self._row = None                          # (ключ, полоса, выровненная строка)
         self._corrected = None                    # выровненная строка после колец (см. corrected_row)
         self._block = None                        # блок строк после колец для сглаживания (см. corrected_block)
+        # смещение образца (motion): оценка, режим, применено ли; сдвиги кадров без компенсации смещения
+        self.empty_skip: int = 0                  # сколько первых кадров серий empty не брали (рецепт)
+        self.motion_est: Optional[motion.Estimate] = None
+        self.motion_mode: str = 'off'
+        self.motion_applied: bool = False
+        self.motion_message: str = 'смещение образца не измерялось'
+        self._base_frame_sx = np.asarray(prep.frame_sx, dtype='float64').copy()
 
     def release(self) -> None:
         """Отпустить кэши (закрытие сессии, новая загрузка)."""
         self._band = None
         self._pair = None
+        self._auto = None
         self._row = None
         self._corrected = None
         self._block = None
+
+    # --- смещение образца ----------------------------------------------------------------------------------
+
+    def init_motion(self, est: Optional[motion.Estimate], mode: str) -> Dict[str, Any]:
+        """Оценка смещения (по сдвигам кадров без компенсации) и начальный режим."""
+        self.motion_est = est
+        self._base_frame_sx = np.asarray(self.prep.frame_sx, dtype='float64').copy()
+        self.motion_applied = False
+        return self.set_motion(mode)
+
+    def _rotated(self) -> bool:
+        return pipeline.rotated_checks((self.checkpoints or {}).get('checks'))
+
+    def set_motion(self, mode: str) -> Dict[str, Any]:
+        """Режим компенсации смещения: 'auto' | 'on' | 'off' (motion.decide). Если решение меняется — сдвиги кадров
+        пересчитываются, кэши полос и пары 0°/180° сбрасываются, авто-ось сессии забывается (найдётся заново по
+        сдвинутой паре); ось, заданная вручную, остаётся."""
+        ok, why = motion.decide(self.motion_est, mode, self._rotated())
+        self.motion_mode, self.motion_message = mode, why
+        if ok != self.motion_applied:
+            self.motion_applied = ok
+            fsx = self._base_frame_sx - self.motion_est.dx if ok else self._base_frame_sx
+            self.prep = dataclasses.replace(self.prep, frame_sx=np.asarray(fsx, dtype='float64'))
+            self.release()
+            if self.axis is not None and self.axis.method == 'auto':
+                self.axis = None
+        return self.motion_info(full=False)
+
+    def motion_info(self, full: bool = True) -> Dict[str, Any]:
+        """Для студии: режим, применено ли, пояснение; сводка оценки; full — ещё и dx по кадрам (для графика)."""
+        est = self.motion_est
+        out: Dict[str, Any] = {'mode': self.motion_mode, 'applied': self.motion_applied,
+                               'message': self.motion_message, 'measured': est is not None}
+        if est is not None:
+            out.update(est.to_dict() if full else est.summary())
+        return out
+
+    def recipe_motion(self) -> Dict[str, Any]:
+        """Блок motion рецепта по состоянию сессии: решение студии и сдвиги (если компенсировано)."""
+        est = self.motion_est
+        if self.motion_mode == 'off':
+            return recipe_mod.motion_block('off', applied=False)
+        if est is None:
+            return recipe_mod.motion_block(self.motion_mode)            # задача оценит сама
+        if not self.motion_applied:
+            return recipe_mod.motion_block(self.motion_mode, applied=False, summary=est.summary())
+        return recipe_mod.motion_block(self.motion_mode, True, est.dx, est.fnums, est.summary())
 
     # --- строки и ось --------------------------------------------------------------------------------------
 
@@ -289,9 +345,7 @@ class Context:
     def auto_axis(self, check: Check = _no_check) -> Dict[str, Any]:
         """Авто-ось по паре 0°/180° (как pipeline.prepare без оси в рецепте); становится текущей осью сессии."""
         t0 = time.time()
-        img0, img180 = self.pair()
-        check()
-        ax = axis_mod.auto_axis(img0, img180, self.roi)
+        ax = self.auto_axis_value(check)
         self.axis = ax
         shift_x, alfa = axis_mod.to_crop_params(ax, self.roi)
         p0, p180 = self._pair_pos
@@ -299,6 +353,14 @@ class Context:
                 'pair': {'angles': [float(self.prep.angles[p0]), float(self.prep.angles[p180])],
                          'indices': [int(self.prep.idx[p0]), int(self.prep.idx[p180])]},
                 'seconds': round(time.time() - t0, 3)}
+
+    def auto_axis_value(self, check: Check = _no_check) -> Axis:
+        """Авто-ось по текущей паре 0°/180° (с кэшем), не меняя ось сессии."""
+        if self._auto is None:
+            img0, img180 = self.pair()
+            check()
+            self._auto = axis_mod.auto_axis(img0, img180, self.roi)
+        return self._auto
 
     def current_axis(self, check: Check = _no_check) -> Axis:
         if self.axis is None:
@@ -725,8 +787,9 @@ class Context:
             out['checks'] = list(cp.get('checks') or [])
             cy, cx = preprocess.cumulative_shifts(np.asarray(cp['sy']), np.asarray(cp['sx']))
             out['cumulative'] = {'sy': [float(v) for v in cy], 'sx': [float(v) for v in cx]}
+            base_sx = self._base_frame_sx
             out['max_shift'] = {'sy': float(np.max(np.abs(p.frame_sy))) if p.frame_sy.size else 0.0,
-                                'sx': float(np.max(np.abs(p.frame_sx))) if p.frame_sx.size else 0.0}
+                                'sx': float(np.max(np.abs(base_sx))) if base_sx.size else 0.0}
         elif self.scan.is_advanced:
             out['warnings'].append('нет периодических empty-серий — сдвиг образца не измеряется')
         return out
@@ -749,9 +812,12 @@ class Context:
 
 
 def build_context(scan: ScanInfo, crop: CropData, pixel_size_mm: float, progress: ProgressFn = no_progress,
-                  cancel=None, normalization: str = 'auto', xp=None) -> Context:
+                  cancel=None, normalization: str = 'auto', xp=None, motion_mode: str = 'auto',
+                  empty_skip: int = recipe_mod.EMPTY_SKIP_DEFAULT) -> Context:
     """Опорные кадры по кропу и сдвиги образца (advanced) — как pipeline.prepare с включённым repositioning, но без
-    оси (ось задаётся в каждом запросе превью) и с углами checkpoint-ов для /repositioning."""
+    оси (ось задаётся в каждом запросе превью) и с углами checkpoint-ов для /repositioning. Затем оценка смещения
+    образца во время съёмки (reconengine.motion, по наклону авто-оси) и режим компенсации motion_mode;
+    empty_skip — первые кадры серий empty, не берущиеся в медиану."""
     xp = xp or gpu.get_xp()
     t_start = time.time()
     warnings: List[str] = []
@@ -759,7 +825,7 @@ def build_context(scan: ScanInfo, crop: CropData, pixel_size_mm: float, progress
     if idx.size == 0:
         raise ValueError('{}: в скане нет data-кадров'.format(scan.exp_id))
     progress(0.0, 'dark_empty')
-    de_full = preprocess.dark_empty_from_crop(scan, crop)
+    de_full = preprocess.dark_empty_from_crop(scan, crop, skip_first=empty_skip)
     check_cancel(cancel)
     de = pipeline._normalization_de(scan, de_full, normalization)
 
@@ -767,7 +833,7 @@ def build_context(scan: ScanInfo, crop: CropData, pixel_size_mm: float, progress
     shifts = None
     sy = sx = np.zeros(0)
     if scan.is_advanced and de_full.periodic_empty_fnumbers:
-        progress(0.5, 'repositioning')
+        progress(0.4, 'repositioning')
         cp_angles, sy, sx = preprocess.repositioning_shifts(scan, crop, de_full)
         check_cancel(cancel)
         checks = preprocess.check_checkpoints(scan, crop, de_full)
@@ -785,6 +851,21 @@ def build_context(scan: ScanInfo, crop: CropData, pixel_size_mm: float, progress
     prep = pipeline.Prepared(idx=idx, angles=angles, fnums=fnums, de=de, frame_sy=frame_sy, frame_sx=frame_sx,
                              shifts=shifts, axis=ax0, shift_x=0.0, alfa=0.0, warnings=warnings)
     ctx = Context(scan, crop, prep, pixel_size_mm, checkpoints, xp=xp)
+    ctx.empty_skip = int(empty_skip)
+    progress(0.7, 'motion')
+    est = None
+    try:
+        tilt = ctx.auto_axis_value().tilt_deg      # ось сессии не задаётся: её находит axis/auto (из кэша)
+        check_cancel(cancel)
+        profiles, _ = motion.band_profiles(crop, idx, fnums, de, frame_sy, frame_sx, tilt, xp=xp, cancel=cancel)
+        b = motion.effective_bin(crop.frames.shape[1], crop.frames.shape[2], motion.DEFAULTS['bin'])
+        est = motion.estimate(profiles, angles, fnums, de_full.periodic_empty_fnumbers, bin_used=b)
+    except Cancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001 — без оценки смещения студия работает как раньше
+        logger.exception('оценка смещения образца не удалась')
+        ctx.warnings.append('смещение образца не оценено: {}: {}'.format(type(exc).__name__, exc))
+    ctx.init_motion(est, motion_mode)
     ctx.prepare_s = round(time.time() - t_start, 3)
     progress(1.0, 'ready')
     return ctx
