@@ -7,8 +7,8 @@ h5py при любом чтении распаковывает чанк цели
 - кадр/строки кадра: ``get_chunk_info_by_coord`` → ``os.pread`` сжатых байт кусками →
   ``zlib.decompressobj().decompress(buf, max_length)`` до нужного байта; кадр j в чанке стоит (j+1) кадров
   распаковки, начало чанка — один кадр (замер: 0,28 с против 1,36 с у h5py на кадре 2968×5056);
-- кроп по всем кадрам: ``read_direct_chunk`` + ``zlib.decompress`` в пуле потоков (zlib отпускает GIL),
-  чанки по порядку, результат — memmap uint16 в кэше.
+- кроп по всем кадрам: сжатые чанки читаются одним потоком подряд (на HDD параллельные чтения — это перемещения
+  головки), ``zlib.decompress`` и кроп — в пуле потоков (zlib отпускает GIL), результат — memmap uint16 в кэше.
 
 Если у датасета не «чистый gzip» (shuffle, иные фильтры, нет сжатия и т.п.) — ``ScanInfo.fast_path = False``
 и все чтения идут через h5py (медленнее, но корректно). ``filter_mask`` чанка ≠ 0 — тоже h5py.
@@ -31,6 +31,7 @@ import math
 import os
 import threading
 import zlib
+from queue import Queue
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import h5py
@@ -422,12 +423,22 @@ class ChunkSampler:
 
     def _read_chunk_crop(self, c: int, y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
         """Кроп [c0:c1, y0:y1, x0:x1] кадров чанка c (c1 ≤ n_frames), C-непрерывный массив."""
-        c0 = c * self.C
-        c1 = min(c0 + self.C, self.scan.n_frames)
         info = self._fast_info(c)
+        raw = None
         if info is not None:
             try:
                 raw = self._read_raw(*info)
+            except _ShortChunk as exc:
+                logger.warning('чанк %d: быстрое чтение не удалось (%s) — через h5py', c, exc)
+        return self._crop_from_raw(c, raw, y0, y1, x0, x1)
+
+    def _crop_from_raw(self, c: int, raw: Optional[bytes], y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
+        """Кроп чанка c по уже прочитанным сжатым байтам raw (zlib); raw=None или ошибка распаковки — через h5py.
+        Распаковка отпускает GIL — вызывается из пула потоков, пока другой поток читает следующий чанк."""
+        c0 = c * self.C
+        c1 = min(c0 + self.C, self.scan.n_frames)
+        if raw is not None:
+            try:
                 full = self.C * self._frame_bytes
                 dec = zlib.decompress(raw, bufsize=full)
                 del raw
@@ -725,7 +736,7 @@ class CropLoader:
         nbytes = int(np.prod(shape)) * dtype.itemsize
         try:
             # Кроп чанка — непрерывный кусок (n, h, w) файла, поэтому пишем обычным файлом, чанки строго по порядку
-            # (готовые раньше очереди ждут в буфере). Итог тот же, что у memmap w+, но без открытого отображения
+            # (готовые раньше очереди ждут в буфере; см. _fill). Итог тот же, что у memmap w+, но без открытого отображения
             # (на Windows оно мешает удалить файл при отмене) и без предварительного расширения файла
             # (truncate на Windows заполняет нулями: 4,7 с на 3,4 ГБ).
             with open(path, 'wb') as fh:
@@ -763,33 +774,59 @@ class CropLoader:
                 write(c, sampler._read_chunk_crop(c, *box))
             return
 
-        def task(c: int):
-            if cancel is not None and cancel.is_set():
-                return None
-            return sampler._read_chunk_crop(c, *box)
+        # Чтение, распаковка и запись разделены. Сжатые чанки читает один поток подряд: на HDD (исходники на сервере)
+        # параллельные чтения чанков из разных мест файла — это перемещения головки, и скорость падает в разы,
+        # а последовательно диск читает на пределе. Кроп всё равно требует почти весь файл: в чанке кадры подряд,
+        # и до нужных строк последнего кадра распаковывается всё перед ними. storage пишет чанки по порядку, поэтому
+        # порядок номеров — это и порядок в файле. Распаковка (zlib отпускает GIL) и кроп — в пуле, запись по
+        # порядку — в этом потоке, чтобы не задерживать чтение. Прочитанных, но не записанных чанков не больше
+        # workers + 2 (сжатый чанк — сотни МБ).
+        slots = threading.Semaphore(workers + 2)
+        queue: 'Queue' = Queue()     # future чанков по порядку; исключение потока чтения; None — чтение закончено
+        stop = threading.Event()
 
-        # Окно — 2·workers чанков от первого незаписанного: workers распаковываются, остальные ждут в очереди
-        # (без памяти) или готовы и ждут записи по порядку (кроп чанка — десятки МБ).
+        def task(c: int, raw: Optional[bytes]) -> Optional[np.ndarray]:
+            if stop.is_set() or (cancel is not None and cancel.is_set()):
+                return None
+            return sampler._crop_from_raw(c, raw, *box)
+
+        def reader() -> None:
+            try:
+                for c in range(n_chunks):
+                    slots.acquire()
+                    if stop.is_set() or (cancel is not None and cancel.is_set()):
+                        break
+                    info = sampler._fast_info(c)
+                    raw = None
+                    if info is not None:
+                        try:
+                            raw = sampler._read_raw(*info)
+                        except _ShortChunk as exc:
+                            logger.warning('чанк %d: быстрое чтение не удалось (%s) — через h5py', c, exc)
+                    queue.put(ex.submit(task, c, raw))
+                    del raw
+            except BaseException as exc:    # noqa: B902 — передаётся в поток записи и поднимается там
+                queue.put(exc)
+            queue.put(None)
+
         ex = cf.ThreadPoolExecutor(max_workers=workers)
+        th = threading.Thread(target=reader, name='crop-reader', daemon=True)
+        th.start()
         try:
-            pending: Dict[cf.Future, int] = {}
-            ready: Dict[int, np.ndarray] = {}
-            next_c = written = 0
-            while written < n_chunks:
-                while next_c < n_chunks and next_c - written < 2 * workers:
-                    check_cancel(cancel)
-                    pending[ex.submit(task, next_c)] = next_c
-                    next_c += 1
-                finished, _ = cf.wait(list(pending), return_when=cf.FIRST_COMPLETED)
-                for fut in finished:
-                    c = pending.pop(fut)
-                    arr = fut.result()
-                    if arr is None:
-                        raise Cancelled()
-                    ready[c] = arr
-                while written in ready:
-                    write(written, ready.pop(written))
-                    written += 1
+            for c in range(n_chunks):
+                item = queue.get()
+                if isinstance(item, BaseException):
+                    raise item
                 check_cancel(cancel)
+                arr = item.result() if item is not None else None
+                if arr is None:
+                    raise Cancelled() if cancel is not None and cancel.is_set() else RuntimeError(
+                        'чтение кропа остановилось на чанке {} из {}'.format(c, n_chunks))
+                write(c, arr)
+                del arr, item
+                slots.release()
         finally:
+            stop.set()
+            slots.release()          # разбудить поток чтения, если он ждёт места
+            th.join()
             ex.shutdown(wait=True, cancel_futures=True)

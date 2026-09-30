@@ -34,6 +34,7 @@ class Config:
     fast_limit_gb: float = 300.0                   # предел кэша кропов в /fast (LRU по времени доступа)
     workers: int = 8                               # потоков распаковки HDF5
     preview_max_px: int = 1400                     # сторона превью, до которой ужимается картинка
+    prefetch: bool = True                          # предзагрузка исходного HDF5 в кэш ОС после обзора (prefetch.py)
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> 'Config':
@@ -66,6 +67,7 @@ class Config:
             fast_limit_gb=get('RECON_FAST_LIMIT_GB', d.fast_limit_gb, float),
             workers=get('RECON_WORKERS', d.workers, int),
             preview_max_px=get('RECON_PREVIEW_MAX_PX', d.preview_max_px, int),
+            prefetch=get('RECON_PREFETCH', d.prefetch, flag),
         )
 
     # --- пути ---------------------------------------------------------------------------------------------

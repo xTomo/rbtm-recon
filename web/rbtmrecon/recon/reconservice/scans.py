@@ -13,6 +13,7 @@
 | GET /scans/<id>/envelope              | binary uint16 (h/b, w/b): огибающая max(−ln T) по углам выборки |
 | GET /scans/<id>/thumbs                | binary uint16 (k, h/b, w/b): −ln T кадров выборки; X-Meta: angles, indices |
 | GET /scans/<id>/sample/<k>            | binary uint16 (h/b, w/b): k-й кадр выборки (−ln T) |
+| POST /scans/<id>/prefetch             | 202, JSON: состояние предзагрузки исходного HDF5 в кэш ОС (``reconservice.prefetch``; rbtm-web вызывает после обзора, если пользователь может загружать) |
 | GET /scans/<id>/sinogram?row=&n=      | binary uint16 (n, W): строка детектора row по n углам (по умолчанию 90), кадры с наименьшей стоимостью распаковки в каждом угловом интервале; X-Meta: angles |
 
 Параметры обзора по умолчанию: n=16 углов (``?n=`` до 64), bin=4. Кэш: в памяти (последние несколько сканов) и
@@ -485,6 +486,13 @@ def sample(exp_id, k):
     t = _minus_log_t(ov.samples[k], ov.dark, ov.empty)
     meta = {'k': k, 'angle': float(ov.sample_angles[k]), 'index': int(ov.sample_idx[k]), 'bin': int(ov.bin)}
     return binary.array_response(t, lo=od.window[0], hi=od.window[1], meta=meta)
+
+
+@bp.post('/<exp_id>/prefetch')
+def prefetch(exp_id):
+    """Начать предзагрузку исходного HDF5 в кэш ОС (``reconservice.prefetch``) — 202 и состояние."""
+    exp_id = auth.valid_exp_id(exp_id)
+    return jsonify(current_app.extensions['recon'].prefetch.start(exp_id)), 202
 
 
 @bp.get('/<exp_id>/sinogram')

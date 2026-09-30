@@ -73,7 +73,7 @@ import logging
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from flask import Blueprint, current_app, jsonify, request
 
@@ -159,6 +159,8 @@ class SessionManager:
         self._loader: Optional[threading.Thread] = None
         self._reaper: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        #: вызывается с причиной перед чтением исходников (ServiceState: остановить предзагрузку)
+        self.on_source_read: Optional[Callable[[str], None]] = None
 
     arbiter: Arbiter
 
@@ -239,6 +241,8 @@ class SessionManager:
     def start_load(self, sid: str, owner: str, roi: ROI) -> None:
         s = self.get(sid, owner)
         roi.validate(s.scan.height, s.scan.width)
+        if self.on_source_read is not None:
+            self.on_source_read('load')
         with self._lock:
             if s.state == 'closed':
                 raise SessionError(404, 'not_found')
