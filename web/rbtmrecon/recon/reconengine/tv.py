@@ -210,7 +210,7 @@ def denoise_volume(vol: np.ndarray, weight: float, iterations: int = DEFAULT_ITE
                    budget_voxels: Optional[int] = None) -> np.ndarray:
     """TV 3D объёма (z, y, x) numpy → numpy float32: плитки по y, x с ореолом HALO (все z плитки сразу), ядро плитки
     берётся из результата с ореолом. Совпадает с обработкой целиком до ~0,03σ шума на краях плиток."""
-    from .gpu import get_xp, to_numpy  # noqa: WPS433
+    from .gpu import free_memory, get_xp, to_numpy  # noqa: WPS433
     xp = xp or get_xp()
     nz, ny, nx = vol.shape
     budget = budget_voxels if budget_voxels is not None else gpu_budget_voxels(xp)
@@ -227,6 +227,9 @@ def denoise_volume(vol: np.ndarray, weight: float, iterations: int = DEFAULT_ITE
             res = denoise(np.ascontiguousarray(vol[:, a0:a1, b0:b1]), weight, iterations, xp=xp)
             out[:, y0:y1, x0:x1] = to_numpy(res[:, y0 - a0:y1 - a0, x0 - b0:x1 - b0])
             del res
+            # плитки разного размера: без возврата пула память GPU переполняется (WDDM молча выгружает её в
+            # ОЗУ — в 5 раз медленнее, на Linux была бы нехватка памяти)
+            free_memory()
     return out
 
 
