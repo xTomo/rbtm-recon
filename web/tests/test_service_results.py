@@ -53,6 +53,13 @@ def test_result_info_and_history(service):
     assert names == ['recipe.json', 'result.json', 'обр_1.8_17_17.4.raw', 'обр_1.8_17_17.4.raw.size',
                      'tomo.обр_1.4.hx']
     assert dict((f['name'], f['size']) for f in body['files'])['обр_1.8_17_17.4.raw'] == 8 * 17 * 17 * 4
+    # полный объём через сервис не отдаётся, но о нём сказано: путь относительно хранилища и размер
+    vol = body['result']['volume']
+    full = {f['name']: f for f in body['full']}
+    assert set(full) == {vol['file'], vol['hx']}
+    assert full[vol['file']]['rel'] == EXP + '/reconstruction/' + vol['file']
+    assert full[vol['file']]['size'] == int(np.prod(vol['shape'])) * 4
+    assert vol['file'] not in names
 
     run2, _ = engine_run(cfg, EXP, dict(recipe, recon=dict(recipe['recon'], slices=[8, 32])), 'run2', name='обр 1')
     publish.publish(cfg, EXP, run2)
