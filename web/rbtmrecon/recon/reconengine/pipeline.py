@@ -529,6 +529,7 @@ def run_recipe(r: recipe_mod.Recipe, scan_path: str, out_dir: str, cache_dir: st
     timings['recon_s'] = time.time() - t0
     if dn:
         timings['denoise_s'] = round(sink.seconds, 3)
+        timings['denoise_voxel_iterations'] = sink.voxel_iterations
     timings['total_s'] = time.time() - t_start
 
     rd = recipe_mod.to_dict(resolved)

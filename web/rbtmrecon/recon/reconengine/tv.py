@@ -249,6 +249,7 @@ class DenoiseWriter:
         self._b0 = 0
         self._emitted = 0
         self.seconds = 0.0
+        self.voxel_iterations = 0         # воксели порций с ореолом по z × итерации (без ореола плиток)
 
     def write(self, z0: int, slab: np.ndarray) -> None:
         if int(z0) != self._b0 + len(self._buf):
@@ -266,6 +267,7 @@ class DenoiseWriter:
         block = np.stack(self._buf[i0 - self._b0:i1 - self._b0])
         t0 = time.time()
         res = denoise_volume(block, self.weight, self.iterations, xp=self.xp)[e0 - i0:e1 - i0]
+        self.voxel_iterations += int(block.size) * self.iterations
         if self.mask is not None:
             res = np.where(self.mask[None], res, np.float32(0))
         self.seconds += time.time() - t0
