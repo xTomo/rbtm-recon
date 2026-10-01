@@ -7,7 +7,10 @@
 | GET /results/<id>/file/<name>         | файл потоком (as_attachment): только ``recipe.json``, ``result.json`` и файлы копий с биннингом (raw, .size, .hx) из ``result.json``; полный объём через сервис не отдаётся (он доступен как раньше, через ``/reconstruct/static``) |
 
 ``GET /results/<id>``: ``{exp_id, dir, result, history: [{run_id, created, recipe_sha256, has_recipe}] (новые первыми),
-files: [{name, size}]}``; ``dir`` — каталог результата в хранилище (путь к полному объёму — ``dir``/``volume.file``).
+files: [{name, size}], full: [{name, rel, size}]}``; ``dir`` — каталог результата в хранилище (путь к полному объёму —
+``dir``/``volume.file``); ``full`` — полный объём (raw) и его .hx, если файлы есть: ``rel`` — путь относительно
+хранилища (``<id>/reconstruction/<имя>``, через «/») — по нему студия строит ссылку на старую раздачу статики
+(``/reconstruct/static/tomo_data/`` смотрит в тот же каталог).
 
 Срез: ``axis`` по умолчанию ``z``, ``i`` — по умолчанию середина, ``max_px`` — по умолчанию ``cfg.preview_max_px``.
 Срез по z — ``(ny, nx)``, по y — ``(nz, nx)``, по x — ``(nz, ny)`` (в осях копии с биннингом). Файл отображается
@@ -123,7 +126,24 @@ def result_info(exp_id):
         path = os.path.join(dest, name)
         if os.path.isfile(path):
             files.append({'name': name, 'size': os.path.getsize(path)})
-    return jsonify({'exp_id': exp_id, 'dir': dest, 'result': doc, 'history': history(cfg, exp_id), 'files': files})
+    return jsonify({'exp_id': exp_id, 'dir': dest, 'result': doc, 'history': history(cfg, exp_id), 'files': files,
+                    'full': full_volume_files(cfg, exp_id, doc)})
+
+
+def full_volume_files(cfg: Config, exp_id: str, doc: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Полный объём и его .hx (``result.volume.file``/``hx``), которые есть в каталоге результата: [{name, rel, size}];
+    rel — относительно хранилища, через «/»."""
+    dest = cfg.reconstruction_dir(exp_id)
+    vol = doc.get('volume') or {}
+    rel_dir = os.path.relpath(dest, cfg.storage_dir).replace(os.sep, '/')
+    out = []
+    for name in (vol.get('file'), vol.get('hx')):
+        if not name or os.path.basename(name) != name:
+            continue
+        path = os.path.join(dest, name)
+        if os.path.isfile(path):
+            out.append({'name': name, 'rel': rel_dir + '/' + name, 'size': os.path.getsize(path)})
+    return out
 
 
 @bp.get('/<exp_id>/slice')
