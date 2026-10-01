@@ -747,6 +747,8 @@ def test_slice_and_compare_with_tv(tmp_path, per_row_rings):
     stack = fbp.recon_rows(np.asarray(lines), ctx.prep.angles, ctx.pixel_size, region=e)
     ref = tv.denoise(stack, p['weight'], 30, xp=np)[i][12:50, 8:60]
     assert np.abs(img - ref).max() < 1e-4 * (np.abs(ref).max() + 1e-9)
+    assert meta['timings']['tv_s'] > 0 and meta['timings']['fbp_s'] >= 0               # время TV — отдельно от FBP
+    assert meta['timings']['fbp_rows'] == 2 * tv.HALO + 1                                # FBP — на один срез
     plain, _ = ctx.slice(20, ax, 'medium', region=region, smooth=sm)
     assert np.abs(img - plain).max() > 0
     # compare: вариант без TV и с TV

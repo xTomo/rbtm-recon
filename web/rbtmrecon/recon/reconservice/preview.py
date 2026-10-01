@@ -282,6 +282,7 @@ class Context:
         self._block = None                        # блок строк после колец для сглаживания (см. corrected_block)
         self._tv_sigma = None                     # (ключ, σ) шум строки превью для веса TV (см. tv_params)
         self.tv_rate: Optional[float] = None      # секунд на воксель-итерацию TV по замерам превью
+        self.last_tv_s = 0.0                      # секунд TV последнего фрагмента
         # смещение образца (motion): оценка, режим, применено ли; сдвиги кадров без компенсации смещения
         self.empty_skip: int = 0                  # сколько первых кадров серий empty не брали (рецепт)
         self.motion_est: Optional[motion.Estimate] = None
@@ -653,7 +654,8 @@ class Context:
         stack = self._fbp_idx(lines, idx, angle_mode, e)
         t0 = time.time()
         out = tv.denoise_volume(stack, dn['weight'] * weight_scale, dn['iterations'], xp=self.xp)[c]
-        self.tv_rate = (time.time() - t0) / float(stack.size * dn['iterations'])
+        self.last_tv_s = time.time() - t0
+        self.tv_rate = self.last_tv_s / float(stack.size * dn['iterations'])
         return np.ascontiguousarray(out[y0 - e[1]:y1 - e[1], x0 - e[0]:x1 - e[0]])
 
     def tv_params(self, dn: Optional[Dict[str, Any]], row: int, ax: Axis, preset: str,
@@ -712,9 +714,13 @@ class Context:
             dn = self.tv_params(dn, row, ax, preset, sp, angle_mode, lines[c:c + 1], check)
             check()
             img = self._tv_fragment(lines, c, dn, angle_mode, (x0, y0, x1, y1))
+            # оценка времени задачи берёт из fbp_s FBP одного среза, а время TV у неё своё (pipeline.estimate):
+            # TV — отдельно, FBP стопки строк ± HALO — на срез
+            t['tv_s'] = round(self.last_tv_s, 4)
+            t['fbp_rows'] = int(lines.shape[0])
         else:
             img = np.ascontiguousarray(self._fbp(lines[c:c + 1], angle_mode, (x0, y0, x1, y1))[0])
-        t['fbp_s'] = round(time.time() - t0, 4)
+        t['fbp_s'] = round((time.time() - t0 - t.get('tv_s', 0.0)) / t.get('fbp_rows', 1), 4)
         t['fbp_px'] = (x1 - x0) * (y1 - y0)
         t['total_s'] = round(time.time() - t_start, 4)
         self.timings = dict(t)
