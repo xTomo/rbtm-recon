@@ -33,9 +33,10 @@ def _gauss_psf(sigma):
 def test_resolve_off_defaults_and_errors():
     assert sm.resolve(None) is None and sm.resolve({}) is None and sm.resolve(sm.default_block()) is None
     assert sm.resolve({'sigma': 0}) is None
-    assert sm.resolve({'sigma': 1.5}) == {'sigma': 1.5, 'deblur': 'wiener', 'balance': 0.02, 'amount': 1.5}
+    assert sm.resolve({'sigma': 1.5}) == {'sigma': 1.5, 'deblur': 'none', 'balance': 0.02, 'amount': 1.5}
     assert sm.resolve({'sigma': 1, 'deblur': 'unsharp', 'amount': 1.0})['amount'] == 1.0
-    for bad in ({'sigma': 0.1}, {'sigma': 5}, {'sigma': 1.5, 'deblur': 'rl'}, {'sigma': 1.5, 'balance': 0},
+    assert sm.resolve({'sigma': 4.0})['sigma'] == 4.0                         # σ до 4 (шумные сканы)
+    for bad in ({'sigma': 0.1}, {'sigma': 4.5}, {'sigma': 1.5, 'deblur': 'rl'}, {'sigma': 1.5, 'balance': 0},
                 {'sigma': 1.5, 'amount': -1}, {'sigma': float('nan')}):
         with pytest.raises(ValueError):
             sm.resolve(bad)

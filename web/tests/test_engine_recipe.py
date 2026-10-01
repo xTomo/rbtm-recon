@@ -42,7 +42,7 @@ def test_default_recipe_structure():
     assert r.normalization == 'auto'
     assert r.rings == {'preset': 'medium', 'params': None, 'version': rings.VERSION}
     assert r.outputs == {'full': True, 'binning': [4], 'dtype': 'float32'}
-    assert r.smoothing == {'sigma': None, 'deblur': 'wiener', 'balance': 0.02, 'amount': 1.5}   # выключено
+    assert r.smoothing == {'sigma': None, 'deblur': 'none', 'balance': 0.02, 'amount': 1.5}     # выключено
     assert smoothing.resolve(r.smoothing) is None
     assert r.provenance == {'steps': {'fov': 'auto', 'axis': 'auto', 'rings': 'auto', 'smoothing': 'auto',
                                       'run': 'auto'}}

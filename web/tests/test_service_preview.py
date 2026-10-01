@@ -166,7 +166,7 @@ def test_slice_smoothing_changes_reuse_block(loaded, per_row_rings, monkeypatch)
     monkeypatch.setattr(rings, 'apply', counting('rings', rings.apply))
     monkeypatch.setattr(preprocess, 'normalize_slab', counting('norm', preprocess.normalize_slab))
     c = row_center(ss, 20)
-    q = dict(row=20, center=c, tilt=ss.tilt_deg, rings='medium', max_px=4000)
+    q = dict(row=20, center=c, tilt=ss.tilt_deg, rings='medium', max_px=4000, deblur='wiener')
     first, meta = decode(client.get(url(sid, 'slice', smooth=1.5, **q), headers=HEADERS))
     t = meta['timings']
     assert meta['smoothing'] == SMOOTH and meta['exact'] is True
@@ -398,14 +398,13 @@ def test_diff_view(loaded):
 
 # --- кольца, сдвиги образца, оценка ------------------------------------------------------------------------
 
-def test_noise_level_of_white_noise():
+def test_compare_metrics_sharpness_relative_noise_passed_through():
     rng = np.random.default_rng(0)
     img = 5.0 + 0.3 * rng.standard_normal((200, 200))
-    img[:, 100:] += 10.0                                                # край объекта не мешает (MAD)
-    assert preview.noise_level(img) == pytest.approx(0.3, rel=0.05)
-    m = preview.compare_metrics([img, img * 2])
+    img[:, 100:] += 10.0
+    m = preview.compare_metrics([img, img * 2], [0.3, 0.6])
     assert m[0]['sharpness'] == 1.0 and m[1]['sharpness'] == pytest.approx(4.0)
-    assert m[1]['noise'] == pytest.approx(2 * m[0]['noise'])
+    assert [x['noise'] for x in m] == [0.3, 0.6]
 
 
 def test_rings_preview(loaded, monkeypatch):
@@ -565,7 +564,8 @@ def test_compare_variants_fragment_and_metrics(tmp_path, per_row_rings):
     ss = simple_scan(noise=1.0)
     app, client, cfg, sid, ctx = session_for(tmp_path, ss, ROI_SIMPLE)
     c = row_center(ss, 20)
-    variants = [{'rings': 'medium', 'smoothing': None}, {'rings': 'medium', 'smoothing': {'sigma': 1.5}},
+    variants = [{'rings': 'medium', 'smoothing': None},
+                {'rings': 'medium', 'smoothing': {'sigma': 1.5, 'deblur': 'wiener'}},
                 {'rings': 'medium', 'smoothing': {'sigma': 2.0, 'deblur': 'none'}},
                 {'rings': 'strong', 'smoothing': {'sigma': 1.0, 'deblur': 'unsharp'}}, {'rings': 'off'}]
     region = [8, 12, 60, 50]
@@ -682,3 +682,42 @@ def test_estimate_uses_recent_jobs_rate(loaded):
     unit = 32.0 / (64 * 100 * 100 * 200)
     assert t['s_per_slice'] == pytest.approx(unit * 68 * 68 * 60)            # ширина 68, 60 углов (first_180)
     assert t['recon_s'] == pytest.approx(t['s_per_slice'] * 32)
+
+
+# --- автоподбор σ по половинам углов ------------------------------------------------------------------------------
+
+def test_smoothing_auto_picks_sigma_on_noisy_scan(tmp_path, per_row_rings):
+    """smoothing/auto: оценки по всей сетке σ, на шумном скане лучшая — со сглаживанием и не хуже «без»; блок
+    рецепта с выбранной σ и методом из запроса; шум по σ убывает; неверные параметры — 400 до вычислений."""
+    from reconengine import noise
+    ss = simple_scan(noise=1.0)
+    app, client, cfg, sid, ctx = session_for(tmp_path, ss, ROI_SIMPLE)
+    c = row_center(ss, 20)
+    base = {'row': 20, 'center': c, 'tilt': ss.tilt_deg, 'seq': 1}
+    r = client.post(url(sid, 'smoothing/auto'), json=base, headers=HEADERS)
+    assert r.status_code == 200, r.get_json()
+    d = r.get_json()
+    scores = d['scores']
+    assert [s['sigma'] for s in scores] == [None] + [float(s) for s in noise.AUTO_SIGMAS[1:]]
+    assert d['region'] == [0, 0, 68, 68] and d['rings'] == 'medium' and d['row'] == 20       # срез меньше 512
+    assert d['sigma'] is not None and d['smoothing'] == smoothing.resolve({'sigma': d['sigma']})
+    assert d['smoothing']['deblur'] == 'none'
+    best = min(s['rmse'] for s in scores)
+    got = next(s['rmse'] for s in scores if s['sigma'] == d['sigma'])
+    assert got <= 1.05 * best < scores[0]['rmse'] and d['sigma'] <= (d['sigma_min'] or 0)
+    assert next(s['rmse'] for s in scores if s['sigma'] == d['sigma_min']) == best
+    assert d['at_limit'] == (d['sigma_min'] == noise.AUTO_SIGMAS[-1])
+    noises = [s['noise'] for s in scores]
+    assert noises == sorted(noises, reverse=True)
+    assert set(d['timings']) >= {'scores_s', 'total_s', 'region_s'}
+    # метод из запроса и явный фрагмент
+    d = client.post(url(sid, 'smoothing/auto'), json=dict(base, region=[8, 8, 60, 60], seq=2,
+                                                            smoothing={'deblur': 'wiener', 'balance': 0.2}),
+                    headers=HEADERS).get_json()
+    assert d['region'] == [8, 8, 60, 60] and 'region_s' not in d['timings']
+    assert d['smoothing'] is None or (d['smoothing']['deblur'] == 'wiener' and d['smoothing']['balance'] == 0.2)
+    for bad in ({'smoothing': {'deblur': 'rl'}}, {'smoothing': {'balance': 0}}, {'smoothing': 3}, {'rings': 'x'},
+                {'region': [0, 0, 500, 500]}):
+        rb = client.post(url(sid, 'smoothing/auto'), json=dict(base, seq=None, **bad), headers=HEADERS)
+        assert rb.status_code == 400, bad
+    manager(app).stop_reaper()

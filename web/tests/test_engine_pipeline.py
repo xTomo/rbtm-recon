@@ -116,7 +116,8 @@ def test_smoothed_slabs_equal_full_crop(make, per_row_rings):
     rp = rings.resolve('strong')
     m = pipeline.margin(prep, roi.width)
     base = full_crop_reference(crop, prep, rp)
-    cases = [({'sigma': 1.5}, 5)] if ss.scan.is_advanced else [({'sigma': 1.5}, 5), ({'sigma': 1.5}, 16),
+    wi = {'sigma': 1.5, 'deblur': 'wiener'}
+    cases = [(wi, 5)] if ss.scan.is_advanced else [(wi, 5), (wi, 16), ({'sigma': 1.5}, 5),
                                                                ({'sigma': 0.8, 'deblur': 'unsharp'}, 5)]
     for block, rows in cases:
         sp = smoothing.resolve(block)
@@ -213,7 +214,7 @@ def test_run_recipe_with_smoothing_equals_full_crop_filter(tmp_path, per_row_rin
     ax = Axis(ss.center_x, ss.y_ref, ss.tilt_deg)
     r = make_recipe(scan, roi, ax)
     r.rings = {'preset': 'medium', 'params': None, 'version': rings.VERSION}
-    r.smoothing = dict(smoothing.default_block(), sigma=1.5)
+    r.smoothing = dict(smoothing.default_block(), sigma=1.5, deblur='wiener')
     r.recon['slices'] = [roi.y0 + 4, roi.y0 + 17]
     res = pipeline.run_recipe(r, path, str(tmp_path / 'out'), str(tmp_path / 'cache'), backend='cpu', slab_rows=5)
     doc = res.result
@@ -282,7 +283,7 @@ def test_estimate(tmp_path):
     assert est['n_angles_used'] == 60                          # first_180 из 0..357
     assert est['halo_rows'] == 0 and est['ring_rows_factor'] == 1.0
     # сглаживание: слои (на CPU — по 16 строк) с ореолом ±16 — строк через кольца больше, чем срезов
-    r.smoothing = dict(smoothing.default_block(), sigma=1.5)
+    r.smoothing = dict(smoothing.default_block(), sigma=1.5, deblur='wiener')
     est = pipeline.estimate(r, scan)
     assert est['halo_rows'] == 16
     assert est['ring_rows_factor'] == pytest.approx((32 + 32) / 32.0)       # 2 слоя, у каждого ореол до краёв

@@ -33,6 +33,7 @@
 | GET  .../axis/diff?center&tilt&max_px          | binary uint16: ``axis.diff_view`` пары 0°/180° |
 | GET  .../rings/preview?row&center&tilt&preset&region&max_px&seq | binary uint16 (2, h, w): без колец и с пресетом, общее окно |
 | POST .../compare {row, center?, tilt?, angles, region?, size, variants: [{rings, smoothing}], max_px, seq} | binary uint16 (k, th, tw): фрагмент среза при каждом варианте, общее окно; X-Meta: row, axis, angles, region, variants (нормализованные), metrics [{noise, sharpness}], timings |
+| POST .../smoothing/auto {row, center?, tilt?, rings?, angles?, region?, size?, smoothing?, seq} | JSON: sigma (выбранная или null), smoothing (блок рецепта или null), sigma_min, at_limit, scores [{sigma, rmse, noise}], region, timings |
 | GET  .../repositioning                         | JSON: применимость, checkpoint-ы (угол, sy, sx), накопленные сдвиги, предупреждения |
 | GET  .../motion                                | JSON: смещение образца во время съёмки — режим, применено ли, пояснение, сводка (status, rms, ptp, common, discrepancy, bands), dx и dx_raw по кадрам (fnums, angles) |
 | POST .../motion {mode}                         | JSON: то же после смены режима компенсации: auto \| on \| off (сдвиги кадров пересчитываются, авто-ось сессии забывается) |
@@ -58,8 +59,14 @@
 - ``compare`` (канал ``compare``): ``variants`` — 1…8 объектов ``{rings: пресет, smoothing: {sigma, deblur, balance,
   amount} | null}``; ``region`` — [x0, y0, x1, y1] среза, null — квадрат стороны ``size`` (по умолчанию 384) с
   наибольшей энергией краёв по срезу первого варианта. Кольца считаются раз на пресет, блок строк — раз на запрос,
-  каждый вариант — фильтр и FBP только фрагмента. ``metrics``: ``noise`` — 1,4826·MAD лапласиана / √20 (1/мм),
-  ``sharpness`` — энергия градиента относительно первого варианта (``preview.compare_metrics``).
+  каждый вариант — фильтр и FBP только фрагмента. ``metrics``: ``noise`` — шум среза по половинам углов (1/мм,
+  ``noise.noise_sigma``; до 01.10.2026 — MAD лапласиана, сильно занижал шум после сглаживания), ``sharpness`` —
+  энергия градиента относительно первого варианта (``preview.compare_metrics``).
+- ``smoothing/auto`` (канал ``smooth_auto``): подбор σ по половинам углов (``preview.Context.smoothing_auto``,
+  ``reconengine.noise``) при методе деблюра из ``smoothing`` (``{deblur, balance, amount}``, по умолчанию без
+  деблюра); ``region`` — как у ``compare``, null — квадрат стороны ``size`` (по умолчанию 512) с наибольшей
+  энергией краёв. ``rmse`` — оценка ошибки среза по всем углам при этой σ, ``noise`` — его шум (1/мм); выбрана
+  наименьшая σ с ``rmse`` в пределах 5 % от минимума (``sigma_min`` — σ минимума, ``at_limit`` — он на краю сетки).
 
 Память: кроп — memmap uint16 на диске; полоса нормированных (и сдвинутых по образцу) строк вокруг строки превью
 кэшируется, чтобы смена центра/наклона не нормировала кадры заново; её высота — запас под текущий наклон
@@ -671,6 +678,27 @@ def compare(sid):
     frags, meta = _compute(sid, 'compare', _seq(b), fn)
     lo, hi = preview.pooled_window(frags)
     return binary.array_response(frags, lo=lo, hi=hi, meta=meta, max_px=_max_px(b))
+
+
+@bp.post('/<sid>/smoothing/auto')
+def smoothing_auto(sid):
+    """Подбор σ сглаживания по половинам углов (см. модуль и ``preview.Context.smoothing_auto``)."""
+    b = _body()
+    base = b.get('smoothing')
+    if base is not None and not isinstance(base, dict):
+        raise ValueError('smoothing: ожидается объект {deblur, balance, amount} или null')
+    base = {k: v for k, v in (base or {}).items() if k in ('deblur', 'balance', 'amount') and v is not None}
+    smoothing.resolve(dict(base, sigma=1.0))                         # ошибки — 400 до ожидания GPU
+    size = arg_int(b, 'size', preview.AUTO_REGION_PX, 64, 4096)
+    preset = _str(b, 'rings', preview.DEFAULT_RINGS)
+    rings.resolve(preset)
+
+    def fn(ctx, check):
+        row, ax = _axis_args(ctx, b, check)
+        return ctx.smoothing_auto(row, ax, preset, base, region=_region(b), size=size,
+                                  angle_mode=_str(b, 'angles', preview.DEFAULT_ANGLES), check=check)
+
+    return jsonify(_compute(sid, 'smooth_auto', _seq(b), fn))
 
 
 @bp.get('/<sid>/repositioning')
