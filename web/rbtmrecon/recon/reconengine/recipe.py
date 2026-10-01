@@ -20,6 +20,11 @@
 ``smoothing.DEFAULTS``; с 01.10.2026 там ``deblur: 'none'`` (было ``'wiener'``). Сохранённые рецепты пишут блок
 целиком, так что их это не касается — только вручную написанные блоки без ``deblur``.
 
+``denoise`` — шумоподавление объёма после FBP (:mod:`tv`): ``{method: null | 'tv', strength, weight, iterations}``;
+method null — выключено (по умолчанию, и у рецептов без блока). ``weight`` — вес TV в единицах среза (1/мм), его
+задача и берёт; ``strength`` — тот же вес в долях σ шума среза строки превью (по нему студия считает weight,
+сохраняется для сведения и шаблонов). Выключенный блок в :func:`sha256` не входит.
+
 Геометрия (``fov``, ``axis``) хранится через :class:`model.ROI` / :class:`model.Axis`, чтобы переиспользовать
 их валидацию и (де)сериализацию; остальные секции — обычные словари с проверкой типов/диапазонов
 в :func:`from_dict` (что рецепт синтаксически корректен) и :func:`validate` (что он согласован с конкретным
@@ -41,7 +46,7 @@ import tempfile
 from typing import Any, Dict, List, Optional
 
 from . import __version__ as _ENGINE_VERSION
-from . import fbp, motion as motion_mod, pixelsize, rings, smoothing
+from . import fbp, motion as motion_mod, pixelsize, rings, smoothing, tv
 from .model import ROI, Axis
 
 logger = logging.getLogger(__name__)
@@ -59,15 +64,15 @@ _ALGORITHMS = {'FBP'}
 _TOP_LEVEL_KEYS = {
     'schema', 'engine', 'created', 'author', 'input', 'pixel_size', 'fov', 'axis',
     'repositioning', 'recon', 'normalization', 'rings', 'smoothing', 'outputs', 'provenance', 'motion',
-    'empty_skip_first',
+    'empty_skip_first', 'denoise',
 }
 #: Верхнеуровневые поля, переносимые в другой рецепт целиком.
-_TRANSFERABLE_TOP = ('normalization', 'rings', 'smoothing', 'outputs', 'empty_skip_first')
+_TRANSFERABLE_TOP = ('normalization', 'rings', 'smoothing', 'denoise', 'outputs', 'empty_skip_first')
 _MOTION_KEYS = ('mode', 'applied', 'dx', 'fnums', 'summary')
 #: empty_skip_first новых рецептов (у старых — 0)
 EMPTY_SKIP_DEFAULT = 2
 #: Шаги студии, чьё происхождение (auto | checked) записывается в ``provenance.steps``.
-_PROVENANCE_STEPS = ('fov', 'axis', 'rings', 'smoothing', 'run')
+_PROVENANCE_STEPS = ('fov', 'axis', 'rings', 'smoothing', 'denoise', 'run')
 #: Поля секции ``recon``, переносимые в другой рецепт (``slices``/``xy_roi`` привязаны к скану).
 _TRANSFERABLE_RECON = ('algorithm', 'angles')
 
@@ -92,6 +97,7 @@ class Recipe:
     smoothing: Dict[str, Any] = dataclasses.field(default_factory=smoothing.default_block)
     motion: Dict[str, Any] = dataclasses.field(default_factory=lambda: motion_block('off'))
     empty_skip_first: int = 0
+    denoise: Dict[str, Any] = dataclasses.field(default_factory=tv.default_block)
 
 
 def motion_block(mode: str = 'auto', applied: Optional[bool] = None, dx=None, fnums=None,
@@ -153,6 +159,7 @@ def default_recipe(exp_id: str, fingerprint: str, roi: ROI, pixel_size_value: fl
         smoothing=smoothing.default_block(),
         motion=motion_block('auto'),
         empty_skip_first=EMPTY_SKIP_DEFAULT,
+        denoise=tv.default_block(),
     )
 
 
@@ -241,6 +248,7 @@ def _validate_types(recipe: Recipe) -> None:
              'outputs.dtype должен быть непустой строкой')
 
     _validate_smoothing(recipe.smoothing)
+    _validate_denoise(recipe.denoise)
     _validate_motion(recipe.motion)
     _require(isinstance(recipe.empty_skip_first, int) and not isinstance(recipe.empty_skip_first, bool)
              and 0 <= recipe.empty_skip_first <= 20,
@@ -272,6 +280,31 @@ def _validate_smoothing(block: Any) -> None:
         smoothing.resolve(block)
     except ValueError as exc:
         raise ValueError('recipe: {}'.format(exc)) from None
+
+
+def _validate_denoise(block: Any) -> None:
+    """Блок ``denoise``: словарь с полями ``tv.DEFAULTS``; включённый — :func:`tv.resolve` (weight обязателен)."""
+    _require(isinstance(block, dict), 'denoise должен быть словарём: {!r}'.format(block))
+    unknown = set(block) - set(tv.DEFAULTS)
+    _require(not unknown, 'denoise: неизвестные поля {}'.format(sorted(unknown)))
+    method = block.get('method')
+    _require(method is None or isinstance(method, str), 'denoise.method должен быть строкой или null: {!r}'.format(method))
+    for key in ('strength', 'weight'):
+        v = block.get(key)
+        _require(v is None or _is_number(v), 'denoise.{} должен быть числом или null: {!r}'.format(key, v))
+    try:
+        tv.resolve(block)
+    except ValueError as exc:
+        raise ValueError('recipe: {}'.format(exc)) from None
+
+
+def denoise_block(block: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Блок ``denoise`` рецепта из частичного (недостающие поля — по умолчанию; None — выключено), без проверки."""
+    out = tv.default_block()
+    if block is not None:
+        _require(isinstance(block, dict), 'denoise должен быть словарём или null: {!r}'.format(block))
+        out.update(copy.deepcopy(block))
+    return out
 
 
 def _validate_motion(block: Any) -> None:
@@ -346,6 +379,7 @@ def to_dict(recipe: Recipe) -> Dict[str, Any]:
         'smoothing': copy.deepcopy(recipe.smoothing),
         'motion': copy.deepcopy(recipe.motion),
         'empty_skip_first': recipe.empty_skip_first,
+        'denoise': copy.deepcopy(recipe.denoise),
         'outputs': copy.deepcopy(recipe.outputs),
         'provenance': copy.deepcopy(recipe.provenance),
     }
@@ -388,6 +422,7 @@ def from_dict(d: Dict[str, Any]) -> Recipe:
         smoothing=smoothing_block(d.get('smoothing')),
         motion=_motion_from(d.get('motion')),
         empty_skip_first=d.get('empty_skip_first', 0),
+        denoise=denoise_block(d.get('denoise')),
     )
     _validate_types(recipe)
     return recipe
@@ -438,6 +473,8 @@ def sha256(recipe: Recipe) -> str:
     d.pop('author', None)
     if smoothing.resolve(d.get('smoothing')) is None:
         d.pop('smoothing', None)
+    if tv.resolve(d.get('denoise'), need_weight=False) is None:
+        d.pop('denoise', None)
     if d.get('rings', {}).get('version', 1) == 1:
         d['rings'] = {k: v for k, v in d['rings'].items() if k != 'version'}    # рецепты до версии 2 колец
     if d.get('motion') == motion_block('off'):
