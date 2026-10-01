@@ -65,7 +65,7 @@ def test_recipe_smoothing(loaded):
     ключа — выключено и 'auto'; ошибки значений — 400."""
     _, client, _, _, sid, _ = loaded
     d = client.post(url(sid, 'recipe'), json={}, headers=HEADERS).get_json()
-    assert d['smoothing'] == {'sigma': None, 'deblur': 'wiener', 'balance': 0.02, 'amount': 1.5}
+    assert d['smoothing'] == {'sigma': None, 'deblur': 'none', 'balance': 0.02, 'amount': 1.5}
     assert d['provenance']['steps']['smoothing'] == 'auto'
     d = client.post(url(sid, 'recipe'), json={'smoothing': {'sigma': 1.5, 'deblur': 'unsharp', 'amount': 2}},
                     headers=HEADERS).get_json()

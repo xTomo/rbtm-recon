@@ -45,8 +45,13 @@ r ± hb, hb = max(h, ореол σ = SMOOTH_RESERVE_SIGMA), ключ — (стр
 
 Фрагмент (``region``) восстанавливается FBP только его пикселей (``fbp.recon_rows(region=...)``) — в десятки раз
 дешевле полного среза. Сравнение вариантов (``compare``): кольца — раз на пресет, выравнивание — раз на запрос (блок
-под наибольший ореол), каждый вариант — фильтр блока и FBP фрагмента; метрики — шум (``noise_level``) и резкость
-(энергия градиента относительно первого варианта). Сравнивать варианты сглаживания честно при равном шуме.
+под наибольший ореол), каждый вариант — фильтр блока и FBP фрагмента; метрики — шум по половинам углов
+(``noise.noise_sigma``: ещё два FBP фрагмента на вариант) и резкость (энергия градиента относительно первого
+варианта). Сравнивать варианты сглаживания честно при равном шуме.
+
+Автоподбор σ (``smoothing_auto``): для σ из ``noise.AUTO_SIGMAS`` (0 — без сглаживания) при заданном методе деблюра
+фильтр блока и два FBP фрагмента по половинам углов; оценка ошибки среза по всем углам — ``noise.filter_mse``
+(Noise2Noise), выбирается наименьшая σ с ошибкой в пределах 5 % от минимума (минимум пологий).
 """
 from __future__ import annotations
 
@@ -60,6 +65,7 @@ import numpy as np
 
 from reconengine import axis as axis_mod
 from reconengine import fbp, gpu, motion, pipeline, preprocess, rings, smoothing
+from reconengine import noise as noise_mod
 from reconengine import recipe as recipe_mod
 from reconengine.model import Axis, Cancelled, CropData, ProgressFn, ROI, ScanInfo, check_cancel, no_progress
 
@@ -82,7 +88,8 @@ SCAN_REGION_PX = 256
 #: Быстрый путь смены центра (сдвиг готовой строки) — при разнице сдвигов кропа не больше стольких пикселей.
 FAST_SHIFT_MAX_PX = 16.0
 SCAN_MAX_N = 25
-#: Блок строк со сглаживанием строится с ореолом не меньше, чем у σ = SMOOTH_RESERVE_SIGMA (Винер по умолчанию):
+#: Блок строк со сглаживанием строится с ореолом не меньше, чем у σ = SMOOTH_RESERVE_SIGMA с Винером (ореол
+#: Винера втрое шире гаусса — запас покрывает и гаусс до σ ≈ 7):
 #: σ до него (и метод) меняются без нового выравнивания и колец. Кольца на блоке — порциями по BLOCK_RING_CHUNK
 #: строк, сдвиг блока в частотной области — по BLOCK_SHIFT_CHUNK (память).
 SMOOTH_RESERVE_SIGMA = 2.0
@@ -91,6 +98,8 @@ BLOCK_SHIFT_CHUNK = 8
 #: Сравнение вариантов: предел числа вариантов и сторона фрагмента по умолчанию.
 COMPARE_MAX_VARIANTS = 8
 COMPARE_REGION_PX = 384
+#: Автоподбор σ: сторона фрагмента по умолчанию (больше — устойчивее оценка шума).
+AUTO_REGION_PX = 512
 
 Check = Callable[[], None]
 #: Область среза (x0, y0, x1, y1) в пикселях среза w×w, полуоткрытая.
@@ -160,8 +169,8 @@ def pooled_window(arrays) -> Tuple[float, float]:
 
 
 def reserve_halo() -> int:
-    """Ореол блока строк «с запасом»: halo_rows при σ = SMOOTH_RESERVE_SIGMA и прочих параметрах по умолчанию."""
-    return smoothing.halo_rows(smoothing.resolve({'sigma': SMOOTH_RESERVE_SIGMA}))
+    """Ореол блока строк «с запасом»: halo_rows Винера при σ = SMOOTH_RESERVE_SIGMA."""
+    return smoothing.halo_rows(smoothing.resolve({'sigma': SMOOTH_RESERVE_SIGMA, 'deblur': 'wiener'}))
 
 
 def resolve_smoothing(block: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -191,24 +200,15 @@ def compare_variants(variants) -> List[Dict[str, Any]]:
     return out
 
 
-def noise_level(img: np.ndarray) -> float:
-    """Оценка шума фрагмента (те же единицы, 1/мм): 1,4826·MAD 5-точечного лапласиана / √20 — у белого шума σ
-    дисперсия лапласиана 20σ², а MAD устойчива к краям объекта."""
-    a = np.asarray(img, dtype='float64')
-    if a.shape[0] < 3 or a.shape[1] < 3:
-        return 0.0
-    lap = 4 * a[1:-1, 1:-1] - a[:-2, 1:-1] - a[2:, 1:-1] - a[1:-1, :-2] - a[1:-1, 2:]
-    return float(1.4826 * np.median(np.abs(lap - np.median(lap))) / math.sqrt(20.0))
-
-
-def compare_metrics(frags: List[np.ndarray]) -> List[Dict[str, Any]]:
-    """Метрики фрагментов сравнения: noise (``noise_level``) и sharpness — энергия градиента (как
-    ``axis.center_metric('grad')``, но «больше = резче»), делённая на значение у первого фрагмента (None, если
-    там 0)."""
+def compare_metrics(frags: List[np.ndarray], noises: List[float]) -> List[Dict[str, Any]]:
+    """Метрики фрагментов сравнения: noise — шум среза по половинам углов (``noise.noise_sigma``, те же единицы,
+    1/мм; считает ``Context.compare``) и sharpness — энергия градиента (как ``axis.center_metric('grad')``, но
+    «больше = резче»), делённая на значение у первого фрагмента (None, если там 0). Энергия градиента включает и шум:
+    у шумного среза она завышена, поэтому sharpness сравнима только при близком шуме."""
     energy = [-axis_mod.center_metric(f, 'grad') for f in frags]
     e0 = energy[0] if energy else 0.0
-    return [{'noise': noise_level(f), 'sharpness': (float(e / e0) if e0 > 0 else None)}
-            for f, e in zip(frags, energy)]
+    return [{'noise': float(n), 'sharpness': (float(e / e0) if e0 > 0 else None)}
+            for f, e, n in zip(frags, energy, noises)]
 
 
 def fragment_metrics(frags: List[np.ndarray], metric: str) -> np.ndarray:
@@ -593,6 +593,14 @@ class Context:
         """FBP строк (s, n, w) только во фрагменте region (весь срез — полный FBP): (s, th, tw) float32."""
         return fbp.recon_rows(rows, self.prep.angles, self.pixel_size, angle_mode=angle_mode, region=region)
 
+    def _fbp_halves(self, line, angle_mode: str, region: Region) -> Tuple[np.ndarray, np.ndarray]:
+        """Фрагменты среза строки line (1, n, w) по чётным и нечётным выбранным углам (``noise.split_halves``)."""
+        ev, od = noise_mod.split_halves(self.prep.angles, angle_mode)
+        a = np.asarray(self.prep.angles)
+        line = gpu.to_numpy(line)
+        return tuple(fbp.recon_rows(np.ascontiguousarray(line[:, i]), a[i], self.pixel_size, angle_mode=angle_mode,
+                                    region=region)[0] for i in (ev, od))
+
     def slice(self, row: int, ax: Axis, preset: str = DEFAULT_RINGS, angle_mode: str = DEFAULT_ANGLES,
               region: Optional[Region] = None, check: Check = _no_check, exact: bool = False,
               smooth: Optional[Dict[str, Any]] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
@@ -707,13 +715,74 @@ class Context:
             frag = full0[y0:y1, x0:x1] if j == 0 and full0 is not None else self._fbp(line, angle_mode, reg)[0]
             frags.append(np.ascontiguousarray(frag, dtype='float32'))
         t['fbp_s'] = round(time.time() - t0, 4)
-        values = compare_metrics(frags) if metrics else None
+        values = None
+        if metrics:
+            t0 = time.time()
+            noises = []
+            for line in lines:
+                check()
+                noises.append(noise_mod.noise_sigma(*self._fbp_halves(line, angle_mode, reg)))
+            t['noise_s'] = round(time.time() - t0, 4)
+            values = compare_metrics(frags, noises)
         t['total_s'] = round(time.time() - t_start, 4)
         meta = {'row': int(row), 'axis': ax.to_dict(), 'angles': angle_mode,
                 'n_angles': int(fbp.select_angles(self.prep.angles, angle_mode).sum()),
                 'region': [x0, y0, x1, y1], 'variants': vs, 'metrics': values, 'timings': t,
                 'downsample': 1}                  # binary.array_response заменит при уменьшении
         return np.stack(frags), meta
+
+    def smoothing_auto(self, row: int, ax: Axis, preset: str = DEFAULT_RINGS, base: Optional[Dict[str, Any]] = None,
+                       region: Optional[Region] = None, size: int = AUTO_REGION_PX,
+                       angle_mode: str = DEFAULT_ANGLES, sigmas=noise_mod.AUTO_SIGMAS,
+                       check: Check = _no_check) -> Dict[str, Any]:
+        """Подбор σ сглаживания по половинам углов (см. модуль ``noise``) на фрагменте среза строки row.
+
+        base — метод деблюра и его параметры (``{deblur, balance, amount}``, σ в нём не важна; None — по умолчанию);
+        region=None — квадрат стороны size с наибольшей энергией краёв по срезу без сглаживания. Ответ: ``sigma``
+        (лучшая; None — сглаживание не нужно), ``smoothing`` (блок рецепта с ней или None), ``scores`` — по каждой σ
+        ``{sigma, rmse, noise}`` (оценка ошибки среза по всем углам и его шума, 1/мм), ``region``, ``timings``.
+        Выбор — ``noise.pick``: наименьшая σ с ошибкой в пределах ``noise.AUTO_TOLERANCE`` от минимума;
+        ``sigma_min`` — σ самого минимума, ``at_limit`` — минимум на наибольшей σ сетки (данные очень шумные,
+        оптимум может быть за ней)."""
+        t_start = time.time()
+        rings.resolve(preset)
+        _check_angles(angle_mode)
+        base = dict(base or {})
+        base.pop('sigma', None)
+        params = []
+        for sg in sigmas:
+            params.append(None if not sg else smoothing.resolve(dict(base, sigma=float(sg))))
+        w = self.roi.width
+        reg = check_region(region, w) if region is not None else None
+        halo = max(smoothing.halo_rows(p) for p in params)
+        block, i, t = self.corrected_block(row, ax, preset, halo, exact=True, check=check)
+        t = dict(t)
+        check()
+        if reg is None:
+            t0 = time.time()
+            full = self._fbp(block[i:i + 1], angle_mode, (0, 0, w, w))[0]
+            reg = structured_region(full, side=size)
+            t['region_s'] = round(time.time() - t0, 4)
+        t0 = time.time()
+        r_even, r_odd = self._fbp_halves(block[i:i + 1], angle_mode, reg)
+        scores = []
+        for sg, p in zip(sigmas, params):
+            check()
+            if p is None:
+                d_even, d_odd = r_even, r_odd
+            else:
+                d_even, d_odd = self._fbp_halves(smoothing.apply(block, p, keep=(i, i + 1), xp=self.xp), angle_mode,
+                                                 reg)
+            mse, var = noise_mod.filter_mse(d_even, d_odd, r_even, r_odd)
+            scores.append({'sigma': float(sg) if p is not None else None, 'rmse': noise_mod.rmse(mse),
+                           'noise': noise_mod.rmse(var)})
+        t['scores_s'] = round(time.time() - t0, 4)
+        chosen, best = noise_mod.pick([s['rmse'] for s in scores])
+        t['total_s'] = round(time.time() - t_start, 4)
+        return {'row': int(row), 'axis': ax.to_dict(), 'rings': preset, 'angles': angle_mode,
+                'region': [int(v) for v in reg], 'sigma': scores[chosen]['sigma'], 'smoothing': params[chosen],
+                'sigma_min': scores[best]['sigma'], 'at_limit': best == len(scores) - 1 and len(scores) > 1,
+                'scores': scores, 'timings': t}
 
     def center_scan(self, row: int, ax: Axis, step: float = 1.0, n: int = 9, metric: str = 'grad',
                     region: Optional[Region] = None, preset: str = DEFAULT_RINGS,
