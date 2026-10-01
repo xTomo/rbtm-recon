@@ -25,7 +25,7 @@
 
 | Метод и путь                                   | Ответ |
 |------------------------------------------------|-------|
-| GET  .../slice?row&center&tilt&rings&angles&region&smooth&deblur&balance&amount&max_px&seq | binary uint16 (h, w) среза; X-Meta: row, axis, rings, angles, n_angles, region, smoothing, timings |
+| GET  .../slice?row&center&tilt&rings&angles&region&smooth&deblur&balance&amount&tv&tv_iter&max_px&seq | binary uint16 (h, w) среза; X-Meta: row, axis, rings, angles, n_angles, region, smoothing, denoise, timings |
 | POST .../axis/auto                             | JSON: axis, shift_x, alfa, углы пары 0°/180° |
 | POST .../axis/scan {row, center?, tilt?, step, n, metric, region, seq} | binary uint16 (n, th, tw): фрагменты среза при центрах center + (i − n//2)·step, общее окно квантования; X-Meta: centers, metrics, best |
 | POST .../axis/tilt {y_top, c_top, y_bottom, c_bottom} | JSON: axis (``axis.tilt_from_centers``) |
@@ -45,7 +45,10 @@
 умолчанию ``first_180``); ``max_px`` — по умолчанию ``cfg.preview_max_px``. Сглаживание в ``slice``: ``smooth`` — σ
 (нет, пусто или 0 — выключено), ``deblur`` — ``wiener`` | ``unsharp`` | ``none``, ``balance``, ``amount`` (как блок
 рецепта ``smoothing``, проверка — ``smoothing.resolve``); в X-Meta — нормализованные параметры или null, в
-``timings`` — ``smooth_s`` и ``block_rows`` (строк в блоке после колец).
+``timings`` — ``smooth_s`` и ``block_rows`` (строк в блоке после колец). TV 3D после FBP в ``slice``: ``tv`` — сила
+(вес в долях σ шума строки; нет, пусто или 0 — выключено), ``tv_iter`` — итераций (по умолчанию 50); в X-Meta
+``denoise`` — параметры с весом и σ. В ``compare`` вариант может нести ``denoise: {method: 'tv', strength,
+iterations}``, в ``recipe`` — тот же блок: сервис считает вес по шуму строки превью (``preview.Context.tv_params``).
 
 Подробности:
 - ``axis/scan``: по умолчанию step = 1 px, n = 9, metric = ``grad``, region — квадрат 256 px с наибольшей
@@ -88,6 +91,7 @@ from flask import Blueprint, current_app, jsonify, request
 
 from reconengine import axis as axis_mod
 from reconengine import data, fbp, gpu, motion, rings, smoothing
+from reconengine import tv as tv_mod
 from reconengine import recipe as recipe_mod
 from reconengine.model import Cancelled, CropData, ROI, ScanInfo, check_cancel
 
@@ -513,6 +517,15 @@ def _smoothing_args(src) -> Optional[Dict[str, Any]]:
     return block
 
 
+def _denoise_args(src) -> Optional[Dict[str, Any]]:
+    """Блок TV из query ``tv`` (сила) и ``tv_iter``; сила нет, пусто или 0 — None (выключено)."""
+    strength = arg_float(src, 'tv')
+    if not strength:
+        return None
+    block = {'method': 'tv', 'strength': strength, 'iterations': arg_int(src, 'tv_iter', tv_mod.DEFAULT_ITERATIONS)}
+    return preview.resolve_denoise(block)
+
+
 def _max_px(src) -> int:
     return arg_int(src, 'max_px', _cfg().preview_max_px, *_MAX_PX_RANGE)
 
@@ -572,11 +585,13 @@ def load_cancel(sid):
 def slice_(sid):
     a = request.args
     smooth = _smoothing_args(a)
+    denoise = _denoise_args(a)
 
     def fn(ctx, check):
         row, ax = _axis_args(ctx, a, check)
         return ctx.slice(row, ax, _str(a, 'rings', preview.DEFAULT_RINGS), _str(a, 'angles', preview.DEFAULT_ANGLES),
-                         _region(a), check, exact=a.get('exact', '') in ('1', 'true'), smooth=smooth)
+                         _region(a), check, exact=a.get('exact', '') in ('1', 'true'), smooth=smooth,
+                         denoise=denoise)
 
     img, meta = _compute(sid, 'slice', _seq(a), fn)
     return binary.array_response(img, meta=meta, max_px=_max_px(a))
@@ -740,7 +755,9 @@ def make_recipe(sid):
     (по умолчанию весь ROI), ``xy_roi``, ``binning`` — коэффициенты копий с биннингом (по умолчанию [4]),
     ``pixel_size_mm`` — размер пикселя, введённый пользователем (иначе
     найденный для скана, с источником), ``smoothing`` — блок сглаживания ``{sigma, deblur, balance, amount}`` или
-    null (выключено; недостающие поля — по умолчанию). ROI — загруженного кропа. Рецепт проверяется по кадру скана."""
+    null (выключено; недостающие поля — по умолчанию), ``denoise`` — TV 3D ``{method: 'tv', strength, iterations}``
+    или null: вес = сила · σ шума строки ``row`` (по умолчанию строки превью) при этих кольцах и сглаживании. ROI —
+    загруженного кропа. Рецепт проверяется по кадру скана."""
     b = _body()
     s = _mgr().get(sid, _user())
     preset = _str(b, 'rings', preview.DEFAULT_RINGS)
@@ -751,6 +768,7 @@ def make_recipe(sid):
         raise ValueError('неизвестный режим углов: {}'.format(angles))
     user_ps = arg_float(b, 'pixel_size_mm', None, lo=1e-6, hi=10.0)
     smooth = recipe_mod.smoothing_block(b.get('smoothing'))
+    dn = preview.resolve_denoise(b.get('denoise'))
 
     def fn(ctx, check):
         if b.get('center') is None and b.get('tilt') is None:
@@ -765,6 +783,10 @@ def make_recipe(sid):
         r.axis = ax
         r.rings = {'preset': preset, 'params': None, 'version': rings.VERSION}
         r.smoothing = smooth
+        if dn:
+            row = arg_int(b, 'row', ctx.roi.preview_row)
+            p = ctx.tv_params(dn, row, ax, preset, smoothing.resolve(smooth), angles, check=check)
+            r.denoise = {k: p[k] for k in ('method', 'strength', 'weight', 'iterations')}
         r.motion = ctx.recipe_motion()
         r.empty_skip_first = ctx.empty_skip
         r.recon['angles'] = angles
@@ -781,6 +803,7 @@ def make_recipe(sid):
                                  'axis': 'auto' if ax.method == 'auto' else 'checked',
                                  'rings': 'checked' if 'rings' in b else 'auto',
                                  'smoothing': 'checked' if 'smoothing' in b else 'auto',
+                                 'denoise': 'checked' if 'denoise' in b else 'auto',
                                  'run': 'checked'}
         d = recipe_mod.to_dict(r)
         r = recipe_mod.from_dict(d)                      # проверка типов (xy_roi, slices из тела)

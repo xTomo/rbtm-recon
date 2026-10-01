@@ -693,27 +693,35 @@ class JobService:
     def recent_rate(self, last: int = 5) -> Optional[Dict[str, float]]:
         """Скорость по последним выполненным задачам для оценки времени новой: медиана секунд реконструкции на
         (срез · ширина² · угол) — FBP и выравнивание растут как площадь среза и число углов; и медиана секунд
-        подготовки (dark/empty, сдвиги образца, ось). None — выполненных задач с замерами нет (или нет Mongo)."""
+        подготовки (dark/empty, сдвиги образца, ось). Время TV (``denoise_s``) из реконструкции вычитается и даёт
+        отдельную медиану секунд на воксель-итерацию TV (``tv_s_per_voxel_iter``, если такие задачи были). None —
+        выполненных задач с замерами нет (или нет Mongo)."""
         try:
             docs = list(self.coll.find({'status': 'done', 'result.timings.recon_s': {'$exists': True}},
                                        {'result': 1, 'recipe.fov': 1}).sort('finished', DESCENDING).limit(last))
         except Exception:  # noqa: BLE001 — оценка не обязательна
             return None
-        unit, prepare = [], []
+        unit, prepare, tv_rate = [], [], []
         for d in docs:
             t = (d.get('result') or {}).get('timings') or {}
             shape = ((d.get('result') or {}).get('volume') or {}).get('shape') or []
             fov = (d.get('recipe') or {}).get('fov') or {}
             try:
                 nz, w, n_ang = int(shape[0]), int(fov['x1']) - int(fov['x0']), int(t['n_angles'])
-                unit.append(float(t['recon_s']) / (nz * w * w * n_ang))
+                tv_s = float(t.get('denoise_s', 0.0))
+                unit.append((float(t['recon_s']) - tv_s) / (nz * w * w * n_ang))
                 prepare.append(float(t.get('prepare_s', 0.0)))
+                if tv_s > 0 and t.get('denoise_voxel_iterations'):
+                    tv_rate.append(tv_s / float(t['denoise_voxel_iterations']))
             except (KeyError, IndexError, TypeError, ValueError, ZeroDivisionError):
                 continue
         if not unit:
             return None
-        return {'recon_s_per_slice_px2_angle': statistics.median(unit), 'prepare_s': statistics.median(prepare),
-                'jobs': len(unit)}
+        out = {'recon_s_per_slice_px2_angle': statistics.median(unit), 'prepare_s': statistics.median(prepare),
+               'jobs': len(unit)}
+        if tv_rate:
+            out['tv_s_per_voxel_iter'] = statistics.median(tv_rate)
+        return out
 
     def summary(self) -> Dict[str, Any]:
         """Для /health: число queued, текущая задача (id, exp_id, progress, stage)."""

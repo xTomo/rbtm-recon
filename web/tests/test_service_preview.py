@@ -594,11 +594,11 @@ def test_compare_variants_fragment_and_metrics(tmp_path, per_row_rings):
     # кольца: medium — на строках под наибольший ореол его вариантов (σ = 2 Винер нет, 2.0 'none' → h = 6,
     # 1.5 Винер → h = 16: весь кроп 32 строки, порции по 16), strong — ореол 1.0 'unsharp' (h = 4, 9 строк)
     assert sorted(calls) == sorted([(16, 3.0), (16, 3.0), (9, 2.0)])
-    assert meta['variants'] == [
+    assert meta['variants'] == [dict(v, denoise=None) for v in [
         {'rings': 'medium', 'smoothing': None}, {'rings': 'medium', 'smoothing': SMOOTH},
         {'rings': 'medium', 'smoothing': {'sigma': 2.0, 'deblur': 'none', 'balance': 0.02, 'amount': 1.5}},
         {'rings': 'strong', 'smoothing': {'sigma': 1.0, 'deblur': 'unsharp', 'balance': 0.02, 'amount': 1.5}},
-        {'rings': 'off', 'smoothing': None}]
+        {'rings': 'off', 'smoothing': None}]]
     step = float(r.headers['X-Scale'])
     lo, hi = float(r.headers['X-Offset']), float(r.headers['X-Offset']) + 65535 * step
     for got, v in zip(stack, meta['variants']):                       # общее окно, значения — как у slice
@@ -720,4 +720,68 @@ def test_smoothing_auto_picks_sigma_on_noisy_scan(tmp_path, per_row_rings):
                 {'region': [0, 0, 500, 500]}):
         rb = client.post(url(sid, 'smoothing/auto'), json=dict(base, seq=None, **bad), headers=HEADERS)
         assert rb.status_code == 400, bad
+    manager(app).stop_reaper()
+
+
+
+# --- TV 3D после FBP ---------------------------------------------------------------------------------------------
+
+def test_slice_and_compare_with_tv(tmp_path, per_row_rings):
+    """slice с denoise: вес = сила · σ строки (кэш), фрагмент = TV стопки строк ± HALO во фрагменте с ореолом;
+    compare: вариант TV — тот же фрагмент, шум ниже, чем без TV; рецепт получает вес; неверные параметры — 400."""
+    from reconengine import tv
+    ss = simple_scan(noise=1.0)
+    app, client, cfg, sid, ctx = session_for(tmp_path, ss, ROI_SIMPLE)
+    c = row_center(ss, 20)
+    ax = Axis(c, 20, ss.tilt_deg)
+    sm = {'sigma': 1.0, 'deblur': 'none'}
+    dn = {'method': 'tv', 'strength': 2.0, 'iterations': 30}
+    region = (8, 12, 60, 50)
+    img, meta = ctx.slice(20, ax, 'medium', region=region, smooth=sm, denoise=dn)
+    p = meta['denoise']
+    assert p['method'] == 'tv' and p['sigma'] > 0 and p['weight'] == pytest.approx(2.0 * p['sigma'])
+    # то же вручную: строки ± HALO, FBP во фрагменте с ореолом, TV, центр
+    lines, i, _ = ctx._lines(20, ax, 'medium', smoothing.resolve(sm), tv.HALO, True, lambda: None)
+    w = ctx.roi.width
+    e = (0, 0, min(w, 60 + tv.HALO), min(w, 50 + tv.HALO))
+    stack = fbp.recon_rows(np.asarray(lines), ctx.prep.angles, ctx.pixel_size, region=e)
+    ref = tv.denoise(stack, p['weight'], 30, xp=np)[i][12:50, 8:60]
+    assert np.abs(img - ref).max() < 1e-4 * (np.abs(ref).max() + 1e-9)
+    assert meta['timings']['tv_s'] > 0 and meta['timings']['fbp_s'] >= 0               # время TV — отдельно от FBP
+    assert meta['timings']['fbp_rows'] == 2 * tv.HALO + 1                                # FBP — на один срез
+    plain, _ = ctx.slice(20, ax, 'medium', region=region, smooth=sm)
+    assert np.abs(img - plain).max() > 0
+    # compare: вариант без TV и с TV
+    r = client.post(url(sid, 'compare'), json={'row': 20, 'center': c, 'tilt': ss.tilt_deg, 'region': list(region),
+                                               'variants': [{'rings': 'medium', 'smoothing': sm},
+                                                            {'rings': 'medium', 'smoothing': sm, 'denoise': dn}]},
+                    headers=HEADERS)
+    assert r.status_code == 200, r.get_json()
+    stack2, m = decode(r)
+    assert m['variants'][0]['denoise'] is None and m['variants'][1]['denoise']['weight'] == pytest.approx(p['weight'])
+    assert m['metrics'][1]['noise'] < m['metrics'][0]['noise']
+    step = float(r.headers['X-Scale'])
+    lo, hi = float(r.headers['X-Offset']), float(r.headers['X-Offset']) + 65535 * step
+    inside = (img > lo + step) & (img < hi - step)                 # окно сравнения обрезает 0,1 % крайних
+    assert inside.mean() > 0.99 and np.abs(stack2[1] - img)[inside].max() <= 2 * step
+    # рецепт: вес по силе
+    d = client.post(url(sid, 'recipe'), json={'row': 20, 'center': c, 'tilt': ss.tilt_deg, 'smoothing': sm,
+                                              'denoise': dn}, headers=HEADERS).get_json()
+    assert d['denoise']['method'] == 'tv' and d['denoise']['weight'] == pytest.approx(p['weight'], rel=1e-6)
+    assert d['denoise']['strength'] == 2.0 and d['denoise']['iterations'] == 30
+    est = client.post(url(sid, 'estimate'), json={'recipe': d}, headers=HEADERS).get_json()
+    assert est['denoise']['source'] == 'preview' and est['denoise']['s'] > 0
+    assert est['denoise']['voxel_iterations'] >= 30 * int(np.prod(est['volume_shape']))
+    d = client.post(url(sid, 'recipe'), json={'denoise': None}, headers=HEADERS).get_json()
+    assert d['denoise'] == tv.default_block()
+    for bad in ({'method': 'nlm'}, {'method': 'tv', 'strength': 50}, 'tv'):
+        rb = client.post(url(sid, 'compare'), json={'row': 20, 'variants': [{'rings': 'off', 'denoise': bad}]},
+                         headers=HEADERS)
+        assert rb.status_code == 400, bad
+        rb = client.post(url(sid, 'recipe'), json={'denoise': bad}, headers=HEADERS)
+        assert rb.status_code == 400, bad
+    # slice по HTTP: tv=сила
+    _, meta = decode(client.get(url(sid, 'slice', row=20, center=c, tilt=ss.tilt_deg, smooth=1.0, deblur='none',
+                                    tv=2.0, tv_iter=30, region='8,12,60,50'), headers=HEADERS))
+    assert meta['denoise']['weight'] == pytest.approx(p['weight'])
     manager(app).stop_reaper()

@@ -49,6 +49,12 @@ r ± hb, hb = max(h, ореол σ = SMOOTH_RESERVE_SIGMA), ключ — (стр
 (``noise.noise_sigma``: ещё два FBP фрагмента на вариант) и резкость (энергия градиента относительно первого
 варианта). Сравнивать варианты сглаживания честно при равном шуме.
 
+Шумоподавление TV 3D (``denoise``: после FBP, :mod:`reconengine.tv`) связывает соседние срезы и пиксели: срез
+строки r — TV по срезам r ± ``tv.HALO`` (строки после колец и сглаживания) во фрагменте, расширенном на ``tv.HALO``
+пикселей, затем центр. Вес = сила · σ, σ — шум среза строки превью по половинам углов на квадрате 512 с краями
+(``tv_params``; кэш по строке, оси, кольцам, сглаживанию и углам) — тот же вес уходит в рецепт, поэтому превью
+совпадает с задачей (до ореолов: у задачи порции по z и плитки, ~0,03σ).
+
 Автоподбор σ (``smoothing_auto``): для σ из ``noise.AUTO_SIGMAS`` (0 — без сглаживания) при заданном методе деблюра
 фильтр блока и два FBP фрагмента по половинам углов; оценка ошибки среза по всем углам — ``noise.filter_mse``
 (Noise2Noise), выбирается наименьшая σ с ошибкой в пределах 5 % от минимума (минимум пологий).
@@ -66,6 +72,7 @@ import numpy as np
 from reconengine import axis as axis_mod
 from reconengine import fbp, gpu, motion, pipeline, preprocess, rings, smoothing
 from reconengine import noise as noise_mod
+from reconengine import tv
 from reconengine import recipe as recipe_mod
 from reconengine.model import Axis, Cancelled, CropData, ProgressFn, ROI, ScanInfo, check_cancel, no_progress
 
@@ -100,6 +107,10 @@ COMPARE_MAX_VARIANTS = 8
 COMPARE_REGION_PX = 384
 #: Автоподбор σ: сторона фрагмента по умолчанию (больше — устойчивее оценка шума).
 AUTO_REGION_PX = 512
+#: Сторона квадрата (с краями), по которому меряется σ шума для веса TV.
+TV_SIGMA_REGION_PX = 512
+#: Секунд на воксель-итерацию TV, пока нет замеров (RTX 4070 — 0,44 нс; GTX 980 Ti — уточнить).
+TV_DEFAULT_S_PER_VOXEL_ITER = 0.5e-9
 
 Check = Callable[[], None]
 #: Область среза (x0, y0, x1, y1) в пикселях среза w×w, полуоткрытая.
@@ -180,8 +191,19 @@ def resolve_smoothing(block: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any
     return smoothing.resolve(block)
 
 
+def resolve_denoise(block: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """``tv.resolve`` параметров запроса без веса (вес считает превью по силе и шуму): None — выключено."""
+    if block is not None and not isinstance(block, dict):
+        raise ValueError('denoise: ожидается объект {method, strength, iterations} или null')
+    if not block:
+        return None
+    b = {k: v for k, v in block.items() if k != 'weight'}
+    return tv.resolve(b, need_weight=False)
+
+
 def compare_variants(variants) -> List[Dict[str, Any]]:
-    """Варианты сравнения ``[{rings, smoothing}]`` → нормализованные ``{rings: пресет, smoothing: параметры | None}``:
+    """Варианты сравнения ``[{rings, smoothing, denoise}]`` → нормализованные ``{rings: пресет, smoothing: параметры |
+    None, denoise: параметры TV без веса | None}``:
     1…COMPARE_MAX_VARIANTS, rings по умолчанию DEFAULT_RINGS; неизвестный пресет, неверные параметры — ValueError."""
     if not isinstance(variants, (list, tuple)) or not 1 <= len(variants) <= COMPARE_MAX_VARIANTS:
         raise ValueError('variants: нужен список из 1…{} вариантов {{rings, smoothing}}'.format(COMPARE_MAX_VARIANTS))
@@ -194,9 +216,10 @@ def compare_variants(variants) -> List[Dict[str, Any]]:
         try:
             rings.resolve(preset)
             sp = resolve_smoothing(v.get('smoothing'))
+            dn = resolve_denoise(v.get('denoise'))
         except ValueError as exc:
             raise ValueError('variants[{}]: {}'.format(i, exc)) from None
-        out.append({'rings': preset, 'smoothing': sp})
+        out.append({'rings': preset, 'smoothing': sp, 'denoise': dn})
     return out
 
 
@@ -257,6 +280,9 @@ class Context:
         self._row = None                          # (ключ, полоса, выровненная строка)
         self._corrected = None                    # выровненная строка после колец (см. corrected_row)
         self._block = None                        # блок строк после колец для сглаживания (см. corrected_block)
+        self._tv_sigma = None                     # (ключ, σ) шум строки превью для веса TV (см. tv_params)
+        self.tv_rate: Optional[float] = None      # секунд на воксель-итерацию TV по замерам превью
+        self.last_tv_s = 0.0                      # секунд TV последнего фрагмента
         # смещение образца (motion): оценка, режим, применено ли; сдвиги кадров без компенсации смещения
         self.empty_skip: int = 0                  # сколько первых кадров серий empty не брали (рецепт)
         self.motion_est: Optional[motion.Estimate] = None
@@ -273,6 +299,7 @@ class Context:
         self._row = None
         self._corrected = None
         self._block = None
+        self._tv_sigma = None
 
     # --- смещение образца ----------------------------------------------------------------------------------
 
@@ -593,6 +620,69 @@ class Context:
         """FBP строк (s, n, w) только во фрагменте region (весь срез — полный FBP): (s, th, tw) float32."""
         return fbp.recon_rows(rows, self.prep.angles, self.pixel_size, angle_mode=angle_mode, region=region)
 
+    def _lines(self, row: int, ax: Axis, preset: str, sp: Optional[Dict[str, Any]], h_tv: int, exact: bool,
+               check: Check) -> Tuple[Any, int, Dict[str, Any]]:
+        """Строки после колец и сглаживания row ± h_tv (в пределах кропа): (xp (s, n, w), индекс row, времена)."""
+        hs = smoothing.halo_rows(sp)
+        if hs + h_tv == 0:
+            s, t = self.corrected_row(row, ax, preset, exact, check)
+            t.update(smooth_s=0.0, block_rows=1)
+            return s[None], 0, t
+        block, i, t = self.corrected_block(row, ax, preset, hs + h_tv, exact, check)
+        check()
+        a, b = max(0, i - h_tv), min(block.shape[0], i + h_tv + 1)
+        t0 = time.time()
+        lines = smoothing.apply(block, sp, keep=(a, b), xp=self.xp) if sp else block[a:b]
+        t['smooth_s'] = round(time.time() - t0, 4)
+        return lines, i - a, t
+
+    def _fbp_idx(self, lines, idx: Optional[np.ndarray], angle_mode: str, region: Region) -> np.ndarray:
+        """FBP строк (s, n, w) по углам idx (None — все выбранные) во фрагменте region: (s, th, tw)."""
+        if idx is None:
+            return self._fbp(lines, angle_mode, region)
+        a = np.asarray(self.prep.angles)
+        return fbp.recon_rows(np.ascontiguousarray(gpu.to_numpy(lines)[:, idx]), a[idx], self.pixel_size,
+                              angle_mode=angle_mode, region=region)
+
+    def _tv_fragment(self, lines, c: int, dn: Dict[str, Any], angle_mode: str, region: Region,
+                     idx: Optional[np.ndarray] = None, weight_scale: float = 1.0) -> np.ndarray:
+        """Фрагмент region среза строки c стопки lines после TV 3D: FBP стопки во фрагменте с ореолом tv.HALO,
+        TV с весом dn['weight']·weight_scale, центр. idx — только эти углы (половины для оценки шума)."""
+        w = self.roi.width
+        x0, y0, x1, y1 = region
+        e = (max(0, x0 - tv.HALO), max(0, y0 - tv.HALO), min(w, x1 + tv.HALO), min(w, y1 + tv.HALO))
+        stack = self._fbp_idx(lines, idx, angle_mode, e)
+        t0 = time.time()
+        out = tv.denoise_volume(stack, dn['weight'] * weight_scale, dn['iterations'], xp=self.xp)[c]
+        self.last_tv_s = time.time() - t0
+        self.tv_rate = self.last_tv_s / float(stack.size * dn['iterations'])
+        return np.ascontiguousarray(out[y0 - e[1]:y1 - e[1], x0 - e[0]:x1 - e[0]])
+
+    def tv_params(self, dn: Optional[Dict[str, Any]], row: int, ax: Axis, preset: str,
+                  sp: Optional[Dict[str, Any]], angle_mode: str = DEFAULT_ANGLES, line=None,
+                  check: Check = _no_check) -> Optional[Dict[str, Any]]:
+        """Параметры TV с весом: weight = strength · σ, σ — шум среза строки row (после колец и сглаживания sp) по
+        половинам углов на квадрате TV_SIGMA_REGION_PX с краями; в ответе ещё ``sigma``. line — готовая строка
+        (1, n, w), иначе строится. Кэш σ — по строке, оси, кольцам, сглаживанию и углам."""
+        if not dn:
+            return None
+        key = (self.crop_row(row), round(float(ax.center_at(row)), 3), round(float(ax.tilt_deg), 4), preset,
+               tuple(sorted((sp or {}).items())), angle_mode)
+        if self._tv_sigma is not None and self._tv_sigma[0] == key:
+            sigma = self._tv_sigma[1]
+        else:
+            if line is None:
+                lines, c, _ = self._lines(row, ax, preset, sp, 0, True, check)
+                line = lines[c:c + 1]
+            w = self.roi.width
+            full = self._fbp(line, angle_mode, (0, 0, w, w))[0]
+            reg = structured_region(full, side=TV_SIGMA_REGION_PX)
+            sigma = noise_mod.noise_sigma(*self._fbp_halves(line, angle_mode, reg))
+            if not sigma > 0:
+                raise ValueError('шум среза не измерен (σ = {}): вес TV не задать'.format(sigma))
+            self._tv_sigma = (key, sigma)
+        return dict(dn, weight=float(dn['strength']) * sigma, sigma=float(sigma))
+
     def _fbp_halves(self, line, angle_mode: str, region: Region) -> Tuple[np.ndarray, np.ndarray]:
         """Фрагменты среза строки line (1, n, w) по чётным и нечётным выбранным углам (``noise.split_halves``)."""
         ev, od = noise_mod.split_halves(self.prep.angles, angle_mode)
@@ -603,31 +693,34 @@ class Context:
 
     def slice(self, row: int, ax: Axis, preset: str = DEFAULT_RINGS, angle_mode: str = DEFAULT_ANGLES,
               region: Optional[Region] = None, check: Check = _no_check, exact: bool = False,
-              smooth: Optional[Dict[str, Any]] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
+              smooth: Optional[Dict[str, Any]] = None, denoise: Optional[Dict[str, Any]] = None
+              ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Срез строки детектора row (float32, область region среза w×w — восстанавливается только она) и сведения
         для X-Meta. Без ``exact`` смена только центра идёт быстрым путём (см. ``corrected_row``). smooth — блок
         сглаживания (как в рецепте; None или sigma пустая — выключено): фильтр по блоку строк row ± h
-        (``corrected_block``), в FBP — строка row."""
+        (``corrected_block``), в FBP — строка row. denoise — TV 3D (``{method, strength, iterations}``; вес — по шуму,
+        см. ``tv_params``): FBP строк row ± tv.HALO во фрагменте с ореолом и TV."""
         t_start = time.time()
         rings.resolve(preset)                      # неизвестный пресет — ValueError до вычислений
         _check_angles(angle_mode)
         sp = resolve_smoothing(smooth)
+        dn = resolve_denoise(denoise)
         w = self.roi.width
         x0, y0, x1, y1 = check_region(region, w)
-        if sp is None:
-            s, t = self.corrected_row(row, ax, preset, exact, check)
-            line = s[None]
-            t.update(smooth_s=0.0, block_rows=1)
-        else:
-            block, i, t = self.corrected_block(row, ax, preset, smoothing.halo_rows(sp), exact, check)
-            check()
-            t0 = time.time()
-            line = smoothing.apply(block, sp, keep=(i, i + 1), xp=self.xp)
-            t['smooth_s'] = round(time.time() - t0, 4)
+        lines, c, t = self._lines(row, ax, preset, sp, tv.HALO if dn else 0, exact, check)
         check()
         t0 = time.time()
-        img = np.ascontiguousarray(self._fbp(line, angle_mode, (x0, y0, x1, y1))[0])
-        t['fbp_s'] = round(time.time() - t0, 4)
+        if dn:
+            dn = self.tv_params(dn, row, ax, preset, sp, angle_mode, lines[c:c + 1], check)
+            check()
+            img = self._tv_fragment(lines, c, dn, angle_mode, (x0, y0, x1, y1))
+            # оценка времени задачи берёт из fbp_s FBP одного среза, а время TV у неё своё (pipeline.estimate):
+            # TV — отдельно, FBP стопки строк ± HALO — на срез
+            t['tv_s'] = round(self.last_tv_s, 4)
+            t['fbp_rows'] = int(lines.shape[0])
+        else:
+            img = np.ascontiguousarray(self._fbp(lines[c:c + 1], angle_mode, (x0, y0, x1, y1))[0])
+        t['fbp_s'] = round((time.time() - t0 - t.get('tv_s', 0.0)) / t.get('fbp_rows', 1), 4)
         t['fbp_px'] = (x1 - x0) * (y1 - y0)
         t['total_s'] = round(time.time() - t_start, 4)
         self.timings = dict(t)
@@ -635,7 +728,8 @@ class Context:
             self._full_timings = dict(t)
         meta = {'row': int(row), 'axis': ax.to_dict(), 'rings': preset, 'angles': angle_mode,
                 'n_angles': int(fbp.select_angles(self.prep.angles, angle_mode).sum()),
-                'region': [x0, y0, x1, y1], 'smoothing': sp, 'exact': 'fast_shift_px' not in t, 'timings': t}
+                'region': [x0, y0, x1, y1], 'smoothing': sp, 'denoise': dn, 'exact': 'fast_shift_px' not in t,
+                'timings': t}
         return img, meta
 
     def rings_preview(self, row: int, ax: Axis, preset: str = DEFAULT_RINGS, angle_mode: str = DEFAULT_ANGLES,
@@ -655,8 +749,10 @@ class Context:
     def compare(self, row: int, ax: Axis, variants, region: Optional[Region] = None, size: int = COMPARE_REGION_PX,
                 angle_mode: str = DEFAULT_ANGLES, check: Check = _no_check, metrics: bool = True
                 ) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Сравнение вариантов ``[{rings, smoothing}]`` на одном фрагменте: (k, th, tw) float32 и сведения для X-Meta
-        (варианты нормализованы, метрики — ``compare_metrics``).
+        """Сравнение вариантов ``[{rings, smoothing, denoise}]`` на одном фрагменте: (k, th, tw) float32 и сведения
+        для X-Meta (варианты нормализованы, у TV — с весом и σ; метрики — ``compare_metrics``). Вариант с TV — FBP
+        строк row ± tv.HALO во фрагменте с ореолом и TV (как ``slice``); его шум — по половинам углов, каждая с TV
+        весом ×√2 (шум половины в √2 раз больше).
 
         Выравнивание — один блок строк row ± (наибольший ореол вариантов); кольца — раз на пресет (на строках под
         наибольший ореол его вариантов); каждый вариант — фильтр блока и FBP только фрагмента. region=None —
@@ -670,10 +766,12 @@ class Context:
         reg = check_region(region, w) if region is not None else None
         r = self.crop_row(row)
         shift_x, alfa = axis_mod.to_crop_params(ax, self.roi)
-        halos = [smoothing.halo_rows(v['smoothing']) for v in vs]
+        hts = [tv.HALO if v['denoise'] else 0 for v in vs]
+        halos = [smoothing.halo_rows(v['smoothing']) + ht for v, ht in zip(vs, hts)]
         t: Dict[str, Any] = {'band_s': 0.0, 'band_cached': True, 'align_s': 0.0, 'rings_s': 0.0, 'smooth_s': 0.0,
                              'fbp_s': 0.0, 'block_rows': 0, 'ring_rows': 0}
         lines: List[Any] = [None] * len(vs)
+        centers: List[int] = [0] * len(vs)
         aligned, arows = None, None
         for preset in dict.fromkeys(v['rings'] for v in vs):          # пресеты в порядке появления
             idx = [j for j, v in enumerate(vs) if v['rings'] == preset]
@@ -698,30 +796,49 @@ class Context:
             for j in idx:
                 check()
                 t0 = time.time()
-                lines[j] = smoothing.apply(block, vs[j]['smoothing'], keep=(i, i + 1), xp=self.xp)
+                a, b = max(0, i - hts[j]), min(block.shape[0], i + hts[j] + 1)
+                lines[j] = smoothing.apply(block, vs[j]['smoothing'], keep=(a, b), xp=self.xp)
+                centers[j] = i - a
                 t['smooth_s'] = round(t['smooth_s'] + time.time() - t0, 4)
             del block
         del aligned
+        center_line = [ls[c:c + 1] for ls, c in zip(lines, centers)]
+        for j, v in enumerate(vs):
+            if v['denoise']:
+                check()
+                vs[j] = dict(v, denoise=self.tv_params(v['denoise'], row, ax, v['rings'], v['smoothing'], angle_mode,
+                                                       center_line[j], check))
         check()
         t0 = time.time()
         full0 = None
         if reg is None:
-            full0 = self._fbp(lines[0], angle_mode, (0, 0, w, w))[0]
+            full0 = self._fbp(center_line[0], angle_mode, (0, 0, w, w))[0]
             reg = structured_region(full0, side=size)
         x0, y0, x1, y1 = reg
         frags = []
-        for j, line in enumerate(lines):
+        for j, v in enumerate(vs):
             check()
-            frag = full0[y0:y1, x0:x1] if j == 0 and full0 is not None else self._fbp(line, angle_mode, reg)[0]
+            if v['denoise']:
+                frag = self._tv_fragment(lines[j], centers[j], v['denoise'], angle_mode, reg)
+            elif j == 0 and full0 is not None:
+                frag = full0[y0:y1, x0:x1]
+            else:
+                frag = self._fbp(center_line[j], angle_mode, reg)[0]
             frags.append(np.ascontiguousarray(frag, dtype='float32'))
         t['fbp_s'] = round(time.time() - t0, 4)
         values = None
         if metrics:
             t0 = time.time()
             noises = []
-            for line in lines:
+            ev, od = noise_mod.split_halves(self.prep.angles, angle_mode)
+            for j, v in enumerate(vs):
                 check()
-                noises.append(noise_mod.noise_sigma(*self._fbp_halves(line, angle_mode, reg)))
+                if v['denoise']:
+                    halves = [self._tv_fragment(lines[j], centers[j], v['denoise'], angle_mode, reg, idx=ix,
+                                                weight_scale=math.sqrt(2.0)) for ix in (ev, od)]
+                else:
+                    halves = self._fbp_halves(center_line[j], angle_mode, reg)
+                noises.append(noise_mod.noise_sigma(*halves))
             t['noise_s'] = round(time.time() - t0, 4)
             values = compare_metrics(frags, noises)
         t['total_s'] = round(time.time() - t_start, 4)
@@ -948,6 +1065,16 @@ def estimate(r: recipe_mod.Recipe, scan: ScanInfo, ctx: Optional[Context] = None
     ореолом сглаживания рецепта — ``ring_rows_factor``, масштабированных на ширину рецепта как w²) и подготовки
     сессии (``prepare_s`` — задача повторяет опорные кадры и сдвиги образца); без того и другого — time: None."""
     est = pipeline.estimate(r, scan)
+    vi = est.get('denoise_voxel_iterations') or 0
+    if vi:
+        # TV: секунд на воксель-итерацию — по прошлым задачам, иначе по превью, иначе по умолчанию
+        if rate and rate.get('tv_s_per_voxel_iter'):
+            k, src = rate['tv_s_per_voxel_iter'], 'jobs'
+        elif ctx is not None and ctx.tv_rate:
+            k, src = ctx.tv_rate, 'preview'
+        else:
+            k, src = TV_DEFAULT_S_PER_VOXEL_ITER, 'default'
+        est['denoise'] = {'voxel_iterations': int(vi), 's': vi * k, 'source': src}
     n_slices = int(est['volume_shape'][0])
     w = r.fov.width
     if rate:

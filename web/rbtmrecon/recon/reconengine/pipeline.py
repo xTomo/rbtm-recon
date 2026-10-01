@@ -16,6 +16,10 @@
 ``smoothing.halo_rows``). Поэтому при включённом сглаживании слой [a, b) выравнивается и чистится от колец с ореолом
 (a − h, b + h) ∩ [0, H) (ореол входит в запас входных строк), затем ``smoothing.apply`` оставляет строки [a, b) — они
 точно совпадают с фильтром по всему кропу (за краями кропа — отражение). Выключено — слой как раньше, без ореола.
+
+Шумоподавление объёма (блок ``denoise``, модуль :mod:`tv`) — TV 3D после FBP: срезы идут в ``tv.DenoiseWriter``,
+который копит их и отдаёт писателю объёма порциями после TV по порции ± ``tv.HALO`` срезов (на GPU плитками по
+y, x). Выборка статистики объёма — после TV.
 """
 from __future__ import annotations
 
@@ -30,7 +34,7 @@ import numpy as np
 
 from . import __version__ as ENGINE_VERSION
 from . import axis as axis_mod
-from . import data, fbp, gpu, outputs, preprocess, rings, smoothing
+from . import data, fbp, gpu, outputs, preprocess, rings, smoothing, tv
 from . import motion as motion_mod
 from . import recipe as recipe_mod
 from .model import Axis, CropData, ProgressFn, ScanInfo, check_cancel, no_progress
@@ -383,7 +387,19 @@ def estimate(r: recipe_mod.Recipe, scan: ScanInfo) -> Dict[str, Any]:
         'n_data_frames': n_data,
         'n_angles_used': int(fbp.select_angles(data_frames(scan)[1], r.recon['angles']).sum()),
         'halo_rows': hs, 'ring_rows_factor': factor,
+        'denoise_voxel_iterations': _denoise_work(r, shape),
     }
+
+
+def _denoise_work(r: recipe_mod.Recipe, shape) -> int:
+    """Воксель-итераций TV с учётом ореолов (по z — порции tv.chunk_slices, по y, x — грубо +10 %); 0 — выключено."""
+    dn = tv.resolve(r.denoise, need_weight=False)
+    if not dn:
+        return 0
+    nz, ny, nx = (int(s) for s in shape)
+    chunk = tv.chunk_slices(ny, nx)
+    z_factor = min(nz, chunk + 2 * tv.HALO) / float(min(nz, chunk))
+    return int(nz * ny * nx * dn['iterations'] * z_factor * 1.1)
 
 
 # --- запуск ------------------------------------------------------------------------------------------------
@@ -444,6 +460,7 @@ def run_recipe(r: recipe_mod.Recipe, scan_path: str, out_dir: str, cache_dir: st
     m = margin(prep, w)
     sp = smoothing.resolve(r.smoothing)
     hs = smoothing.halo_rows(sp)
+    dn = tv.resolve(r.denoise)
     rows = int(slab_rows or auto_slab_rows(len(prep.idx), w, m, xp, halo=hs))
     z0, z1 = int(r.recon['slices'][0]), int(r.recon['slices'][1])
     c0, c1 = z0 - r.fov.y0, z1 - r.fov.y0                       # строки кропа
@@ -461,6 +478,14 @@ def run_recipe(r: recipe_mod.Recipe, scan_path: str, out_dir: str, cache_dir: st
 
     writer = outputs.VolumeWriter(out_dir, base, shape, pixel_size, binning=r.outputs.get('binning', [4]))
     samples: List[np.ndarray] = []
+    sink = writer
+    if dn:
+        def keep_sample(z0: int, res: np.ndarray) -> None:
+            samples.append(res[res.shape[0] // 2, ::4, ::4].copy())
+        sink = tv.DenoiseWriter(writer, dn, nz=shape[0], chunk=tv.chunk_slices(shape[1], shape[2]), xp=xp,
+                                on_chunk=keep_sample, mask=circle)
+        logger.info('run_recipe %s: TV 3D, вес %.4g (%.2gσ), %d итераций, порции по %d срезов', scan.exp_id,
+                    dn['weight'], dn['strength'], dn['iterations'], sink.chunk)
     try:
         a = c0
         while a < c1:
@@ -488,20 +513,23 @@ def run_recipe(r: recipe_mod.Recipe, scan_path: str, out_dir: str, cache_dir: st
                 rec = rec[:, wy0:wy1, wx0:wx1]
                 if circle is not None:
                     rec = np.where(circle[None], rec, np.float32(0))
-                writer.write(a - c0 + c, rec)
-                if c == 0:
+                sink.write(a - c0 + c, rec)
+                if c == 0 and not dn:
                     samples.append(rec[rec.shape[0] // 2, ::4, ::4].copy())
             del sino
             progress(_P_PREPARE + (1 - _P_PREPARE) * (b - c0) / (c1 - c0), 'recon')
             a = b
-        files = writer.close()
+        files = sink.close()
     except BaseException:
-        writer.abort()
+        sink.abort()
         raise
     finally:
         if gpu.is_gpu(xp):
             gpu.free_memory()
     timings['recon_s'] = time.time() - t0
+    if dn:
+        timings['denoise_s'] = round(sink.seconds, 3)
+        timings['denoise_voxel_iterations'] = sink.voxel_iterations
     timings['total_s'] = time.time() - t_start
 
     rd = recipe_mod.to_dict(resolved)

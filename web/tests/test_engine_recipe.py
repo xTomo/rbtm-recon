@@ -324,7 +324,7 @@ def test_transferable_part_contains_only_portable_fields():
     r.smoothing = dict(smoothing.default_block(), sigma=1.2)
     part = recipe_mod.transferable_part(r)
 
-    assert set(part.keys()) == {'normalization', 'rings', 'smoothing', 'outputs', 'recon', 'empty_skip_first'}
+    assert set(part.keys()) == {'normalization', 'rings', 'smoothing', 'denoise', 'outputs', 'recon', 'empty_skip_first'}
     assert part['rings']['preset'] == 'strong'
     assert part['smoothing']['sigma'] == 1.2
     assert part['outputs']['binning'] == [2, 4]
@@ -419,3 +419,26 @@ def test_from_rec_config_ini_roi_outside_frame_raises(tmp_path):
     _write_ini(ini_path, {'x_min': 0, 'x_max': 100, 'y_min': 0, 'y_max': 10})
     with pytest.raises(ValueError):
         recipe_mod.from_rec_config_ini(ini_path, 'e', 'f', frame_height=10, frame_width=10)
+
+
+# --- denoise (TV после FBP) ------------------------------------------------------------------------------------
+
+def test_denoise_block_default_roundtrip_hash_and_errors(tmp_path):
+    from reconengine import tv
+    r = make_default()
+    d = recipe_mod.to_dict(r)
+    assert d['denoise'] == tv.default_block()
+    h_off = recipe_mod.sha256(r)
+    old = dict(d)
+    del old['denoise']                                                        # рецепт до блока — тот же хэш
+    assert recipe_mod.from_dict(old).denoise == tv.default_block()
+    assert recipe_mod.sha256(recipe_mod.from_dict(old)) == h_off
+    on = dict(d, denoise={'method': 'tv', 'strength': 2.0, 'weight': 0.05, 'iterations': 50})
+    r_on = recipe_mod.from_dict(on)
+    assert recipe_mod.sha256(r_on) != h_off
+    recipe_mod.save(r_on, tmp_path / 'r.json')
+    assert recipe_mod.load(tmp_path / 'r.json').denoise == on['denoise']
+    for bad in ({'method': 'tv'}, {'method': 'nlm', 'weight': 1}, {'method': 'tv', 'weight': -1},
+                {'method': 'tv', 'weight': 1, 'junk': 1}, {'method': 3}, 'tv'):
+        with pytest.raises(ValueError):
+            recipe_mod.from_dict(dict(d, denoise=bad))

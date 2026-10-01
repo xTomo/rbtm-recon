@@ -238,6 +238,33 @@ def test_run_recipe_with_smoothing_equals_full_crop_filter(tmp_path, per_row_rin
     assert 'halo_rows' not in off.result['timings']
 
 
+def test_run_recipe_with_tv_equals_tv_of_volume(tmp_path, per_row_rings):
+    """Задача с TV: объём = TV 3D (тот же вес и итерации) объёма без TV, вне круга — 0; статистика и время TV в
+    result.json; оценка считает воксель-итерации."""
+    from reconengine import tv
+    ss = simple_scan(noise=1.0)
+    path = write_h5(ss, tmp_path / 'scan.h5')
+    scan = data.open_scan(path)
+    roi = ROI(3, 69, 2, 38)
+    r = make_recipe(scan, roi, Axis(ss.center_x, ss.y_ref, ss.tilt_deg))
+    r.recon['slices'] = [roi.y0, roi.y0 + 30]
+    r.recon['xy_roi'] = {'kind': 'circle', 'cx': 33, 'cy': 33, 'r': 30}
+    off = pipeline.run_recipe(r, path, str(tmp_path / 'off'), str(tmp_path / 'cache'), backend='cpu', slab_rows=4)
+    shape = off.result['volume']['shape']
+    v_off = np.fromfile(os.path.join(off.out_dir, off.result['volume']['file']), '<f4').reshape(shape)
+    scale = float(v_off.std())
+    r.denoise = {'method': 'tv', 'strength': 2.0, 'weight': 0.5 * scale, 'iterations': 40}
+    assert pipeline.estimate(r, scan)['denoise_voxel_iterations'] > 40 * int(np.prod(shape))
+    res = pipeline.run_recipe(r, path, str(tmp_path / 'tv'), str(tmp_path / 'cache'), backend='cpu', slab_rows=4)
+    v = np.fromfile(os.path.join(res.out_dir, res.result['volume']['file']), '<f4').reshape(shape)
+    _, circle = pipeline.output_window(r)
+    ref = np.where(circle[None], tv.denoise(v_off, 0.5 * scale, 40, xp=np), 0)
+    assert np.abs(v - ref).max() < 0.03 * scale                       # порции по z с ореолом ≈ целиком
+    assert np.abs(v - v_off).max() > 0.1 * scale and np.all(v[:, ~circle] == 0)
+    assert res.result['timings']['denoise_s'] >= 0 and res.recipe.denoise == r.denoise
+    assert recipe_mod.load(tmp_path / 'tv' / 'recipe.json').denoise == r.denoise
+
+
 def test_axis_is_invariant_to_roi_shift(tmp_path):
     """Одна и та же ось в координатах детектора при сдвинутом ROI даёт тот же срез."""
     ss = simple_scan(tilt_deg=0.0)
