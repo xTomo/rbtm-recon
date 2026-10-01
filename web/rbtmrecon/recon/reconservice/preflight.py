@@ -8,7 +8,8 @@
 - версии библиотек (numpy, scipy, scikit-image, h5py, cupy, astra, flask, gunicorn, pymongo);
 - настройки: токен задан, каталоги /exp_src, /fast, /storage есть, в /fast/studio и /storage можно писать
   (временный файл создаётся и удаляется);
-- GPU сессии (CUDA_VISIBLE_DEVICES процесса): cupy, ядра cupyx (медиана — кольца), БПФ, astra FBP_CUDA;
+- GPU сессии (CUDA_VISIBLE_DEVICES процесса): cupy, ядра cupyx (медиана — кольца), БПФ, astra FBP_CUDA, ядра TV 3D
+  (компиляция на этом GPU, совпадение с CPU, скорость в нс на воксель-итерацию — для оценки времени TV);
 - GPU задач (RECON_JOB_GPU) — то же в отдельном процессе, как ``python -m reconengine run``;
 - Mongo (``autotom.jobs``) и storage (``storage/experiments/get`` — только чтение);
 - ``--exp <id>``: исходный HDF5 скана, формат v2, углы, размер пикселя с источником;
@@ -96,7 +97,7 @@ def check_config(cfg: Config) -> None:
             '{} / {}'.format(os.environ.get('CUDA_VISIBLE_DEVICES', 'не задан'), cfg.job_gpu))
 
 
-#: проверка одного GPU: cupy, cupyx-медиана (кольца), БПФ (сглаживание, быстрый сдвиг центра), astra FBP_CUDA
+#: проверка одного GPU: cupy, cupyx-медиана (кольца), БПФ (сглаживание, быстрый сдвиг центра), astra FBP_CUDA, TV 3D
 _GPU_PROBE = r'''
 import time, numpy as np
 t = time.time()
@@ -116,8 +117,19 @@ sino = np.random.random((1, 90, 128)).astype('float32')
 rec = fbp.recon_rows(sino, np.arange(0, 180, 2.0), 1.0, backend='astra')
 part = fbp.recon_rows(sino, np.arange(0, 180, 2.0), 1.0, backend='astra', region=(10, 20, 60, 70))
 assert rec.shape == (1, 128, 128) and np.abs(part[0] - rec[0, 20:70, 10:60]).max() < 1e-3 * np.ptp(rec)
-print('{} · свободно {:.1f} из {:.1f} ГБ · cupy+cupyx+БПФ+astra FBP за {:.1f} с'.format(
-    name, free / 2**30, total / 2**30, time.time() - t))
+from reconengine import tv
+v = np.random.default_rng(0).standard_normal((8, 64, 80)).astype('float32')
+d = np.abs(cp.asnumpy(tv.denoise(cp.asarray(v), 0.3, 30, xp=cp)) - tv.denoise(v, 0.3, 30, xp=np)).max()
+assert d < 1e-4, 'TV на GPU не совпадает с CPU: {}'.format(d)
+big = cp.random.standard_normal((16, 1024, 1024), dtype=cp.float32)
+tv.denoise(big, 0.1, 2, xp=cp)
+cp.cuda.Device().synchronize()
+t1 = time.time()
+tv.denoise(big, 0.1, 20, xp=cp)
+cp.cuda.Device().synchronize()
+tv_ns = (time.time() - t1) / big.size / 20 * 1e9
+print('{} · свободно {:.1f} из {:.1f} ГБ · cupy+cupyx+БПФ+astra FBP+TV за {:.1f} с · TV {:.2f} нс/воксель/итер'.format(
+    name, free / 2**30, total / 2**30, time.time() - t, tv_ns))
 '''
 
 
