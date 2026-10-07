@@ -176,3 +176,85 @@ def test_recipes_current_and_history(service):
     # запуск в истории без рецепта — 404
     os.remove(os.path.join(cfg.reconstruction_dir(EXP), publish.HISTORY, 'run1', publish.RECIPE))
     assert client.get('/results/{}/recipes/run1'.format(EXP), headers=HEADERS).status_code == 404
+
+
+def test_view3d_factor():
+    rv = __import__('reconservice.results', fromlist=['x'])
+    assert rv.view3d_factor((100, 100, 100), 320 ** 3, 1024) == 1
+    assert rv.view3d_factor((742, 804, 804), 320 ** 3, 1024) == 3          # 248×268×268 ≤ 320³
+    assert rv.view3d_factor((25, 804, 804), 320 ** 3, 1024) == 1           # плоский объём — без уменьшения
+    assert rv.view3d_factor((25, 3000, 3000), 320 ** 3, 1024) == 3         # сторона ≤ 1024
+    assert rv.view3d_factor((25, 3000, 3000), 320 ** 3, 4096) == 2         # 13×1500×1500 ≤ 320³
+
+
+def test_block_mean_partial_blocks_and_nan(tmp_path):
+    from reconservice import results as rv
+    rng = np.random.default_rng(1)
+    vol = rng.normal(size=(7, 5, 8)).astype('<f4')
+    vol[0, 0, 0] = np.nan
+    vol[6, 3:, 6:] = np.nan                                               # весь угловой куб — NaN
+    path = str(tmp_path / 'v.raw')
+    vol.tofile(path)
+    f = 3
+    got = rv.block_mean(path, vol.shape, f)
+    assert got.shape == (3, 2, 3)
+    for k in range(3):
+        for j in range(2):
+            for i in range(3):
+                block = vol[k * f:(k + 1) * f, j * f:(j + 1) * f, i * f:(i + 1) * f]
+                if np.isfinite(block).any():
+                    assert got[k, j, i] == pytest.approx(np.nanmean(block.astype('f8')), rel=1e-6), (k, j, i)
+                else:
+                    assert np.isnan(got[k, j, i])
+    assert np.isnan(got[2, 1, 2])
+    assert np.array_equal(rv.block_mean(path, vol.shape, 1), vol, equal_nan=True)
+
+
+def test_volume3d(service, monkeypatch):
+    """Объём 3D-вида: копия, квантованная в uint8 по окну результата; второй запрос — из кэша; новая публикация
+    кэш сбрасывает (и прежний файл удаляется)."""
+    from reconservice import results as rv
+    client, cfg, recipe, doc = service
+    vol, b = binned_volume(cfg, doc)
+    lo, hi = doc['stats']['p0_1'], doc['stats']['p99_9']
+    r = client.get('/results/{}/volume3d'.format(EXP), headers=HEADERS)
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert r.headers['X-Dtype'] == 'uint8'
+    arr, meta = decode(r)
+    assert arr.shape == vol.shape
+    assert np.abs(arr - np.clip(vol, lo, hi)).max() <= (hi - lo) / 255 * 0.51 + 1e-6
+    assert meta['binning'] == 4 and meta['source_binning'] == 4 and meta['downsample'] == 1
+    assert meta['source_shape'] == b['shape'] and meta['run_id'] == 'run1'
+    assert meta['voxel_mm'] == pytest.approx(0.009 * 4) and meta['window'] == [lo, hi]
+    files = sorted(os.listdir(cfg.view3d_dir(EXP)))
+    assert files == ['vol-run1-f1.json', 'vol-run1-f1.u8']
+
+    def boom(*a, **k):
+        raise AssertionError('должно читаться из кэша')
+    monkeypatch.setattr(rv, 'block_mean', boom)
+    r2 = client.get('/results/{}/volume3d'.format(EXP), headers=HEADERS)
+    assert r2.status_code == 200 and r2.get_data() == r.get_data()
+    monkeypatch.undo()
+    monkeypatch.setenv('RECON_ENGINE_CPU', '1')
+
+    run2, _ = engine_run(cfg, EXP, dict(recipe, axis=dict(recipe['axis'], center_x=recipe['axis']['center_x'] + 2)),
+                         'run2', name='обр 1')
+    doc2 = publish.publish(cfg, EXP, run2)
+    r3 = client.get('/results/{}/volume3d'.format(EXP), headers=HEADERS)
+    arr3, meta3 = decode(r3)
+    vol2, _ = binned_volume(cfg, doc2)
+    lo2, hi2 = doc2['stats']['p0_1'], doc2['stats']['p99_9']
+    assert meta3['run_id'] == 'run2'
+    assert np.abs(arr3 - np.clip(vol2, lo2, hi2)).max() <= (hi2 - lo2) / 255 * 0.51 + 1e-6
+    assert sorted(os.listdir(cfg.view3d_dir(EXP))) == ['vol-run2-f1.json', 'vol-run2-f1.u8']
+
+
+def test_volume3d_errors(service):
+    client, cfg, _, doc = service
+    for q in ('max_voxels=10', 'max_voxels={}'.format(600 ** 3), 'max_side=8', 'max_side=abc'):
+        st = client.get('/results/{}/volume3d?{}'.format(EXP, q), headers=HEADERS).status_code
+        assert st == (200 if q == 'max_side=abc' else 400), q          # нечисло — как не заданный (type=int)
+    assert client.get('/results/none/volume3d', headers=HEADERS).status_code == 404
+    assert client.get('/results/{}/volume3d'.format(EXP)).status_code == 403
+    os.remove(os.path.join(cfg.reconstruction_dir(EXP), doc['binned'][0]['raw']))
+    assert client.get('/results/{}/volume3d'.format(EXP), headers=HEADERS).status_code == 404

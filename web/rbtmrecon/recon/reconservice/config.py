@@ -85,6 +85,10 @@ class Config:
     def cache_dir(self, exp_id: str) -> str:
         return os.path.join(self.fast_exp_dir(exp_id), 'cache')
 
+    def view3d_dir(self, exp_id: str) -> str:
+        """Кэш объёма 3D-вида результата (``results.volume3d``) — вне ``cache/``: предел кэша кропов его не считает."""
+        return os.path.join(self.fast_exp_dir(exp_id), 'view3d')
+
     def runs_dir(self, exp_id: str) -> str:
         return os.path.join(self.fast_exp_dir(exp_id), 'runs')
 
