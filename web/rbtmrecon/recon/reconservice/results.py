@@ -5,6 +5,7 @@
 | GET /results/<id>                     | JSON: опубликованный ``result.json``, история (``history/*/result.json``: run_id, created, recipe_sha256), список доступных файлов; 404 — результата движка нет |
 | GET /results/<id>/slice?axis=z|y|x&i=&max_px= | binary uint16: срез копии с наибольшим биннингом из ``result.json['binned']`` (memmap, без чтения объёма целиком); окно квантования — ``stats.p0_1``/``p99_9`` результата; X-Meta: axis, i, n, binning, voxel_mm |
 | GET /results/<id>/file/<name>         | файл потоком (as_attachment): только ``recipe.json``, ``result.json`` и файлы копий с биннингом (raw, .size, .hx) из ``result.json``; полный объём через сервис не отдаётся (он доступен как раньше, через ``/reconstruct/static``) |
+| GET /results/<id>/recipes/<run_id>    | JSON: рецепт запуска — ``current`` (опубликованный) или из истории (``history/<run_id>/recipe.json``): ``{exp_id, run_id, created, recipe_sha256, current, recipe}``; ``?download=1`` — тот же ``recipe.json`` файлом (``<id>.<run_id>.recipe.json``); 404 — запуска или его рецепта нет |
 
 ``GET /results/<id>``: ``{exp_id, dir, result, history: [{run_id, created, recipe_sha256, has_recipe}] (новые первыми),
 files: [{name, size}], full: [{name, rel, size}]}``; ``dir`` — каталог результата в хранилище (путь к полному объёму —
@@ -170,6 +171,41 @@ def result_slice(exp_id):
     meta = {'axis': axis, 'i': i, 'n': n, 'binning': factor, 'shape': list(shape),
             'voxel_mm': float(voxel) * factor if voxel else None, 'window': [lo, hi]}
     return binary.array_response(read_slice(path, shape, axis, i), lo=lo, hi=hi, meta=meta, max_px=max_px)
+
+
+def run_files(cfg: Config, exp_id: str, run_id: str) -> Tuple[str, Dict[str, Any], bool]:
+    """Рецепт запуска: (путь к recipe.json, его result.json, опубликован ли он сейчас). run_id — 'current' или id из
+    истории (каталог history/<run_id>); опубликованный запуск находится и по своему id. FileNotFoundError — нет."""
+    dest = cfg.reconstruction_dir(exp_id)
+    current = publish.read_published(cfg, exp_id)
+    if run_id == 'current' or (current is not None and current.get('run_id') == run_id):
+        if current is None:
+            raise FileNotFoundError('результата реконструкции движком для {} нет'.format(exp_id))
+        return os.path.join(dest, publish.RECIPE), current, True
+    if not publish.safe_run_id(run_id):
+        raise ValueError('некорректный run_id')
+    run_dir = os.path.join(dest, publish.HISTORY, run_id)
+    try:
+        doc = publish.read_json(os.path.join(run_dir, publish.RESULT))
+    except (OSError, ValueError):
+        raise FileNotFoundError('запуска {} в истории {} нет'.format(run_id, exp_id)) from None
+    return os.path.join(run_dir, publish.RECIPE), doc, False
+
+
+@bp.get('/<exp_id>/recipes/<run_id>')
+def result_recipe(exp_id, run_id):
+    cfg = _cfg()
+    exp_id = auth.valid_exp_id(exp_id)
+    path, doc, is_current = run_files(cfg, exp_id, run_id)
+    if not os.path.isfile(path):
+        raise FileNotFoundError('у запуска {} нет рецепта'.format(run_id))
+    rid = doc.get('run_id') or run_id
+    if request.args.get('download') in ('1', 'true', 'yes'):
+        name = '{}.{}.recipe.json'.format(exp_id, rid if publish.safe_run_id(rid) else 'current')
+        return send_file(path, as_attachment=True, download_name=name, conditional=True, max_age=0)
+    return jsonify({'exp_id': exp_id, 'run_id': rid, 'created': doc.get('created'),
+                    'recipe_sha256': doc.get('recipe_sha256'), 'current': is_current,
+                    'recipe': publish.read_json(path)})
 
 
 @bp.get('/<exp_id>/file/<name>')

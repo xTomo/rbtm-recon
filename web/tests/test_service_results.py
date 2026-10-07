@@ -142,3 +142,37 @@ def test_files_whitelist(service):
         r, _ = get(client, url.format(EXP))
         assert r.status_code in (400, 404), url
     assert get(client, '/results/none/file/result.json')[0].status_code == 404
+
+
+def test_recipes_current_and_history(service):
+    """Рецепт опубликованного запуска и прежних (history/<run_id>) — JSON и файлом; ошибки — 404/400."""
+    client, cfg, recipe, doc = service
+    r = client.get('/results/{}/recipes/current'.format(EXP), headers=HEADERS)
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body['run_id'] == 'run1' and body['current'] is True and body['recipe_sha256'] == doc['recipe_sha256']
+    assert body['recipe']['input']['exp_id'] == EXP and body['recipe']['recon'] == recipe['recon']
+    # опубликованный запуск находится и по своему id
+    assert client.get('/results/{}/recipes/run1'.format(EXP), headers=HEADERS).get_json()['current'] is True
+
+    run2, _ = engine_run(cfg, EXP, dict(recipe, recon=dict(recipe['recon'], slices=[8, 32])), 'run2', name='обр 1')
+    publish.publish(cfg, EXP, run2)
+    cur = client.get('/results/{}/recipes/current'.format(EXP), headers=HEADERS).get_json()
+    old = client.get('/results/{}/recipes/run1'.format(EXP), headers=HEADERS).get_json()
+    assert cur['run_id'] == 'run2' and cur['recipe']['recon']['slices'] == [8, 32]
+    assert old['run_id'] == 'run1' and old['current'] is False and old['recipe']['recon'] == recipe['recon']
+    assert old['recipe_sha256'] == doc['recipe_sha256']
+
+    r, data = get(client, '/results/{}/recipes/run1?download=1'.format(EXP))
+    assert r.status_code == 200 and 'attachment' in r.headers['Content-Disposition']
+    assert '{}.run1.recipe.json'.format(EXP) in r.headers['Content-Disposition']
+    assert json.loads(data) == old['recipe']
+
+    for url, code in (('/results/{}/recipes/nope', 404), ('/results/{}/recipes/..', (400, 404)),
+                      ('/results/{}/recipes/a%2F..%2Fb', (400, 404)), ('/results/none/recipes/current', 404)):
+        st = client.get(url.format(EXP), headers=HEADERS).status_code
+        assert st == code or (isinstance(code, tuple) and st in code), url
+    assert client.get('/results/{}/recipes/current'.format(EXP)).status_code == 403
+    # запуск в истории без рецепта — 404
+    os.remove(os.path.join(cfg.reconstruction_dir(EXP), publish.HISTORY, 'run1', publish.RECIPE))
+    assert client.get('/results/{}/recipes/run1'.format(EXP), headers=HEADERS).status_code == 404
