@@ -67,6 +67,32 @@ _EPS = 1e-3
 _MEM_INFOS, _MEM_OVERVIEWS, _MEM_SINOS = 64, 4, 8
 #: документ storage: удачный ответ живёт 5 мин, неудача — 30 с (не ждать таймаут на каждом запросе)
 _DOC_TTL_S, _DOC_FAIL_TTL_S = 300.0, 30.0
+#: идущая съёмка: документ не завершён и HDF5 менялся не раньше чем столько секунд назад (оборванный без сообщения
+#: о завершении эксперимент через полчаса тишины снова доступен)
+ACQ_RECENT_S = 1800.0
+#: пока съёмка идёт, документ перечитывается не реже — чтобы студия открылась вскоре после завершения
+ACQ_DOC_MAX_AGE_S = 10.0
+
+
+class Acquiring(Exception):
+    """Съёмка эксперимента идёт — его HDF5 не открываем (409 acquiring).
+
+    Хранилище открывает HDF5 на запись для каждого кадра (``rbtm-storage/storage/hdf5_v2.py`` add_frame_v2) и
+    защищается своим замком-файлом ``.lock``, которого читатели снаружи не видят; блокировка файла самой HDF5
+    (по умолчанию с 1.10) при открытом здесь чтении может сорвать запись кадра. Кроме того, смещения кусков,
+    прочитанные в начале, устаревают при дозаписи."""
+
+
+def is_acquiring(doc: Optional[Dict[str, Any]], age_s: float) -> bool:
+    """Идёт ли съёмка: документ storage (или None) и сколько секунд назад менялся HDF5.
+    Документа нет (storage недоступен или эксперимента в нём нет) — нет: кадры в HDF5 пишет только storage.
+    Завершённый (``finished``) или остановленный с ошибкой (``stopped_with_error``) — нет; документ без поля
+    ``finished`` (старые эксперименты) — нет; не завершённый — да, если файл менялся за ``ACQ_RECENT_S``."""
+    if doc is None:
+        return False
+    if doc.get('finished') or doc.get('stopped_with_error') or 'finished' not in doc:
+        return False
+    return age_s < ACQ_RECENT_S
 _STORAGE_TIMEOUT_S = 5
 _NPZ_FORMAT = 'rbtm-recon-overview/1'
 
@@ -160,11 +186,24 @@ class ScanRegistry:
     # --- скан ----------------------------------------------------------------------------------------------
 
     def path(self, exp_id: str) -> str:
-        """Путь к исходному HDF5; FileNotFoundError, если файла нет."""
+        """Путь к исходному HDF5; FileNotFoundError, если файла нет; Acquiring, если съёмка ещё идёт. Через этот
+        метод к HDF5 ходят все: сведения, обзор, синограмма, загрузка области, предзагрузка, задачи."""
         p = self.cfg.scan_path(exp_id)
         if not os.path.isfile(p):
             raise FileNotFoundError('скан {} не найден'.format(exp_id))
+        self.check_not_acquiring(exp_id, p)
         return p
+
+    def check_not_acquiring(self, exp_id: str, p: str) -> None:
+        """Acquiring, если съёмка идёт (см. is_acquiring). Время файла — os.stat (файл не открывается); документ
+        storage нужен, только если файл менялся недавно."""
+        age = time.time() - os.stat(p).st_mtime
+        if age >= ACQ_RECENT_S:
+            return
+        doc, err = self._storage_doc(exp_id, max_age_s=ACQ_DOC_MAX_AGE_S)
+        if is_acquiring(None if err else doc, age):
+            raise Acquiring('съёмка эксперимента {} ещё идёт (файл менялся {:.0f} с назад) — студия откроет скан '
+                            'после завершения'.format(exp_id, age))
 
     def info(self, exp_id: str) -> ScanInfo:
         p = self.path(exp_id)
@@ -310,14 +349,18 @@ class ScanRegistry:
 
     # --- размер пикселя ------------------------------------------------------------------------------------
 
-    def _storage_doc(self, exp_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-        """(документ эксперимента из storage или None, текст ошибки или None). Кэшируется (см. _DOC_TTL_S)."""
+    def _storage_doc(self, exp_id: str, max_age_s: Optional[float] = None
+                     ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """(документ эксперимента из storage или None, текст ошибки или None). Кэшируется (см. _DOC_TTL_S);
+        max_age_s — не старше (проверка идущей съёмки)."""
         def cached():
             with self._lock:
                 hit = self._docs.get(exp_id)
             if hit is None:
                 return None
             ttl = _DOC_TTL_S if hit[2] is None else _DOC_FAIL_TTL_S
+            if max_age_s is not None:
+                ttl = min(ttl, max_age_s)
             return hit if time.monotonic() - hit[0] < ttl else None
 
         hit = cached()

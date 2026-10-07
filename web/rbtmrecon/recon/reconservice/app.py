@@ -135,6 +135,12 @@ def _register_errors(app: Flask) -> None:
     def cancelled(e):
         return jsonify({'error': 'cancelled'}), 409
 
+    from .scans import Acquiring  # noqa: WPS433 — модуль тянет движок
+
+    @app.errorhandler(Acquiring)
+    def acquiring(e):
+        return jsonify({'error': 'acquiring', 'detail': str(e)}), 409
+
     @app.errorhandler(FileNotFoundError)
     def not_found(e):
         return jsonify({'error': str(e) or 'не найдено'}), 404

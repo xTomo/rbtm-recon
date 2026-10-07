@@ -274,3 +274,46 @@ def test_sinogram_cached(svc, monkeypatch):
     monkeypatch.setattr(data, 'ChunkSampler', None)             # повторный запрос не открывает HDF5
     r = client.get('/scans/exp1/sinogram?row=10&n=20', headers=HEADERS)
     assert r.status_code == 200
+
+
+# --- идущая съёмка: HDF5 не открываем --------------------------------------------------------------------------
+
+def test_is_acquiring_rule():
+    acq = scans_mod.is_acquiring
+    assert acq({'finished': False}, 5.0)
+    assert acq({'finished': False}, scans_mod.ACQ_RECENT_S - 1)
+    assert not acq({'finished': False}, scans_mod.ACQ_RECENT_S + 1)     # оборван без сообщения — через полчаса
+    assert not acq({'finished': True}, 5.0)
+    assert not acq({'finished': False, 'stopped_with_error': 'stop'}, 5.0)
+    assert not acq({'_id': 'x'}, 5.0)                                    # старые эксперименты без поля finished
+    assert not acq(None, 5.0)                                            # без документа storage не пишет
+
+
+def test_acquiring_scan_not_opened(svc, storage, monkeypatch):
+    """Не завершённый эксперимент со свежим HDF5: сведения, обзор, синограмма, предзагрузка — 409 acquiring, файл
+    не открывается; после завершения (документ перечитывается не реже ACQ_DOC_MAX_AGE_S) — 200."""
+    app, client, cfg, _ = svc
+    storage.doc = {'_id': 'exp1', 'finished': False}
+    opened = []
+    real_open = scans_mod.data.open_scan
+    monkeypatch.setattr(scans_mod.data, 'open_scan', lambda *a, **k: opened.append(a) or real_open(*a, **k))
+    for method, url in (('get', '/scans/exp1/info'), ('get', '/scans/exp1/overview'),
+                        ('get', '/scans/exp1/sinogram?row=10'), ('post', '/scans/exp1/prefetch')):
+        r = getattr(client, method)(url, headers=HEADERS)
+        assert r.status_code == 409, url
+        body = r.get_json()
+        assert body['error'] == 'acquiring' and 'ещё идёт' in body['detail']
+    assert opened == []
+    storage.doc = {'_id': 'exp1', 'finished': True}
+    registry(app)._docs.clear()                     # как будто прошло ACQ_DOC_MAX_AGE_S
+    assert client.get('/scans/exp1/info', headers=HEADERS).status_code == 200
+
+
+def test_acquiring_abandoned_or_old_file_opens(svc, storage):
+    """Не завершён, но файл не менялся дольше ACQ_RECENT_S (оборван без сообщения) — открывается."""
+    _, client, cfg, _ = svc
+    storage.doc = {'_id': 'exp1', 'finished': False}
+    p = cfg.scan_path('exp1')
+    old = time.time() - scans_mod.ACQ_RECENT_S - 60
+    os.utime(p, (old, old))
+    assert client.get('/scans/exp1/info', headers=HEADERS).status_code == 200
