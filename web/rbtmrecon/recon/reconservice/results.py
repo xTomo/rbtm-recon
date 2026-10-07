@@ -4,6 +4,7 @@
 |---------------------------------------|-------|
 | GET /results/<id>                     | JSON: опубликованный ``result.json``, история (``history/*/result.json``: run_id, created, recipe_sha256), список доступных файлов; 404 — результата движка нет |
 | GET /results/<id>/slice?axis=z|y|x&i=&max_px= | binary uint16: срез копии с наибольшим биннингом из ``result.json['binned']`` (memmap, без чтения объёма целиком); окно квантования — ``stats.p0_1``/``p99_9`` результата; X-Meta: axis, i, n, binning, voxel_mm |
+| GET /results/<id>/volume3d?max_voxels=&max_side= | binary uint8 (nz, ny, nx): копия с наибольшим биннингом, уменьшенная ещё в f раз (среднее по кубам f×f×f, неполные кубы у краёв — по тому, что есть) так, чтобы вокселей было ≤ max_voxels и сторона ≤ max_side; окно квантования — как у среза; кэш в ``cfg.view3d_dir(id)``; X-Meta: binning (полный: копия × f), source_binning, downsample (f), source_shape, voxel_mm, window, run_id |
 | GET /results/<id>/file/<name>         | файл потоком (as_attachment): только ``recipe.json``, ``result.json`` и файлы копий с биннингом (raw, .size, .hx) из ``result.json``; полный объём через сервис не отдаётся (он доступен как раньше, через ``/reconstruct/static``) |
 | GET /results/<id>/recipes/<run_id>    | JSON: рецепт запуска — ``current`` (опубликованный) или из истории (``history/<run_id>/recipe.json``): ``{exp_id, run_id, created, recipe_sha256, current, recipe}``; ``?download=1`` — тот же ``recipe.json`` файлом (``<id>.<run_id>.recipe.json``); 404 — запуска или его рецепта нет |
 
@@ -16,12 +17,23 @@ files: [{name, size}], full: [{name, rel, size}]}``; ``dir`` — каталог 
 Срез: ``axis`` по умолчанию ``z``, ``i`` — по умолчанию середина, ``max_px`` — по умолчанию ``cfg.preview_max_px``.
 Срез по z — ``(ny, nx)``, по y — ``(nz, nx)``, по x — ``(nz, ny)`` (в осях копии с биннингом). Файл отображается
 только на время запроса и закрывается сразу (на Windows открытое отображение не дало бы публикации заменить файл).
+
+Объём для 3D-вида (``volume3d``) рисуется в браузере (WebGL2, текстура целиком в видеопамяти), отсюда предел
+``max_voxels`` (по умолчанию 320³ ≈ 33 МБ uint8, как в сегментаторе Tomat) и ``max_side`` (браузер знает свой
+``MAX_3D_TEXTURE_SIZE``; по умолчанию 1024). Коэффициент f — наименьший целый, при котором оба предела выполнены,
+одинаковый по трём осям (воксель остаётся кубическим). Копия читается слоями по f плоскостей z через отображение в
+память; первое чтение копии ×4 большого скана (~2 ГБ) — десятки секунд на HDD, поэтому результат кэшируется
+файлом ``vol-<run_id>-f<f>.u8`` + ``.json`` (ключ — запуск, размер и mtime копии, окно); при записи новый файл
+заменяет прежние объёмы этого эксперимента.
 """
 from __future__ import annotations
 
+import json
+import logging
 import math
 import mmap
 import os
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -29,6 +41,8 @@ from flask import Blueprint, current_app, jsonify, request, send_file
 
 from . import auth, binary, publish
 from .config import Config
+
+logger = logging.getLogger(__name__)
 
 bp = Blueprint('results', __name__, url_prefix='/results')
 
@@ -171,6 +185,127 @@ def result_slice(exp_id):
     meta = {'axis': axis, 'i': i, 'n': n, 'binning': factor, 'shape': list(shape),
             'voxel_mm': float(voxel) * factor if voxel else None, 'window': [lo, hi]}
     return binary.array_response(read_slice(path, shape, axis, i), lo=lo, hi=hi, meta=meta, max_px=max_px)
+
+
+#: пределы 3D-вида по умолчанию и допустимые
+VIEW3D_MAX_VOXELS = 320 ** 3
+VIEW3D_MAX_VOXELS_LIMIT = 512 ** 3
+VIEW3D_MAX_SIDE = 1024
+
+
+def view3d_factor(shape: Tuple[int, int, int], max_voxels: int, max_side: int) -> int:
+    """Наименьший целый f ≥ 1: у объёма ceil(shape / f) вокселей ≤ max_voxels и каждая сторона ≤ max_side."""
+    f = max(1, max(int(math.ceil(s / float(max_side))) for s in shape))
+    while int(np.prod([-(-s // f) for s in shape])) > max_voxels:
+        f += 1
+    return f
+
+
+def block_mean(path: str, shape: Tuple[int, int, int], f: int) -> np.ndarray:
+    """Среднее по кубам f×f×f float32-объёма из raw-файла: (ceil(nz/f), ceil(ny/f), ceil(nx/f)), float32.
+    Неполные кубы у краёв усредняются по имеющимся вокселям; NaN — по остальным (весь куб NaN — NaN).
+    Читается слоями по f плоскостей z через отображение в память."""
+    count = int(np.prod(shape))
+    size = os.path.getsize(path)
+    if size != count * 4:
+        raise RuntimeError('{}: размер {} байт, по result.json ожидалось {}'.format(path, size, count * 4))
+    nz, ny, nx = shape
+    oz, oy, ox = -(-nz // f), -(-ny // f), -(-nx // f)
+    iy, ix = np.arange(0, ny, f), np.arange(0, nx, f)
+    out = np.empty((oz, oy, ox), dtype='float32')
+    with open(path, 'rb') as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+        vol = np.frombuffer(mm, dtype='<f4', count=count).reshape(shape)
+        for k in range(oz):
+            slab = np.array(vol[k * f:(k + 1) * f], dtype='float64')
+            good = np.isfinite(slab)
+            slab[~good] = 0.0
+            s = np.add.reduceat(np.add.reduceat(slab.sum(axis=0), iy, axis=0), ix, axis=1)
+            n = np.add.reduceat(np.add.reduceat(good.sum(axis=0, dtype='int64'), iy, axis=0), ix, axis=1)
+            with np.errstate(invalid='ignore', divide='ignore'):
+                out[k] = np.where(n > 0, s / np.maximum(n, 1), np.nan)
+        del vol                     # иначе mmap не закрыть (BufferError)
+    return out
+
+
+def quantize_u8(arr: np.ndarray, lo: Optional[float], hi: Optional[float]) -> Tuple[np.ndarray, float, float]:
+    """float → uint8 по окну [lo, hi] (без окна — персентили 0,1 и 99,9): (коды, scale, offset); NaN → 0."""
+    a = np.asarray(arr, dtype='float32')
+    if lo is None or hi is None:
+        finite = a[np.isfinite(a)]
+        lo, hi = (float(v) for v in np.percentile(finite, [0.1, 99.9])) if finite.size else (0.0, 1.0)
+    if not hi > lo:
+        hi = lo + 1.0
+    scale = (hi - lo) / 255.0
+    codes = np.clip(np.round((np.nan_to_num(a, nan=lo) - lo) / scale), 0, 255).astype('u1')
+    return codes, float(scale), float(lo)
+
+
+def _view3d_volume(cfg: Config, exp_id: str, doc: Dict[str, Any], b: Dict[str, Any], path: str, f: int
+                   ) -> Tuple[np.ndarray, float, float]:
+    """(коды uint8, scale, offset) 3D-вида — из кэша или посчитанные и записанные в кэш."""
+    shape = tuple(int(s) for s in b['shape'])
+    st = os.stat(path)
+    lo, hi = _window(doc)
+    run_id = str(doc.get('run_id') or 'current')
+    key = {'run_id': run_id, 'raw': b['raw'], 'size': st.st_size, 'mtime': st.st_mtime, 'shape': list(shape),
+           'factor': f, 'window': [lo, hi]}
+    cdir = cfg.view3d_dir(exp_id)
+    stem = 'vol-{}-f{}'.format(run_id if publish.safe_run_id(run_id) else 'current', f)
+    data_path, meta_path = os.path.join(cdir, stem + '.u8'), os.path.join(cdir, stem + '.json')
+    out_shape = tuple(-(-s // f) for s in shape)
+    try:
+        meta = publish.read_json(meta_path)
+        if meta.get('key') == key and os.path.getsize(data_path) == int(np.prod(out_shape)):
+            codes = np.fromfile(data_path, dtype='u1').reshape(out_shape)
+            return codes, float(meta['scale']), float(meta['offset'])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    codes, scale, offset = quantize_u8(block_mean(path, shape, f), lo, hi)
+    try:
+        os.makedirs(cdir, exist_ok=True)
+        tmp = '.tmp{}-{}'.format(os.getpid(), threading.get_ident())    # параллельный запрос пишет свой файл
+        codes.tofile(data_path + tmp)
+        with open(meta_path + tmp, 'w', encoding='utf-8') as fh:
+            json.dump({'key': key, 'scale': scale, 'offset': offset}, fh)
+        os.replace(data_path + tmp, data_path)
+        os.replace(meta_path + tmp, meta_path)
+        for name in os.listdir(cdir):                    # прежние объёмы этого эксперимента не нужны
+            if name.startswith('vol-') and '.tmp' not in name and name not in (stem + '.u8', stem + '.json'):
+                try:
+                    os.remove(os.path.join(cdir, name))
+                except OSError:
+                    pass
+    except OSError as exc:
+        logger.warning('3D-вид %s: кэш не записан: %s', exp_id, exc)
+    return codes, scale, offset
+
+
+@bp.get('/<exp_id>/volume3d')
+def result_volume3d(exp_id):
+    cfg = _cfg()
+    exp_id = auth.valid_exp_id(exp_id)
+    max_voxels = request.args.get('max_voxels', type=int) or VIEW3D_MAX_VOXELS
+    max_side = request.args.get('max_side', type=int) or VIEW3D_MAX_SIDE
+    if not 64 ** 3 <= max_voxels <= VIEW3D_MAX_VOXELS_LIMIT:
+        raise ValueError('max_voxels: от {} до {}'.format(64 ** 3, VIEW3D_MAX_VOXELS_LIMIT))
+    if not 64 <= max_side <= 4096:
+        raise ValueError('max_side: от 64 до 4096')
+    doc = load_result(cfg, exp_id)
+    b, path = largest_binned(cfg, exp_id, doc)
+    shape = tuple(int(s) for s in b['shape'])
+    if len(shape) != 3:
+        raise RuntimeError('в result.json некорректная форма копии: {}'.format(b.get('shape')))
+    f = view3d_factor(shape, max_voxels, max_side)
+    codes, scale, offset = _view3d_volume(cfg, exp_id, doc, b, path, f)
+    factor = int(b.get('factor', 1))
+    voxel = (doc.get('volume') or {}).get('voxel_mm')
+    meta = {'binning': factor * f, 'source_binning': factor, 'downsample': f, 'source_shape': list(shape),
+            'voxel_mm': float(voxel) * factor * f if voxel else None, 'window': list(_window(doc)),
+            'run_id': doc.get('run_id')}
+    resp = binary.array_response(codes, quantized=False, meta=meta)
+    resp.headers['X-Scale'] = repr(scale)
+    resp.headers['X-Offset'] = repr(offset)
+    return resp
 
 
 def run_files(cfg: Config, exp_id: str, run_id: str) -> Tuple[str, Dict[str, Any], bool]:
