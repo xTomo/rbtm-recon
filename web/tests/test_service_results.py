@@ -258,3 +258,59 @@ def test_volume3d_errors(service):
     assert client.get('/results/{}/volume3d'.format(EXP)).status_code == 403
     os.remove(os.path.join(cfg.reconstruction_dir(EXP), doc['binned'][0]['raw']))
     assert client.get('/results/{}/volume3d'.format(EXP), headers=HEADERS).status_code == 404
+
+
+def test_view3d_html(service):
+    """3D-вид в HTML: сервис вставляет в оболочку объём — тот же, что отдаёт volume3d, — и кладёт файл
+    view3d-<run_id>.html в каталог результата; файл виден в списке и скачивается; повтор заменяет файл."""
+    import base64
+    import re
+    client, cfg, _, doc = service
+    shell = ('<!doctype html><title>3D</title><script>var VOL = __RBTM_VOLUME__;</script>'
+             '<p>Образец «обр 1»</p>')
+    r = client.post('/results/{}/view3d-html'.format(EXP), data=shell.encode('utf-8'),
+                    headers=dict(HEADERS, **{'Content-Type': 'text/html; charset=utf-8'}))
+    assert r.status_code == 201, r.get_data(as_text=True)
+    name = r.get_json()['name']
+    assert name == 'view3d-run1.html'
+    path = os.path.join(cfg.reconstruction_dir(EXP), name)
+    with open(path, encoding='utf-8') as fh:
+        html = fh.read()
+    assert r.get_json()['size'] == os.path.getsize(path)
+    assert '__RBTM_VOLUME__' not in html and 'Образец «обр 1»' in html
+    payload = json.loads(re.search(r'var VOL = (.*);</script>', html).group(1))
+    vol = client.get('/results/{}/volume3d'.format(EXP), headers=HEADERS)
+    arr, meta = decode(vol)
+    codes = np.frombuffer(base64.b64decode(payload['b64']), np.uint8).reshape(payload['k'], payload['h'], payload['w'])
+    assert codes.shape == arr.shape
+    assert np.allclose(codes * payload['scale'] + payload['offset'], arr, rtol=0, atol=1e-6)
+    assert payload['meta']['run_id'] == 'run1' and payload['meta']['binning'] == meta['binning']
+    assert payload['scale'] == pytest.approx(float(vol.headers['X-Scale']))
+
+    info = json.loads(get(client, '/results/{}'.format(EXP))[1])
+    assert name in [f['name'] for f in info['files']]
+    r, data = get(client, '/results/{}/file/{}'.format(EXP, name))
+    assert r.status_code == 200 and data.decode('utf-8') == html and 'attachment' in r.headers['Content-Disposition']
+
+    # повтор — тот же файл заменяется, временных не остаётся
+    r = client.post('/results/{}/view3d-html'.format(EXP), data=shell.replace('3D', '3D-2').encode('utf-8'),
+                    headers=HEADERS)
+    assert r.status_code == 201
+    assert sorted(n for n in os.listdir(cfg.reconstruction_dir(EXP)) if n.startswith('view3d-')) == [name]
+    with open(path, encoding='utf-8') as fh:
+        assert '3D-2' in fh.read()
+
+
+def test_view3d_html_errors(service):
+    client, cfg, _, doc = service
+    url = '/results/{}/view3d-html'.format(EXP)
+    for body in (b'', b'<html>no mark</html>', b'__RBTM_VOLUME__ __RBTM_VOLUME__', b'\xff\xfe__RBTM_VOLUME__',
+                 b'__RBTM_VOLUME__' + b' ' * (2 * 1024 * 1024)):
+        assert client.post(url, data=body, headers=HEADERS).status_code == 400, body[:30]
+    assert client.post(url, data=b'__RBTM_VOLUME__').status_code == 403            # без токена
+    assert client.post('/results/none/view3d-html', data=b'__RBTM_VOLUME__', headers=HEADERS).status_code == 404
+    assert not [n for n in os.listdir(cfg.reconstruction_dir(EXP)) if n.startswith('view3d-')]
+    # чужие html в каталоге результата по-прежнему не отдаются
+    with open(os.path.join(cfg.reconstruction_dir(EXP), 'view3d-x.html.bak'), 'w') as fh:
+        fh.write('x')
+    assert get(client, '/results/{}/file/view3d-x.html.bak'.format(EXP))[0].status_code == 404

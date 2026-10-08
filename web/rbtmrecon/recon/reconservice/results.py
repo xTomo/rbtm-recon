@@ -5,7 +5,8 @@
 | GET /results/<id>                     | JSON: опубликованный ``result.json``, история (``history/*/result.json``: run_id, created, recipe_sha256), список доступных файлов; 404 — результата движка нет |
 | GET /results/<id>/slice?axis=z|y|x&i=&max_px= | binary uint16: срез копии с наибольшим биннингом из ``result.json['binned']`` (memmap, без чтения объёма целиком); окно квантования — ``stats.p0_1``/``p99_9`` результата; X-Meta: axis, i, n, binning, voxel_mm |
 | GET /results/<id>/volume3d?max_voxels=&max_side= | binary uint8 (nz, ny, nx): копия с наибольшим биннингом, уменьшенная ещё в f раз (среднее по кубам f×f×f, неполные кубы у краёв — по тому, что есть) так, чтобы вокселей было ≤ max_voxels и сторона ≤ max_side; окно квантования — как у среза; кэш в ``cfg.view3d_dir(id)``; X-Meta: binning (полный: копия × f), source_binning, downsample (f), source_shape, voxel_mm, window, run_id |
-| GET /results/<id>/file/<name>         | файл потоком (as_attachment): только ``recipe.json``, ``result.json`` и файлы копий с биннингом (raw, .size, .hx) из ``result.json``; полный объём через сервис не отдаётся (он доступен как раньше, через ``/reconstruct/static``) |
+| POST /results/<id>/view3d-html?max_voxels=&max_side= | тело — HTML-оболочка 3D-вида из студии (text/html, UTF-8, ≤ 2 МБ) с одной меткой ``__RBTM_VOLUME__``; сервис ставит на её место JSON объёма — тот же, что отдаёт ``volume3d`` с теми же пределами (``{w, h, k, scale, offset, meta, b64}``, b64 — uint8 (nz, ny, nx) в base64) — и пишет ``view3d-<run_id>.html`` в каталог результата (повторное сохранение того же запуска заменяет файл); 201 ``{name, size}`` |
+| GET /results/<id>/file/<name>         | файл потоком (as_attachment): только ``recipe.json``, ``result.json``, файлы копий с биннингом (raw, .size, .hx) из ``result.json`` и сохранённые 3D-виды ``view3d-<run_id>.html``; полный объём через сервис не отдаётся (он доступен как раньше, через ``/reconstruct/static``) |
 | GET /results/<id>/recipes/<run_id>    | JSON: рецепт запуска — ``current`` (опубликованный) или из истории (``history/<run_id>/recipe.json``): ``{exp_id, run_id, created, recipe_sha256, current, recipe}``; ``?download=1`` — тот же ``recipe.json`` файлом (``<id>.<run_id>.recipe.json``); 404 — запуска или его рецепта нет |
 
 ``GET /results/<id>``: ``{exp_id, dir, result, history: [{run_id, created, recipe_sha256, has_recipe}] (новые первыми),
@@ -28,11 +29,13 @@ files: [{name, size}], full: [{name, rel, size}]}``; ``dir`` — каталог 
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import math
 import mmap
 import os
+import re
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -80,9 +83,21 @@ def history(cfg: Config, exp_id: str) -> List[Dict[str, Any]]:
     return items
 
 
-def allowed_files(doc: Dict[str, Any]) -> List[str]:
-    """Белый список файлов для скачивания: рецепт, result.json и файлы копий с биннингом."""
-    return [publish.RECIPE, publish.RESULT] + publish.binned_files(doc)
+#: сохранённый 3D-вид запуска (POST view3d-html): имя по run_id — файл не путается с видом другого запуска
+VIEW3D_HTML_RE = re.compile(r'view3d-[A-Za-z0-9_-]{1,64}\.html\Z')
+
+
+def view3d_html_files(dest: str) -> List[str]:
+    """Сохранённые 3D-виды в каталоге результата (публикация нового запуска их не трогает: имён нет в result.json)."""
+    if not os.path.isdir(dest):
+        return []
+    return sorted(n for n in os.listdir(dest) if VIEW3D_HTML_RE.match(n) and os.path.isfile(os.path.join(dest, n)))
+
+
+def allowed_files(doc: Dict[str, Any], dest: Optional[str] = None) -> List[str]:
+    """Белый список файлов для скачивания: рецепт, result.json, файлы копий с биннингом и (если указан каталог
+    результата dest) сохранённые 3D-виды."""
+    return [publish.RECIPE, publish.RESULT] + publish.binned_files(doc) + (view3d_html_files(dest) if dest else [])
 
 
 def largest_binned(cfg: Config, exp_id: str, doc: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
@@ -137,7 +152,7 @@ def result_info(exp_id):
     doc = load_result(cfg, exp_id)
     dest = cfg.reconstruction_dir(exp_id)
     files = []
-    for name in allowed_files(doc):
+    for name in allowed_files(doc, dest):
         path = os.path.join(dest, name)
         if os.path.isfile(path):
             files.append({'name': name, 'size': os.path.getsize(path)})
@@ -280,10 +295,8 @@ def _view3d_volume(cfg: Config, exp_id: str, doc: Dict[str, Any], b: Dict[str, A
     return codes, scale, offset
 
 
-@bp.get('/<exp_id>/volume3d')
-def result_volume3d(exp_id):
-    cfg = _cfg()
-    exp_id = auth.valid_exp_id(exp_id)
+def _view3d_request(cfg: Config, exp_id: str):
+    """Объём 3D-вида по пределам из query (max_voxels, max_side): (result.json, коды uint8, scale, offset, meta)."""
     max_voxels = request.args.get('max_voxels', type=int) or VIEW3D_MAX_VOXELS
     max_side = request.args.get('max_side', type=int) or VIEW3D_MAX_SIDE
     if not 64 ** 3 <= max_voxels <= VIEW3D_MAX_VOXELS_LIMIT:
@@ -302,6 +315,14 @@ def result_volume3d(exp_id):
     meta = {'binning': factor * f, 'source_binning': factor, 'downsample': f, 'source_shape': list(shape),
             'voxel_mm': float(voxel) * factor * f if voxel else None, 'window': list(_window(doc)),
             'run_id': doc.get('run_id')}
+    return doc, codes, scale, offset, meta
+
+
+@bp.get('/<exp_id>/volume3d')
+def result_volume3d(exp_id):
+    cfg = _cfg()
+    exp_id = auth.valid_exp_id(exp_id)
+    _, codes, scale, offset, meta = _view3d_request(cfg, exp_id)
     resp = binary.array_response(codes, quantized=False, meta=meta)
     resp.headers['X-Scale'] = repr(scale)
     resp.headers['X-Offset'] = repr(offset)
@@ -343,12 +364,62 @@ def result_recipe(exp_id, run_id):
                     'recipe': publish.read_json(path)})
 
 
+#: метка в HTML-оболочке 3D-вида, на место которой встаёт JSON объёма; предел оболочки (код вида и настройки)
+VIEW3D_HTML_MARK = '__RBTM_VOLUME__'
+VIEW3D_HTML_MAX_SHELL = 2 * 1024 * 1024
+
+
+def view3d_html_name(run_id: Any) -> str:
+    return 'view3d-{}.html'.format(run_id if publish.safe_run_id(run_id) else 'current')
+
+
+def view3d_volume_json(codes: np.ndarray, scale: float, offset: float, meta: Dict[str, Any]) -> str:
+    """JSON объёма для вставки в <script>: «</» экранируется, чтобы строка не закрыла тег."""
+    nz, ny, nx = codes.shape
+    data = np.ascontiguousarray(codes, dtype=np.uint8).tobytes()
+    payload = {'w': int(nx), 'h': int(ny), 'k': int(nz), 'scale': float(scale), 'offset': float(offset),
+               'meta': meta, 'b64': base64.b64encode(data).decode('ascii')}
+    return json.dumps(payload, ensure_ascii=False).replace('</', '<\\/')
+
+
+@bp.post('/<exp_id>/view3d-html')
+def result_view3d_html(exp_id):
+    """Сохранить 3D-вид в HTML: оболочка из студии + объём (тот же, что у volume3d) → view3d-<run_id>.html."""
+    cfg = _cfg()
+    exp_id = auth.valid_exp_id(exp_id)
+    raw = request.get_data(cache=False)
+    if not raw or len(raw) > VIEW3D_HTML_MAX_SHELL:
+        raise ValueError('нужна HTML-оболочка 3D-вида до {} байт'.format(VIEW3D_HTML_MAX_SHELL))
+    try:
+        shell = raw.decode('utf-8')
+    except UnicodeDecodeError:
+        raise ValueError('оболочка 3D-вида — не UTF-8') from None
+    if shell.count(VIEW3D_HTML_MARK) != 1:
+        raise ValueError('в оболочке 3D-вида должна быть ровно одна метка {}'.format(VIEW3D_HTML_MARK))
+    doc, codes, scale, offset, meta = _view3d_request(cfg, exp_id)
+    html = shell.replace(VIEW3D_HTML_MARK, view3d_volume_json(codes, scale, offset, meta), 1)
+    dest = cfg.reconstruction_dir(exp_id)
+    name = view3d_html_name(doc.get('run_id'))
+    path = os.path.join(dest, name)
+    tmp = path + '.tmp-{}'.format(os.getpid())
+    try:
+        with open(tmp, 'w', encoding='utf-8', newline='\n') as fh:
+            fh.write(html)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    size = os.path.getsize(path)
+    logger.info('%s: 3D-вид сохранён в %s (%d байт, пользователь %s)', exp_id, name, size, auth.current_user())
+    return jsonify({'name': name, 'size': size}), 201
+
+
 @bp.get('/<exp_id>/file/<name>')
 def result_file(exp_id, name):
     cfg = _cfg()
     exp_id = auth.valid_exp_id(exp_id)
     doc = load_result(cfg, exp_id)
-    if name not in allowed_files(doc):
+    if name not in allowed_files(doc, cfg.reconstruction_dir(exp_id)):
         raise FileNotFoundError('файл {} недоступен'.format(name))
     path = os.path.join(cfg.reconstruction_dir(exp_id), name)
     if not os.path.isfile(path):
